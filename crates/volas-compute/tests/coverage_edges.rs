@@ -173,9 +173,10 @@ fn atr_resume_one_guards_and_matches_vec_resume() {
     assert!(ind::atr_resume_one(&h, &l, &c, 14, 1, &[], &mut n).is_none());
     assert!(ind::atr_resume_one(&h, &l, &c, 14, 1, &[5.0], &mut []).is_none());
     assert!(ind::atr_resume_one(&h, &l, &c, 14, 3, &[5.0], &mut n).is_none());
-    // The scalar step is bit-identical to the two-`Vec` `atr_resume`'s single step —
+    // The scalar step is bit-identical to the buffer-appending `atr_resume`'s single step —
     // the value and the advanced state.
-    let (tail, st) = ind::atr_resume(&h, &l, &c, 14, 2, &[5.0]).unwrap();
+    let mut tail = Vec::new();
+    let st = ind::atr_resume(&h, &l, &c, 14, 2, &[5.0], &mut tail).unwrap();
     let (v, next) = one(&[5.0], |n| ind::atr_resume_one(&h, &l, &c, 14, 2, &[5.0], n));
     assert_eq!(v.unwrap().to_bits(), tail[0].to_bits());
     assert_eq!(next, st);
@@ -194,14 +195,16 @@ fn rsi_cmo_resume_one_guards_and_match_vec_resume() {
     assert!(ind::cmo_resume_one(&c, 14, 1, &[1.0], &mut n).is_none());
     assert!(ind::cmo_resume_one(&c, 14, 1, &[1.0, 1.0], &mut [0.0]).is_none());
     assert!(ind::cmo_resume_one(&c, 14, 4, &[1.0, 1.0], &mut n).is_none());
-    // The scalar step is bit-identical to the two-`Vec` resume's single step — both the
+    // The scalar step is bit-identical to the buffer-appending resume's single step — both the
     // value and the advanced state the next row continues from.
     let bits = |v: &[f64]| v.iter().map(|x| x.to_bits()).collect::<Vec<_>>();
     let c3 = &c[..3];
-    let (rt, rs) = ind::rsi_resume(c3, 14, 2, &[0.8, 0.5]).unwrap();
+    let mut rt = Vec::new();
+    let rs = ind::rsi_resume(c3, 14, 2, &[0.8, 0.5], &mut rt).unwrap();
     let (rv, rstate) = one(&[0.8, 0.5], |n| ind::rsi_resume_one(&c, 14, 2, &[0.8, 0.5], n));
     assert_eq!((rv.unwrap().to_bits(), bits(&rstate)), (rt[0].to_bits(), bits(&rs)));
-    let (ct, cs) = ind::cmo_resume(c3, 14, 2, &[0.8, 0.5]).unwrap();
+    let mut ct = Vec::new();
+    let cs = ind::cmo_resume(c3, 14, 2, &[0.8, 0.5], &mut ct).unwrap();
     let (cv, cstate) = one(&[0.8, 0.5], |n| ind::cmo_resume_one(&c, 14, 2, &[0.8, 0.5], n));
     assert_eq!((cv.unwrap().to_bits(), bits(&cstate)), (ct[0].to_bits(), bits(&cs)));
     // Degenerate windows: RSI flat-loss → 100, CMO flat-window → 0.
@@ -230,9 +233,9 @@ fn scalar_resume_one_guards_and_inline_branches() {
     assert!(ind::t3_resume_one(&d, 5, 0.7, 1, &[1.0; 5], &mut n[..6]).is_none());
     assert!(ind::t3_resume_one(&d, 5, 0.7, 60, &[1.0; 6], &mut n[..6]).is_none());
     assert!(ind::kama_resume_one(&d, 5, 5, &s2, &mut n[..2]).is_none()); // row <= period
-    assert!(ind::macd_resume_one(&c, 12, 26, 0, &s2, &mut n[..2]).is_none());
+    assert!(ind::macd_resume_one(&c, 12, 26, 0, &s2, &mut n[..2]).is_some());
     assert!(
-        ind::macd_signal_resume_one(&c, 12, 26, 9, false, 0, &[1.0; 3], &mut n[..3]).is_none()
+        ind::macd_signal_resume_one(&c, 12, 26, 9, false, 0, &[1.0; 3], &mut n[..3]).is_some()
     );
     assert!(ind::sar_resume_one(&h, &l, 0.02, 0.2, 1, &[1.0; 6], &mut n[..6]).is_none());
     assert!(ind::sar_resume_one(&h, &l, 0.02, 0.2, 2, &[1.0; 5], &mut n[..6]).is_none());

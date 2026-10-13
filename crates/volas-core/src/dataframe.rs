@@ -27,15 +27,20 @@ pub struct Reach {
     pub history: History,
 }
 
+/// The directive a cached column computes, bound by the directive engine and opaque to
+/// the core: kept in the column's metadata — carried through clones and contiguous
+/// slices with it — so a refresh continues exactly what was cached instead of re-reading
+/// the column's name.
+pub type Directive = Arc<dyn std::any::Any + Send + Sync>;
+
 /// Metadata for a materialized (cached) directive column: the directive that
 /// produced it, its lookback, and how many leading rows currently hold valid
 /// values. After an `append`, the new rows are stale (NaN) and `valid_rows` lags
 /// `height` until `fulfill` recomputes the tail.
 #[derive(Clone, Debug)]
 pub struct ComputedMeta {
-    // NB: the directive string is NOT stored here — a computed column's canonical
-    // directive is *identical* to its column name (the `computed` map key), so callers
-    // use the name directly. Storing it would be a redundant per-bar / per-slice clone.
+    /// The bound directive the column computes (its canonical name is the column's).
+    pub directive: Directive,
     /// The rows the column reads around its own: lookback, resume and continuation.
     pub reach: Reach,
     /// Rows `[0, valid_rows)` currently hold valid values.
@@ -576,6 +581,7 @@ impl DataFrame {
                 df.computed.insert(
                     name.clone(),
                     ComputedMeta {
+                        directive: Arc::clone(&meta.directive),
                         reach: meta.reach,
                         valid_rows: valid,
                         state: carried,

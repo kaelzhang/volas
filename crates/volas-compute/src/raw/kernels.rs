@@ -27,6 +27,12 @@ use std::borrow::Cow;
 /// NaN is NaN.
 #[inline]
 pub fn sma(data: ArrayView1<f64>, period: usize, origin: usize) -> Array1<f64> {
+    sma_pass(data, period, origin, &mut ())
+}
+
+/// SMA batch pass with optional terminal-state publication.
+#[inline]
+pub fn sma_pass<S: crate::pass::StateSink>(data: ArrayView1<f64>, period: usize, origin: usize, states: &mut S) -> Array1<f64> {
     let n = data.len();
     if period == 0 || period > n {
         return Array1::from_elem(n, f64::NAN);
@@ -64,8 +70,9 @@ pub fn sma(data: ArrayView1<f64>, period: usize, origin: usize) -> Array1<f64> {
             if i + 1 >= start + period {
                 out.push(sum.mean(pf));
             }
+            states.record(i, n, || Slide::state([sum], period.min(i + 1).saturating_sub(i + 1 - start), origin + i + 1));
         }
-        if clean && sum.value().is_finite() {
+        if clean && sum.value().is_finite() && (!S::CAPTURE || start < n.saturating_sub(1)) {
             return Array1::from_vec(out);
         }
     }
@@ -73,7 +80,15 @@ pub fn sma(data: ArrayView1<f64>, period: usize, origin: usize) -> Array1<f64> {
     // finite rows; a window holding a non-finite row takes its own mean directly
     // (NaN for a NaN, ±inf for an infinity), so a bad row never outlives its window.
     let mut slide = Slide::<1>::at(origin);
-    (0..n).map(|i| sma_row(&mut slide, period, i, |j| data[j])).collect()
+    // Keep the value-only iterator free of the capturing closure environment.
+    if !S::CAPTURE {
+        return (0..n).map(|i| sma_row(&mut slide, period, i, |j| data[j])).collect();
+    }
+    (0..n).map(|i| {
+        let value = sma_row(&mut slide, period, i, |j| data[j]);
+        states.record(i, n, || { let mut v = vec![0.0; Slide::<1>::STATE]; slide.write_state(&mut v); v });
+        value
+    }).collect()
 }
 
 /// The seed of an SMA-seeded smoother over `data` (TA-Lib's EMA / Wilder shape): the row
@@ -107,14 +122,21 @@ pub(crate) fn sma_seed(data: impl Iterator<Item = f64>, period: usize) -> Option
 /// `NaN`. The `step` is one of [`smoothing`]'s TA-Lib steps.
 #[inline]
 fn sma_seeded(data: ArrayView1<f64>, period: usize, step: impl Fn(f64, f64) -> f64) -> Array1<f64> {
+    sma_seeded_pass(data, period, step, &mut ())
+}
+
+/// Seeded smoother publishing its terminal states from the value loop.
+pub fn sma_seeded_pass(data: ArrayView1<f64>, period: usize, step: impl Fn(f64, f64) -> f64, states: &mut impl crate::pass::StateSink) -> Array1<f64> {
     let n = data.len();
     let mut out = Array1::from_elem(n, f64::NAN);
     let Some((si, seed)) = sma_seed(data.iter().copied(), period) else { return out };
     let mut prev = seed;
     out[si] = prev;
+    states.record(si, n, || vec![prev]);
     for i in (si + 1)..n {
         prev = step(prev, data[i]);
         out[i] = prev;
+        states.record(i, n, || vec![prev]);
     }
     out
 }

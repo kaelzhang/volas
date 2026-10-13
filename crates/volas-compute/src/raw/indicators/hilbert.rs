@@ -15,6 +15,8 @@
 
 mod engine;
 use engine::*;
+/// Serialized MAMA kernel words, owned by the Hilbert family.
+pub const MAMA_STATE_LEN: usize = CORE_STATE_LEN + 3;
 use crate::raw::smoothing::Weighted;
 
 /// `HT_DCPERIOD`: the smoothed dominant-cycle period.
@@ -182,6 +184,11 @@ pub fn mama(price: &[f64], fast_limit: f64, slow_limit: f64) -> (Vec<f64>, Vec<f
 /// updates both MAMA accumulators exactly like TA-Lib; it only skips the sibling
 /// output vector that the caller will discard.
 pub fn mama_line(price: &[f64], fast_limit: f64, slow_limit: f64, want_fama: bool) -> Vec<f64> {
+    mama_pass(price, fast_limit, slow_limit, want_fama, &mut ())
+}
+
+/// MAMA batch values and the same terminal state used by row continuation.
+pub fn mama_pass(price: &[f64], fast_limit: f64, slow_limit: f64, want_fama: bool, states: &mut impl crate::pass::StateSink) -> Vec<f64> {
     let n = price.len();
     let mut out = vec![f64::NAN; n];
     if n <= PERIOD_START {
@@ -202,6 +209,7 @@ pub fn mama_line(price: &[f64], fast_limit: f64, slow_limit: f64, want_fama: boo
             &mut fama,
             &mut prev_phase,
         );
+        states.record(i, n, || { let mut v = core.serialize(); v.extend([mama, fama, prev_phase]); v });
         if i >= LB_PERIOD {
             out[i] = if want_fama { fama } else { mama };
         }
@@ -268,37 +276,41 @@ pub fn ht_core_state(price: &[f64]) -> Option<Vec<f64>> {
 /// Resume `HT_DCPERIOD` over `[from, n)`: step the core, emit `smooth_period`,
 /// masked under `LB_PERIOD` like the full compute (a bar index there is reachable
 /// once missing rows shift the warm-up).
+/// Appends rows `[from, n)` to `out` and returns the carried state.
 pub fn ht_dcperiod_resume(
     price: &[f64],
     from: usize,
     state: &[f64],
-) -> Option<(Vec<f64>, Vec<f64>)> {
+    out: &mut Vec<f64>,
+) -> Option<Vec<f64>> {
     let mut core = ht_core_resume_setup(state, from, PERIOD_START)?;
     let n = price.len();
-    let mut out = Vec::with_capacity(n.saturating_sub(from));
+    out.reserve(n.saturating_sub(from));
     for today in from..n {
         let p = core.step(price, today).smooth_period;
         out.push(masked(today, LB_PERIOD, p));
     }
-    Some((out, core.serialize()))
+    Some(core.serialize())
 }
 
 /// Resume `HT_PHASOR` over `[from, n)`, emitting the in-phase (`quad == false`) or
 /// quadrature (`quad == true`) component.
+/// Appends rows `[from, n)` to `out` and returns the carried state.
 pub fn ht_phasor_resume(
     price: &[f64],
     quad: bool,
     from: usize,
     state: &[f64],
-) -> Option<(Vec<f64>, Vec<f64>)> {
+    out: &mut Vec<f64>,
+) -> Option<Vec<f64>> {
     let mut core = ht_core_resume_setup(state, from, PERIOD_START)?;
     let n = price.len();
-    let mut out = Vec::with_capacity(n.saturating_sub(from));
+    out.reserve(n.saturating_sub(from));
     for today in from..n {
         let b = core.step(price, today);
         out.push(masked(today, LB_PERIOD, if quad { b.q1 } else { b.i1 }));
     }
-    Some((out, core.serialize()))
+    Some(core.serialize())
 }
 
 /// Final state for `HT_DCPHASE` / `HT_SINE`: the core followed by the [`DcPhase`]
@@ -327,11 +339,13 @@ pub fn ht_dcphase_state(price: &[f64]) -> Option<Vec<f64>> {
 
 /// Resume `HT_DCPHASE` over `[from, n)`: step the core, push each smoothed bar
 /// through the carried [`DcPhase`], emit the phase (masked under `LB_PHASE`).
+/// Appends rows `[from, n)` to `out` and returns the carried state.
 pub fn ht_dcphase_resume(
     price: &[f64],
     from: usize,
     state: &[f64],
-) -> Option<(Vec<f64>, Vec<f64>)> {
+    out: &mut Vec<f64>,
+) -> Option<Vec<f64>> {
     let mut core = ht_core_resume_setup(state, from, PHASE_START)?;
     let mut off = CORE_STATE_LEN;
     if state.len() < CORE_STATE_LEN + DCPHASE_STATE_LEN {
@@ -339,14 +353,14 @@ pub fn ht_dcphase_resume(
     }
     let mut dc = DcPhase::from_state(state, &mut off)?;
     let n = price.len();
-    let mut out = Vec::with_capacity(n.saturating_sub(from));
+    out.reserve(n.saturating_sub(from));
     for today in from..n {
         let b = core.step(price, today);
         out.push(masked(today, LB_PHASE, dc.push(b.smoothed, b.smooth_period)));
     }
     let mut v = core.serialize();
     dc.push_state(&mut v);
-    Some((out, v))
+    Some(v)
 }
 
 /// Final state for `HT_SINE` — identical to [`ht_dcphase_state`] (sine/leadSine are
@@ -357,12 +371,14 @@ pub fn ht_sine_state(price: &[f64]) -> Option<Vec<f64>> {
 
 /// Resume `HT_SINE` over `[from, n)`, emitting `sin(phase)` (`lead == false`) or
 /// `sin(phase + 45°)` (`lead == true`).
+/// Appends rows `[from, n)` to `out` and returns the carried state.
 pub fn ht_sine_resume(
     price: &[f64],
     lead: bool,
     from: usize,
     state: &[f64],
-) -> Option<(Vec<f64>, Vec<f64>)> {
+    out: &mut Vec<f64>,
+) -> Option<Vec<f64>> {
     let mut core = ht_core_resume_setup(state, from, PHASE_START)?;
     let mut off = CORE_STATE_LEN;
     if state.len() < CORE_STATE_LEN + DCPHASE_STATE_LEN {
@@ -370,7 +386,7 @@ pub fn ht_sine_resume(
     }
     let mut dc = DcPhase::from_state(state, &mut off)?;
     let n = price.len();
-    let mut out = Vec::with_capacity(n.saturating_sub(from));
+    out.reserve(n.saturating_sub(from));
     for today in from..n {
         let b = core.step(price, today);
         let phase = dc.push(b.smoothed, b.smooth_period);
@@ -383,7 +399,7 @@ pub fn ht_sine_resume(
     }
     let mut v = core.serialize();
     dc.push_state(&mut v);
-    Some((out, v))
+    Some(v)
 }
 
 /// Final state for `HT_TRENDLINE`: the core followed by the [`ITrend`] triple. The
@@ -413,11 +429,13 @@ pub fn ht_trendline_state(price: &[f64]) -> Option<Vec<f64>> {
 /// Resume `HT_TRENDLINE` over `[from, n)`: step the core and the carried [`ITrend`].
 /// Guarded by `from >= SMOOTH_PRICE_SIZE` so the raw-price window is fully in range
 /// (and the dominant-cycle window is complete) on a head-dropping slice.
+/// Appends rows `[from, n)` to `out` and returns the carried state.
 pub fn ht_trendline_resume(
     price: &[f64],
     from: usize,
     state: &[f64],
-) -> Option<(Vec<f64>, Vec<f64>)> {
+    out: &mut Vec<f64>,
+) -> Option<Vec<f64>> {
     if from < SMOOTH_PRICE_SIZE {
         return None;
     }
@@ -425,14 +443,14 @@ pub fn ht_trendline_resume(
     let mut off = CORE_STATE_LEN;
     let mut itrend = ITrend::from_state(state, &mut off)?;
     let n = price.len();
-    let mut out = Vec::with_capacity(n.saturating_sub(from));
+    out.reserve(n.saturating_sub(from));
     for today in from..n {
         let b = core.step(price, today);
         out.push(masked(today, LB_PHASE, itrend.push(price, today, b.smooth_period)));
     }
     let mut v = core.serialize();
     itrend.push_state(&mut v);
-    Some((out, v))
+    Some(v)
 }
 
 /// `HT_TRENDMODE`'s trend / cycle decision state: the days since the last SineWave
@@ -555,18 +573,21 @@ pub fn ht_trendmode_state(price: &[f64]) -> Option<Vec<f64>> {
 
 /// Resume `HT_TRENDMODE` over `[from, n)` from the carried [`TrendModeRun`], emitting
 /// `0.0` / `1.0`. Guarded by `from >= SMOOTH_PRICE_SIZE` (trendline window).
+/// Appends rows `[from, n)` to `out` and returns the carried state.
 pub fn ht_trendmode_resume(
     price: &[f64],
     from: usize,
     state: &[f64],
-) -> Option<(Vec<f64>, Vec<f64>)> {
+    out: &mut Vec<f64>,
+) -> Option<Vec<f64>> {
     if from < SMOOTH_PRICE_SIZE {
         return None;
     }
     let mut run = TrendModeRun::deserialize(state, from)?;
     let n = price.len();
-    let out = (from..n).map(|today| masked(today, LB_PHASE, run.step(price, today))).collect();
-    Some((out, run.serialize()))
+    out.reserve(n.saturating_sub(from));
+    out.extend((from..n).map(|today| masked(today, LB_PHASE, run.step(price, today))));
+    Some(run.serialize())
 }
 
 /// Final state for `MAMA`/`FAMA`: core ‖ `[mama, fama, prev_phase]`. The adaptive
@@ -638,6 +659,7 @@ fn mama_step(
 
 /// Resume `MAMA`/`FAMA` over `[from, n)`, emitting `mama` (`want_fama == false`) or
 /// `fama` (`want_fama == true`), masked under `LB_PERIOD` like the full compute.
+/// Appends rows `[from, n)` to `out` and returns the carried state.
 pub fn mama_resume(
     price: &[f64],
     fast_limit: f64,
@@ -645,7 +667,8 @@ pub fn mama_resume(
     want_fama: bool,
     from: usize,
     state: &[f64],
-) -> Option<(Vec<f64>, Vec<f64>)> {
+    out: &mut Vec<f64>,
+) -> Option<Vec<f64>> {
     let mut core = ht_core_resume_setup(state, from, PERIOD_START)?;
     if state.len() < CORE_STATE_LEN + 3 {
         return None;
@@ -656,7 +679,7 @@ pub fn mama_resume(
         state[CORE_STATE_LEN + 2],
     );
     let n = price.len();
-    let mut out = Vec::with_capacity(n.saturating_sub(from));
+    out.reserve(n.saturating_sub(from));
     for today in from..n {
         let b = core.step(price, today);
         mama_step(
@@ -674,7 +697,20 @@ pub fn mama_resume(
     v.push(mama);
     v.push(fama);
     v.push(prev_phase);
-    Some((out, v))
+    Some(v)
+}
+
+/// One MAMA/FAMA row written into caller-owned state, with no allocation.
+#[allow(clippy::too_many_arguments)]
+pub fn mama_resume_one(price: &[f64], fast: f64, slow: f64, fama_line: bool, row: usize, state: &[f64], next: &mut [f64]) -> Option<f64> {
+    if state.len() != MAMA_STATE_LEN || next.len() != MAMA_STATE_LEN || row >= price.len() { return None; }
+    let mut core = ht_core_resume_setup(state, row, PERIOD_START)?;
+    let (mut mama, mut fama, mut phase) = (state[CORE_STATE_LEN], state[CORE_STATE_LEN + 1], state[CORE_STATE_LEN + 2]);
+    let bar = core.step(price, row);
+    mama_step(&bar, price[row], fast, slow, &mut mama, &mut fama, &mut phase);
+    core.write_state(&mut next[..CORE_STATE_LEN]);
+    next[CORE_STATE_LEN..].copy_from_slice(&[mama, fama, phase]);
+    Some(masked(row, LB_PERIOD, if fama_line { fama } else { mama }))
 }
 
 

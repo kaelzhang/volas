@@ -35,6 +35,11 @@ pub fn bbw(close: &[f64], period: usize, origin: usize) -> Vec<f64> {
 /// returns `ln(close_t / close_{t-1})` over `period` bars, times `annualization` — the
 /// square root of the bars per year, which the caller derives from the bar's time frame.
 pub fn hv(close: &[f64], period: usize, annualization: f64, origin: usize) -> Vec<f64> {
+    hv_pass(close, period, annualization, origin, &mut ())
+}
+
+/// Batch computation with terminal-state publication.
+pub fn hv_pass<S: crate::pass::StateSink>(close: &[f64], period: usize, annualization: f64, origin: usize, states: &mut S) -> Vec<f64> {
     let n = close.len();
     let mut log_return = Array1::from_elem(n, f64::NAN);
     for i in 1..n {
@@ -42,7 +47,7 @@ pub fn hv(close: &[f64], period: usize, annualization: f64, origin: usize) -> Ve
             log_return[i] = (close[i] / close[i - 1]).ln();
         }
     }
-    let std = kernels::rolling_std(log_return.view(), period, 1, origin);
+    let std = kernels::rolling_mean_std_pass(log_return.view(), period, 1, origin, states).1;
     (&std * annualization).to_vec()
 }
 
@@ -81,14 +86,24 @@ pub fn accbands_middle(close: &[f64], period: usize, origin: usize) -> Vec<f64> 
 
 /// Acceleration Bands upper (TA-Lib ACCBANDS upper) — SMA of the raw upper edge.
 pub fn accbands_upper(high: &[f64], low: &[f64], period: usize, origin: usize) -> Vec<f64> {
+    accbands_upper_pass(high, low, period, origin, &mut ())
+}
+
+/// Batch computation with terminal-state publication.
+pub fn accbands_upper_pass<S: crate::pass::StateSink>(high: &[f64], low: &[f64], period: usize, origin: usize, states: &mut S) -> Vec<f64> {
     let raw = accbands_raw(high, low, true);
-    kernels::sma(av(&raw), period, origin).to_vec()
+    kernels::sma_pass(av(&raw), period, origin, states).to_vec()
 }
 
 /// Acceleration Bands lower (TA-Lib ACCBANDS lower) — SMA of the raw lower edge.
 pub fn accbands_lower(high: &[f64], low: &[f64], period: usize, origin: usize) -> Vec<f64> {
+    accbands_lower_pass(high, low, period, origin, &mut ())
+}
+
+/// Batch computation with terminal-state publication.
+pub fn accbands_lower_pass<S: crate::pass::StateSink>(high: &[f64], low: &[f64], period: usize, origin: usize, states: &mut S) -> Vec<f64> {
     let raw = accbands_raw(high, low, false);
-    kernels::sma(av(&raw), period, origin).to_vec()
+    kernels::sma_pass(av(&raw), period, origin, states).to_vec()
 }
 
 // ---------------------------------------------------------------------------

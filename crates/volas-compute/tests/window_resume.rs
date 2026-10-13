@@ -2,7 +2,7 @@
 //! any prefix, stepped one row at a time over the rest, reproduces the full computation —
 //! on clean data and on data holding missing and infinite rows.
 
-use volas_compute::raw::indicators::{self as ind, BollLine, FiniteMa, LinregLine};
+use volas_compute::raw::indicators::{self as ind, BollLine, MaStage, LinregLine};
 
 const N: usize = 160;
 
@@ -379,19 +379,19 @@ fn a_malformed_state_or_argument_declines() {
     assert!(ind::imi_step(o, c, 9, 5, &[0.0; 6], &mut big[..2]).is_none());
     assert!(ind::imi_step(o, c, 0, 5, &[0.0; 6], &mut big[..6]).is_none());
     assert!(ind::linreg_step(c, 9, LinregLine::Slope, 5, &[0.0; 3], &mut big[..7]).is_none());
-    assert!(ind::stochrsi_final_state(c, 14, 0, false, 3, 0).is_none());
-    assert!(ind::stochrsi_final_state(c, 14, 5, true, 0, 0).is_none());
+    assert!(ind::stochrsi_final_state(c, 14, 0, false, 3, 0, 0).is_none());
+    assert!(ind::stochrsi_final_state(c, 14, 5, true, 0, 0, 0).is_none());
     assert!(ind::ma_step(c, 0, 0, 1, &[0.0; 4], &mut big[..4]).is_none());
-    // a recursive moving-average type is no finite-window stage
-    assert!(FiniteMa::new(5, 1).is_none());
-    assert!(ind::ma_state(c, 5, 1, 0).is_none());
+    // the shared stage supports recursive types too
+    assert!(MaStage::new(5, 1).is_some());
+    assert!(ind::ma_state(c, 5, 1, 0).is_some());
     assert!(ind::ma_step(c, 5, 0, N, &[0.0; 2], &mut big[..2]).is_none());
     assert!(ind::ma_step(c, 5, 0, 1, &short, &mut big[..2]).is_none());
     assert!(ind::ma_step(c, 0, 0, 1, &[0.0; 2], &mut big[..2]).is_none());
     assert!(ind::ma_step(c, 5, 2, 1, &short, &mut big[..4]).is_none());
     assert!(ind::trima_step(c, 6, N, &[0.0; 7], &mut big[..7]).is_none());
     assert!(ind::trima_state(c, 0, 0).is_none());
-    let trima = FiniteMa::new(6, 5).unwrap();
+    let trima = MaStage::new(6, 5).unwrap();
     assert_eq!(trima.reach(), 3);
     assert!(trima.step_chained(1, 0.0, &short, &mut n1).is_none());
     assert!(ind::vwma_step(c, v, 0, 1, &[0.0; 3], &mut big[..3]).is_none());
@@ -476,8 +476,33 @@ fn an_extreme_before_the_frame_is_rebuilt() {
     let lo = ind::minindex_final_state(&low[..5], 3, 0).unwrap();
     assert_eq!((hi[0], lo[0]), (2.0, 2.0));
     // a frame holding rows 3.. (origin 3) resumes at its row 2 (absolute row 5)
-    let (got, _) = ind::maxindex_resume(&data[3..], 3, 2, 3, &hi).unwrap();
+    let mut got = Vec::new();
+    let _ = ind::maxindex_resume(&data[3..], 3, 2, 3, &hi, &mut got).unwrap();
     assert_eq!(got, ind::maxindex(&data, 3, 0)[5..].to_vec());
-    let (got, _) = ind::minindex_resume(&low[3..], 3, 2, 3, &lo).unwrap();
+    let mut got = Vec::new();
+    let _ = ind::minindex_resume(&low[3..], 3, 2, 3, &lo, &mut got).unwrap();
     assert_eq!(got, ind::minindex(&low, 3, 0)[5..].to_vec());
+}
+
+/// TA_MA resolves period one before validating its selector. Every such stage must
+/// carry precisely the SMA state, while an unknown selector at other periods fails.
+#[test]
+fn stage_selector_boundary_preserves_identity_values_and_state() {
+    let data = [3.0, 1.5, -0.0, f64::NAN, f64::INFINITY, 4.25];
+    let sma = MaStage::new(1, 0).unwrap();
+    let bits = |s: &[f64]| s.iter().map(|v| v.to_bits()).collect::<Vec<_>>();
+    for selector in 0..=9 {
+        let stage = MaStage::new(1, selector).unwrap();
+        let (mut state, mut reference) = (stage.initial(0), sma.initial(0));
+        for row in 0..data.len() {
+            let (mut next, mut want) = (state.clone(), reference.clone());
+            let got = stage.step(row, |i| data[i], &state, &mut next).unwrap();
+            let expected = sma.step(row, |i| data[i], &reference, &mut want).unwrap();
+            assert_eq!(got.to_bits(), expected.to_bits(), "selector {selector}, row {row}");
+            assert_eq!(bits(&next), bits(&want), "selector {selector}, state at {row}");
+            (state, reference) = (next, want);
+        }
+    }
+    assert!(MaStage::new(2, 9).is_none());
+    assert!(MaStage::new(5, usize::MAX).is_none());
 }

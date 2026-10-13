@@ -105,6 +105,8 @@ def parse(data: dict) -> dict:
             category = 'api'
         elif name.startswith('test_tf_live'):
             category = 'tf_live'  # volas-only gate rows; not a rendered section
+        elif name.startswith('test_first_cache'):
+            category = 'first_cache'  # volas-only gate rows; not a rendered section
         else:
             category = 'append'
         params = b.get('params') or {}

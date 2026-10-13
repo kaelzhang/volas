@@ -231,7 +231,7 @@
             None,
         )
         .unwrap();
-        h.set_computed("sig", Reach { lookback: 0, resume: 0, continuation: 0, history: History::Window });
+        h.set_computed("sig", std::sync::Arc::new(()), Reach { lookback: 0, resume: 0, continuation: 0, history: History::Window });
         let only_a3 = DataFrame::new(vec!["a".into()], vec![Column::f64(vec![2.0])], None).unwrap();
         h.append(&only_a3).unwrap();
         assert_eq!(h.column("sig").unwrap().as_bool().unwrap(), &[true, false]);
@@ -240,7 +240,7 @@
     #[test]
     fn computed_tail_update_and_dtype_guard() {
         let mut df = sample();
-        df.set_computed("a", Reach { lookback: 1, resume: 0, continuation: 1, history: History::Window });
+        df.set_computed("a", std::sync::Arc::new(()), Reach { lookback: 1, resume: 0, continuation: 1, history: History::Window });
         assert_eq!(df.computed_columns().len(), 1);
         // overwrite the tail of the F64 column "a" with an F64 tail
         df.update_computed_tail("a", 1, &Column::f64(vec![8.0, 9.0]))
@@ -265,7 +265,7 @@
             None,
         )
         .unwrap();
-        df.set_computed("close", Reach { lookback: 11, resume: 0, continuation: 11, history: History::Window });
+        df.set_computed("close", std::sync::Arc::new(()), Reach { lookback: 11, resume: 0, continuation: 11, history: History::Window });
         // A carried EMA state as of row 59.
         df.set_computed_states("close", Some(vec![42.0]), None);
         // A slice keeping >= lookback rows AND ending at `valid_rows` carries the column
@@ -284,7 +284,7 @@
         let too_short = df.slice(55, 60); // 5 rows < 11
         assert!(too_short.computed_columns().is_empty());
         // a column that needs one row past its lookback is kept only with that row
-        df.set_computed("close", Reach { lookback: 11, resume: 0, continuation: 12, history: History::Window });
+        df.set_computed("close", std::sync::Arc::new(()), Reach { lookback: 11, resume: 0, continuation: 12, history: History::Window });
         assert!(df.slice(49, 60).computed_columns().is_empty()); // 11 rows < 12
         assert_eq!(df.slice(48, 60).computed_columns()[0].1.reach.continuation, 12);
     }
@@ -300,7 +300,7 @@
             None,
         )
         .unwrap();
-        df.set_computed("close", Reach { lookback: 2, resume: 0, continuation: 2, history: History::Window });
+        df.set_computed("close", std::sync::Arc::new(()), Reach { lookback: 2, resume: 0, continuation: 2, history: History::Window });
         df
     }
 
@@ -313,7 +313,7 @@
             None,
         )
         .unwrap();
-        df.set_computed("close", Reach { lookback: 2, resume: 0, continuation: 2, history: History::Window });
+        df.set_computed("close", std::sync::Arc::new(()), Reach { lookback: 2, resume: 0, continuation: 2, history: History::Window });
         df.set_computed_states("close", Some(vec![8.0]), Some(vec![7.0]));
         df.append(&DataFrame::new(vec!["x".into()], vec![Column::f64(vec![9.0])], None).unwrap())
             .unwrap();
@@ -335,14 +335,14 @@
             Some(9.0)
         });
         assert_eq!(got, Some(9.0));
-        df2.update_computed_f64_value("close", 9, 9.0).unwrap();
+        df2.update_computed_value("close", 9, 9.0).unwrap();
         assert_eq!((meta(&df2).state, meta(&df2).state_before_last), (Some(vec![9.0]), Some(vec![8.0])));
         // declined: untouched
         assert_eq!(df2.step_computed_state("close", |_, _, _, _| None), None);
         assert_eq!((meta(&df2).state, meta(&df2).state_before_last), (Some(vec![9.0]), Some(vec![8.0])));
         // a Vec resume of one row advances the same way
         let mut df3 = stale_last_row();
-        df3.update_computed_f64_value("close", 9, 9.0).unwrap();
+        df3.update_computed_value("close", 9, 9.0).unwrap();
         df3.advance_computed_state("close", vec![9.0]);
         assert_eq!((meta(&df3).state, meta(&df3).state_before_last), (Some(vec![9.0]), Some(vec![8.0])));
         df3.advance_computed_state("missing", vec![1.0]); // no-op
@@ -362,7 +362,7 @@
         let mut df = stale_last_row();
         // the row is written without advancing the state: the state now describes row 8
         // while the last valid row is 9
-        df.update_computed_f64_value("close", 9, 9.0).unwrap();
+        df.update_computed_value("close", 9, 9.0).unwrap();
         assert_eq!(df.computed_resume_state("close"), None);
         assert_eq!(df.step_computed_state("close", |_, _, _, _| Some(1.0)), None);
         // a later valid write with the state before it is advanced again
@@ -388,14 +388,14 @@
             next[0] = 9.5;
             Some(9.5)
         });
-        df.update_computed_f64_value("close", 9, 9.5).unwrap();
+        df.update_computed_value("close", 9, 9.5).unwrap();
         assert_eq!((meta(&df).state, meta(&df).state_before_last), (Some(vec![9.5]), Some(vec![8.0])));
         // a replacement without a state before it leaves none
         df.set_computed_states("close", Some(vec![9.5]), None);
         df.invalidate_computed_forming_row(9);
         assert_eq!(meta(&df).state, None);
         df.set_column("x", Column::f64(vec![0.0; 10])).unwrap();
-        df.set_computed("x", Reach { lookback: 0, resume: 0, continuation: 0, history: History::Window });
+        df.set_computed("x", std::sync::Arc::new(()), Reach { lookback: 0, resume: 0, continuation: 0, history: History::Window });
         df.invalidate_computed_on_write("x");
         assert_eq!((meta(&df).state, meta(&df).state_before_last), (None, None));
     }
@@ -437,7 +437,7 @@
             None,
         )
         .unwrap();
-        df.set_computed("close", Reach { lookback, resume: 0, continuation: lookback, history: History::Window });
+        df.set_computed("close", std::sync::Arc::new(()), Reach { lookback, resume: 0, continuation: lookback, history: History::Window });
         df
     }
 
@@ -448,17 +448,17 @@
         let mut df = stale_last_row();
         let before = df.column("close").unwrap().clone();
         assert!(df.update_computed_tail("close", 9, &Column::f64(vec![1.0, 2.0])).is_err());
-        assert!(df.update_computed_f64_value("close", 10, 1.0).is_err());
+        assert!(df.update_computed_value("close", 10, 1.0).is_err());
         assert!(df.update_computed_tail("close", usize::MAX, &Column::f64(vec![1.0])).is_err());
         df.invalidate_computed_on_write("x"); // valid_rows 0
-        assert!(df.update_computed_f64_value("close", 5, 1.0).is_err());
+        assert!(df.update_computed_value("close", 5, 1.0).is_err());
         assert!(df.column("close").unwrap().equals(&before));
         assert_eq!(meta(&df).valid_rows, 0);
         // a contiguous write moves the cursor to its end only
         df.update_computed_tail("close", 0, &Column::f64(vec![0.0; 4])).unwrap();
         assert_eq!(meta(&df).valid_rows, 4);
         // an earlier rewrite keeps the cursor
-        df.update_computed_f64_value("close", 1, 7.0).unwrap();
+        df.update_computed_value("close", 1, 7.0).unwrap();
         assert_eq!(meta(&df).valid_rows, 4);
         // a data column has no cursor to move
         df.update_computed_tail("x", 0, &Column::f64(vec![5.0])).unwrap();
@@ -477,7 +477,7 @@
             None,
         )
         .unwrap();
-        df.set_computed("close", Reach { lookback: 11, resume: 0, continuation: 11, history: History::Window });
+        df.set_computed("close", std::sync::Arc::new(()), Reach { lookback: 11, resume: 0, continuation: 11, history: History::Window });
         df.set_computed_states("close", Some(vec![42.0]), None);
         // slice() carries it (continuable, with the recursive state) ...
         assert_eq!(df.slice(40, 60).computed_columns().len(), 1);
@@ -530,7 +530,7 @@
     #[test]
     fn write_cells_drops_computed_status() {
         let mut df = sample();
-        df.set_computed("a", Reach { lookback: 1, resume: 0, continuation: 1, history: History::Window });
+        df.set_computed("a", std::sync::Arc::new(()), Reach { lookback: 1, resume: 0, continuation: 1, history: History::Window });
         assert_eq!(df.computed_columns().len(), 1);
         // a manual write into the cached column drops its computed status
         df.write_one(0, &[0], &Column::f64(vec![7.0]))

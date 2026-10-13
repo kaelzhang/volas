@@ -49,10 +49,12 @@ fn atr_and_natr_captures_and_both_resumes_match_full_at_every_split() {
                     let Some(state) = ind::atr_final_state(&h[..from], &l[..from], &c[..from], period) else {
                         continue;
                     };
-                    let (tail, end) = ind::atr_resume(&h, &l, &c, period, from, &state).unwrap();
+                    let mut tail = Vec::new();
+                    let end = ind::atr_resume(&h, &l, &c, period, from, &state, &mut tail).unwrap();
                     same(&tail, &full[from..]);
                     same(&end, &ind::atr_final_state(&h, &l, &c, period).unwrap());
-                    let (tail, nend) = ind::natr_resume(&h, &l, &c, period, from, &state).unwrap();
+                    let mut tail = Vec::new();
+                    let nend = ind::natr_resume(&h, &l, &c, period, from, &state, &mut tail).unwrap();
                     same(&tail, &normalized[from..]);
                     same(&nend, &end);
                     let mut live = state;
@@ -76,7 +78,8 @@ fn smma_one_preserves_input_and_resumes_after_infinity() {
     same(&ind::smma(&x, 1), &x);
     for from in 1..x.len() {
         let state = ind::smma_final_state(&x[..from], 1).unwrap();
-        let (tail, end) = ind::smma_resume(&x, 1, from, &state);
+        let mut tail = Vec::new();
+        let end = ind::smma_resume(&x, 1, from, &state, &mut tail);
         same(&tail, &x[from..]);
         same(&end, &[-0.]);
         let mut live = state;

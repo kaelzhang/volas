@@ -54,13 +54,13 @@ macro_rules! on_complete_rows {
         -> $ret:ty $(= $total:ident)?;)*) => {$(
         #[doc = concat!("[`raw::", stringify!($name), "`] over the complete rows of its inputs: ")]
         #[doc = "`state` is the state as of the last complete row before `from`; a missing"]
-        #[doc = "new row is NaN."]
+        #[doc = "new row is NaN. Appends rows `[from, n)` to `out` and returns the state."]
         #[allow(clippy::too_many_arguments)] // the raw function's own signature
-        pub fn $name($($s: &[f64],)+ $($p: $t,)* $from: usize, $state: &[f64]) -> $ret {
-            let out = resume_on_complete_rows(&[$($s),+], $from, $state, |rows, $from| {
-                on_complete_rows!(@wrap $($total)? call_raw!(rows, $name($($s),+; $($p,)* $from, $state)))
+        pub fn $name($($s: &[f64],)+ $($p: $t,)* $from: usize, $state: &[f64], out: &mut Vec<f64>) -> $ret {
+            let next = resume_on_complete_rows(&[$($s),+], $from, $state, out, |rows, $from, out| {
+                on_complete_rows!(@wrap $($total)? call_raw!(rows, $name($($s),+; $($p,)* $from, $state, out)))
             });
-            on_complete_rows!(@unwrap $($total)? out)
+            on_complete_rows!(@unwrap $($total)? next)
         }
     )*};
     (step: $($name:ident($($s:ident),+; $($p:ident: $t:ty),*))*) => {$(
@@ -157,6 +157,8 @@ on_complete_rows! { series:
 }
 
 on_complete_rows! { state:
+    crsi_final_state(close; rp: usize, sp: usize, rank: usize) -> Option<Vec<f64>>;
+    stoch_momentum_final_state(high, low, close; k: usize, d: usize, signal: Option<usize>) -> Option<Vec<f64>>;
     ad_final_state(high, low, close, volume) -> Option<Vec<f64>>;
     adosc_final_state(high, low, close, volume; fast: usize, slow: usize) -> Option<Vec<f64>>;
     adx_final_state(high, low, close; period: usize) -> Option<Vec<f64>>;
@@ -197,7 +199,7 @@ on_complete_rows! { state:
         accel_max_short: f64) -> Option<Vec<f64>>;
     smma_final_state(data; period: usize) -> Option<Vec<f64>>;
     stochrsi_final_state(close; rsi_period: usize, fastk_period: usize, is_d: bool,
-        fastd_period: usize, origin: usize) -> Option<Vec<f64>>;
+        fastd_period: usize, matype: usize, origin: usize) -> Option<Vec<f64>>;
     supertrend_final_state(high, low, close; period: usize, mult: f64) -> Option<Vec<f64>>;
     t3_final_state(data; period: usize) -> Option<Vec<f64>>;
     tema_final_state(data; period: usize) -> Option<Vec<f64>>;
@@ -207,63 +209,64 @@ on_complete_rows! { state:
 }
 
 on_complete_rows! { resume:
-    ad_resume(high, low, close, volume; ; from, state) -> (Vec<f64>, Vec<f64>) = total;
-    adosc_resume(high, low, close, volume; fast: usize, slow: usize; from, state) -> (Vec<f64>,
-        Vec<f64>) = total;
-    adx_resume(high, low, close; period: usize; from, state) -> Option<(Vec<f64>, Vec<f64>)>;
-    adxr_resume(high, low, close; period: usize; from, state) -> Option<(Vec<f64>, Vec<f64>)>;
-    asi_resume(open, high, low, close; t: f64; from, state) -> (Vec<f64>, Vec<f64>) = total;
-    atr_resume(high, low, close; period: usize; from, state) -> Option<(Vec<f64>, Vec<f64>)>;
-    cmo_resume(close; period: usize; from, state) -> Option<(Vec<f64>, Vec<f64>)>;
-    dema_resume(data; period: usize; from, state) -> (Vec<f64>, Vec<f64>) = total;
-    dx_resume(high, low, close; period: usize; from, state) -> Option<(Vec<f64>, Vec<f64>)>;
-    efi_resume(close, volume; n: usize; from, state) -> (Vec<f64>, Vec<f64>) = total;
-    ema_resume(data; period: usize; from, state) -> (Vec<f64>, Vec<f64>) = total;
-    ht_dcperiod_resume(price; ; from, state) -> Option<(Vec<f64>, Vec<f64>)>;
-    ht_dcphase_resume(price; ; from, state) -> Option<(Vec<f64>, Vec<f64>)>;
-    ht_phasor_resume(price; quad: bool; from, state) -> Option<(Vec<f64>, Vec<f64>)>;
-    ht_sine_resume(price; lead: bool; from, state) -> Option<(Vec<f64>, Vec<f64>)>;
-    ht_trendline_resume(price; ; from, state) -> Option<(Vec<f64>, Vec<f64>)>;
-    ht_trendmode_resume(price; ; from, state) -> Option<(Vec<f64>, Vec<f64>)>;
-    kama_resume(data; period: usize; from, state) -> Option<(Vec<f64>, Vec<f64>)>;
+    crsi_resume(close; rp: usize, sp: usize, rank: usize; from, state) -> Option<Vec<f64>>;
+    stoch_momentum_resume(high, low, close; k: usize, d: usize, signal: Option<usize>; from, state) -> Option<Vec<f64>>;
+    ad_resume(high, low, close, volume; ; from, state) -> Vec<f64> = total;
+    adosc_resume(high, low, close, volume; fast: usize, slow: usize; from, state) -> Vec<f64> = total;
+    adx_resume(high, low, close; period: usize; from, state) -> Option<Vec<f64>>;
+    adxr_resume(high, low, close; period: usize; from, state) -> Option<Vec<f64>>;
+    asi_resume(open, high, low, close; t: f64; from, state) -> Vec<f64> = total;
+    atr_resume(high, low, close; period: usize; from, state) -> Option<Vec<f64>>;
+    cmo_resume(close; period: usize; from, state) -> Option<Vec<f64>>;
+    dema_resume(data; period: usize; from, state) -> Vec<f64> = total;
+    dx_resume(high, low, close; period: usize; from, state) -> Option<Vec<f64>>;
+    efi_resume(close, volume; n: usize; from, state) -> Vec<f64> = total;
+    ema_resume(data; period: usize; from, state) -> Vec<f64> = total;
+    ht_dcperiod_resume(price; ; from, state) -> Option<Vec<f64>>;
+    ht_dcphase_resume(price; ; from, state) -> Option<Vec<f64>>;
+    ht_phasor_resume(price; quad: bool; from, state) -> Option<Vec<f64>>;
+    ht_sine_resume(price; lead: bool; from, state) -> Option<Vec<f64>>;
+    ht_trendline_resume(price; ; from, state) -> Option<Vec<f64>>;
+    ht_trendmode_resume(price; ; from, state) -> Option<Vec<f64>>;
+    kama_resume(data; period: usize; from, state) -> Option<Vec<f64>>;
     kdj_resume(high, low, close; period_rsv: usize, period_k: usize, period_d: usize, line:
-        KdjLine; from, state) -> Option<(Vec<f64>, Vec<f64>)>;
+        KdjLine; from, state) -> Option<Vec<f64>>;
     keltner_band_resume(close, high, low; ema_period: usize, atr_period: usize, mult: f64,
-        upper: bool; from, state) -> Option<(Vec<f64>, Vec<f64>)>;
-    macd_resume(close; fast: usize, slow: usize; from, state) -> (Vec<f64>, Vec<f64>) = total;
+        upper: bool; from, state) -> Option<Vec<f64>>;
+    macd_resume(close; fast: usize, slow: usize; from, state) -> Vec<f64> = total;
     macd_signal_resume(close; fast: usize, slow: usize, signal: usize, histogram: bool; from,
-        state) -> (Vec<f64>, Vec<f64>) = total;
+        state) -> Vec<f64> = total;
     mama_resume(price; fast_limit: f64, slow_limit: f64, want_fama: bool; from, state) ->
-        Option<(Vec<f64>, Vec<f64>)>;
-    mass_index_resume(high, low; n: usize; from, state) -> Option<(Vec<f64>, Vec<f64>)>;
-    minus_di_resume(high, low, close; period: usize; from, state) -> Option<(Vec<f64>, Vec<f64>)>;
-    minus_dm_resume(high, low; period: usize; from, state) -> Option<(Vec<f64>, Vec<f64>)>;
-    natr_resume(high, low, close; period: usize; from, state) -> Option<(Vec<f64>, Vec<f64>)>;
-    nvi_resume(close, volume; ; from, state) -> (Vec<f64>, Vec<f64>) = total;
-    obv_resume(real, volume; ; from, state) -> (Vec<f64>, Vec<f64>) = total;
-    plus_di_resume(high, low, close; period: usize; from, state) -> Option<(Vec<f64>, Vec<f64>)>;
-    plus_dm_resume(high, low; period: usize; from, state) -> Option<(Vec<f64>, Vec<f64>)>;
-    pvi_resume(close, volume; ; from, state) -> (Vec<f64>, Vec<f64>) = total;
-    pvt_resume(close, volume; ; from, state) -> (Vec<f64>, Vec<f64>) = total;
-    rsi_resume(close; period: usize; from, state) -> Option<(Vec<f64>, Vec<f64>)>;
-    sar_resume(high, low; acceleration: f64, maximum: f64; from, state) -> Option<(Vec<f64>,
-        Vec<f64>)>;
+        Option<Vec<f64>>;
+    mass_index_resume(high, low; n: usize; from, state) -> Option<Vec<f64>>;
+    minus_di_resume(high, low, close; period: usize; from, state) -> Option<Vec<f64>>;
+    minus_dm_resume(high, low; period: usize; from, state) -> Option<Vec<f64>>;
+    natr_resume(high, low, close; period: usize; from, state) -> Option<Vec<f64>>;
+    nvi_resume(close, volume; ; from, state) -> Vec<f64> = total;
+    obv_resume(real, volume; ; from, state) -> Vec<f64> = total;
+    plus_di_resume(high, low, close; period: usize; from, state) -> Option<Vec<f64>>;
+    plus_dm_resume(high, low; period: usize; from, state) -> Option<Vec<f64>>;
+    pvi_resume(close, volume; ; from, state) -> Vec<f64> = total;
+    pvt_resume(close, volume; ; from, state) -> Vec<f64> = total;
+    rsi_resume(close; period: usize; from, state) -> Option<Vec<f64>>;
+    sar_resume(high, low; acceleration: f64, maximum: f64; from, state) -> Option<Vec<f64>>;
     sarext_resume(high, low; offset_on_reverse: f64, accel_init_long: f64, accel_long: f64,
         accel_max_long: f64, accel_init_short: f64, accel_short: f64, accel_max_short: f64;
-        from, state) -> Option<(Vec<f64>, Vec<f64>)>;
-    smma_resume(data; period: usize; from, state) -> (Vec<f64>, Vec<f64>) = total;
+        from, state) -> Option<Vec<f64>>;
+    smma_resume(data; period: usize; from, state) -> Vec<f64> = total;
     stochrsi_resume(close; rsi_period: usize, fastk_period: usize, is_d: bool, fastd_period:
-        usize; from, state) -> Option<(Vec<f64>, Vec<f64>)>;
+        usize, matype: usize; from, state) -> Option<Vec<f64>>;
     supertrend_resume(high, low, close; period: usize, mult: f64, want_direction: bool; from,
-        state) -> Option<(Vec<f64>, Vec<f64>)>;
-    t3_resume(data; period: usize, vfactor: f64; from, state) -> (Vec<f64>, Vec<f64>) = total;
-    tema_resume(data; period: usize; from, state) -> (Vec<f64>, Vec<f64>) = total;
-    trix_resume(close; period: usize; from, state) -> (Vec<f64>, Vec<f64>) = total;
-    tsi_resume(close; long: usize, short: usize; from, state) -> (Vec<f64>, Vec<f64>) = total;
-    wad_resume(high, low, close; ; from, state) -> (Vec<f64>, Vec<f64>) = total;
+        state) -> Option<Vec<f64>>;
+    t3_resume(data; period: usize, vfactor: f64; from, state) -> Vec<f64> = total;
+    tema_resume(data; period: usize; from, state) -> Vec<f64> = total;
+    trix_resume(close; period: usize; from, state) -> Vec<f64> = total;
+    tsi_resume(close; long: usize, short: usize; from, state) -> Vec<f64> = total;
+    wad_resume(high, low, close; ; from, state) -> Vec<f64> = total;
 }
 
 on_complete_rows! { step:
+    crsi_resume_one(close; rp: usize, sp: usize, rank: usize)
     ad_resume_one(high, low, close, volume;)
     adx_resume_one(high, low, close; period: usize)
     adxr_resume_one(high, low, close; period: usize)

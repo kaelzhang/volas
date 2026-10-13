@@ -208,6 +208,13 @@ The complete directive reference lives in [INDICATORS.md](INDICATORS.md). It
 covers Volas-exclusive indicators, built-in statistical commands, and
 TA-Lib-compatible directives.
 
+Rust callers obtain a validated, opaque `volas_directive::Ast` through `parse` or
+`bind_frame`. Inspect it through `node()` and `continuation()`; command arguments
+expose read-only `values()`, `spec()`, and `bare()` accessors. Execution, lookback,
+and continuation APIs accept `&Ast`. The binder prepares the continuation plan
+once, including any stateful subtrees and their hidden input columns. `stringify`
+accepts `&Ast` or a lenient `&Form` using the same canonical renderer.
+
 # Contributing & feedback
 
 Issues, indicator requests, benchmark challenges, and PRs are welcome — see

@@ -3,6 +3,11 @@
 //! bar — kept in its own module so the refresh policy lives apart from the frame's
 //! construction / access surface.
 //!
+//! A cached column keeps the directive it computes, bound against the frame when it was
+//! cached (`ComputedMeta::directive`): a refresh continues exactly that tree — never a
+//! re-parse of the column's name — over the live frame, whose cached columns it never
+//! reads (every bare name in the bound tree is a data column or an explicit command).
+//!
 //! Every frame (plain or time-frame) keeps, per recursive cached column, the state as
 //! of its last valid row and the state as of the row before (`ComputedMeta`); every
 //! successful resume leaves both. A new row resumes from the first in one step; a
@@ -34,46 +39,12 @@ struct Stale {
 }
 
 impl PyDataFrame {
-    /// The carried resume states `(state, state_before_last)` of a recursive column
-    /// freshly computed over `frame` (`col` is that computation): the state as of
-    /// `frame`'s last row and as of the row before it. `(None, None)` for a directive
-    /// with no resume kernel.
-    pub(crate) fn capture_resume_states(
-        frame: &DataFrame,
-        node: &Ast,
-        col: &volas_core::Column,
-    ) -> (Option<Vec<f64>>, Option<Vec<f64>>) {
-        let after = volas_directive::exec::initial_state(frame, node, col);
-        let h = frame.height();
-        if after.is_none() || h == 0 {
-            return (after, None);
-        }
-        let before = volas_directive::exec::initial_state(
-            &frame.slice_data(0, h - 1),
-            node,
-            &col.slice(0, h - 1),
-        );
-        (after, before)
-    }
-
     /// The frame a NEW directive binds and computes over (`df[d]`, `exec`): the data
     /// columns only, so a name never reads a cached column — whose rows may be a stale
     /// placeholder — and is never resolved differently from a later refresh. Borrowed
     /// when the frame caches nothing.
     pub(crate) fn binding_frame(&self) -> PyResult<Cow<'_, DataFrame>> {
         self.frame_without(|n| self.inner.is_computed(n))
-    }
-
-    /// The frame a CACHED directive refreshes over: the data columns, less those named
-    /// like a built-in command usable bare. In a cached directive such a bare name is
-    /// always the command: a data column of that name present at bind time made the name
-    /// ambiguous (an error), and one added later is refused while a cached directive
-    /// reads it (`check_new_data_column`) — and the canonical form renders `change:` as
-    /// `change`, so the refresh must not read it as the column.
-    pub(crate) fn refresh_frame(&self) -> PyResult<DataFrame> {
-        Ok(self
-            .frame_without(|n| self.inner.is_computed(n) || volas_directive::is_bare_command(n))?
-            .into_owned())
     }
 
     /// This frame without the columns `drop` names (borrowed when it names none).
@@ -90,41 +61,19 @@ impl PyDataFrame {
     /// column, O(lookback) per finite-window one.
     pub(crate) fn refresh_computed(&mut self, only: Option<&str>) -> PyResult<()> {
         let height = self.inner.height();
-        let stale = self.inner.stale_computed_columns(only);
-        if stale.is_empty() {
-            return Ok(());
-        }
-        let mut base: Option<DataFrame> = None;
-        for volas_core::StaleComputed { name, reach, valid_rows: vr, since, warm } in stale {
-            // Parse-free single-row fast path for the stateless finite-memory directives
-            // (price transforms, TR, the momentum / ROC family): the newest row is a
-            // formula of its own inputs; the (empty) state still advances one row.
-            if vr + 1 == height && self.inner.computed_resume_state(&name).is_some() {
-                if let Some(value) =
-                    volas_directive::exec::execute_resume_default_series_one(&self.inner, &name, vr)
-                {
-                    self.inner.update_computed_f64_value(&name, vr, value).map_err(pyerr)?;
-                    self.inner.advance_computed_state(&name, Vec::new());
-                    continue;
-                }
-            }
-            let node = parse(&name).map_err(directive_err)?;
-            if !directive_uses_default_series(&node) && base.is_none() {
-                base = Some(self.refresh_frame()?);
-            }
-            let frame = if directive_uses_default_series(&node) { None } else { base.as_ref() };
-            self.refresh_column(&name, &node, frame, Stale { reach, vr, since, warm }, height)?;
+        for stale in self.inner.stale_computed_columns(only) {
+            let volas_core::StaleComputed { name, directive, reach, valid_rows: vr, since, warm } = stale;
+            self.refresh_column(&name, bound_directive(&directive), Stale { reach, vr, since, warm }, height)?;
         }
         Ok(())
     }
 
-    /// Refresh one cached column whose rows `[vr, height)` are stale, computing over
-    /// `frame` (the live frame when `None`).
+    /// Refresh one cached column whose rows `[vr, height)` are stale, continuing its
+    /// bound directive `node` over the live frame.
     fn refresh_column(
         &mut self,
         name: &str,
         node: &Ast,
-        frame: Option<&DataFrame>,
         Stale { reach, vr, since, warm }: Stale,
         height: usize,
     ) -> PyResult<()> {
@@ -148,12 +97,12 @@ impl PyDataFrame {
             let mut row = vr;
             while row < height {
                 let value = self.inner.step_computed_state(name, |live, prev, _, next| {
-                    volas_directive::exec::execute_resume_step(frame.unwrap_or(live), node, prev, (row, since), next)
+                    volas_directive::exec::execute_resume_step(live, node, prev, (row, since), next)
                 });
                 let Some(value) = value else { break };
-                self.inner.update_computed_f64_value(name, row, value).map_err(pyerr)?;
+                self.inner.update_computed_value(name, row, value).map_err(pyerr)?;
                 if pending == Some(self.inner.origin() + row) {
-                    self.keep_pending(name, node, frame, row + 1, held);
+                    self.keep_pending(name, node, row + 1, held);
                 }
                 row += 1;
             }
@@ -161,25 +110,25 @@ impl PyDataFrame {
                 return Ok(());
             }
             // No single-row step (or it declined): the `Vec` resume over the rows left.
-            if self.resume_rows(name, node, frame, (row, height, since, held), pending)? {
+            if self.resume_rows(name, node, (row, height, since, held), pending)? {
                 return Ok(());
             }
         }
-        let df = frame.unwrap_or(&self.inner);
-        // A directive whose every command has finite memory and a position-free
-        // output (SMA, ROC, price transforms, CDL, …) depends only on a fixed
-        // trailing window, so recomputing a window is exact and O(lookback): the
-        // window reaches `lb + 1` rows behind the first stale row (one more than the
-        // lookback covers indicators that emit from a partial first difference) and
-        // doubles that as margin. The decision is structural (`recomputes_on_a_window`),
-        // never inferred from the values. It carries no state.
+        let df = &self.inner;
+        // A directive with no recursion and no position output anywhere (SMA, ROC,
+        // `close > ma:20`, price transforms, CDL, …) depends only on a fixed trailing
+        // window, so recomputing a window is exact and O(lookback): the window reaches
+        // `lb + 1` rows behind the first stale row (one more than the lookback covers
+        // indicators that emit from a partial first difference) and doubles that as
+        // margin. The decision is structural (`evaluates_on_a_window`, the rule a resume
+        // reads its operands by), never inferred from the values. It carries no state.
         let win = 2 * (lb + 1);
-        if vr > win && volas_directive::lookback::recomputes_on_a_window(node) {
+        if vr > win && volas_directive::lookback::evaluates_on_a_window(node) {
             let start = vr - win;
             // `slice_data` skips the per-cached-column ComputedMeta clone; the window is
             // read-only and discarded.
             let windowed =
-                volas_directive::exec::execute_refresh(&df.slice_data(start, height), node)
+                volas_directive::execute(&df.slice_data(start, height), node)
                     .map_err(value_err)?;
             let tail = windowed.slice(vr - start, windowed.len());
             self.inner.update_computed_tail(name, vr, &tail).map_err(pyerr)?;
@@ -188,7 +137,7 @@ impl PyDataFrame {
         if reach.history.recursive() && !held {
             // The rows the recursion started on are gone: replay its checkpoint.
             let pending = self.pending_row(name, reach.history);
-            return self.replay_column(name, node, frame, (vr, height), pending);
+            return self.replay_column(name, node, (vr, height), pending);
         }
         // Cold / warm-up / no resume: recompute the column and capture both states.
         // Inside warm-up (`vr < lb`) the whole column is rewritten, re-applying the
@@ -196,8 +145,7 @@ impl PyDataFrame {
         // the resume takes over at the warm boundary; past it only the stale tail is
         // (the rows before are exact — and a head-dropped slice's carried head is not
         // reproducible from its own rows).
-        let recomputed = volas_directive::exec::execute_refresh(df, node).map_err(value_err)?;
-        let (state, before) = Self::capture_resume_states(df, node, &recomputed);
+        let (recomputed, state, before) = volas_directive::exec::execute_with_states(df, node).map_err(value_err)?;
         let from = if warm { vr } else { 0 };
         let tail = recomputed.slice(from, recomputed.len());
         self.inner.update_computed_tail(name, from, &tail).map_err(pyerr)?;
@@ -219,10 +167,9 @@ impl PyDataFrame {
     /// Keep the checkpoint of cached recursion `name` as of row `end - 1`, which its
     /// carried state now describes, for the next drop of the head (`whole`: the frame
     /// holds the history's start).
-    fn keep_pending(&mut self, name: &str, node: &Ast, frame: Option<&DataFrame>, end: usize, whole: bool) {
+    fn keep_pending(&mut self, name: &str, node: &Ast, end: usize, whole: bool) {
         let state = self.inner.computed_resume_state(name).map(|(s, _)| s.to_vec());
-        let df = frame.unwrap_or(&self.inner);
-        let cp = state.and_then(|s| volas_directive::exec::checkpoint(df, node, Some(s), end, whole));
+        let cp = state.and_then(|s| volas_directive::exec::checkpoint(&self.inner, node, Some(s), end, whole));
         self.inner.set_computed_pending(name, cp);
     }
 
@@ -236,12 +183,11 @@ impl PyDataFrame {
         &mut self,
         name: &str,
         node: &Ast,
-        frame: Option<&DataFrame>,
         (from, height, since, whole): (usize, usize, usize, bool),
         pending: Option<usize>,
     ) -> PyResult<bool> {
         use volas_directive::exec::{checkpoint, execute_resume};
-        let df = frame.unwrap_or(&self.inner);
+        let df = &self.inner;
         let split = pending.and_then(|p| p.checked_sub(df.origin())).filter(|&t| t >= from && t + 1 < height);
         let resumed = self.inner.computed_resume_state(name).and_then(|(state, _)| {
             // up to the pending row, when the rows pass it before the last
@@ -281,7 +227,7 @@ impl PyDataFrame {
         if split.is_some() {
             self.inner.set_computed_pending(name, kept);
         } else if pending == Some(self.inner.origin() + height - 1) {
-            self.keep_pending(name, node, frame, height, whole);
+            self.keep_pending(name, node, height, whole);
         }
         Ok(true)
     }
@@ -299,7 +245,6 @@ impl PyDataFrame {
         &mut self,
         name: &str,
         node: &Ast,
-        frame: Option<&DataFrame>,
         (vr, height): (usize, usize),
         pending: Option<usize>,
     ) -> PyResult<()> {
@@ -312,12 +257,12 @@ impl PyDataFrame {
                  max_lookback). Recompute it on the frame that holds its whole history."
             ))
         };
-        let df = frame.unwrap_or(&self.inner);
+        let df = &self.inner;
         // an input the directive cannot read (an int64 past 2^53) is its own error — in the
         // rows the frame holds, or in those dropped without a checkpoint
         let fail = || match self.inner.computed_history_lost(name) {
             Some(e) => value_err(e.clone()),
-            None => match volas_directive::exec::execute_refresh(df, node) {
+            None => match volas_directive::execute(df, node) {
                 Err(e) => value_err(e),
                 Ok(_) => lost(),
             },
@@ -333,19 +278,24 @@ impl PyDataFrame {
         let stop = pending.and_then(|p| p.checked_sub(df.origin())).filter(|&t| t >= from && t + 2 < height);
         let mut ends: Vec<usize> = stop.map(|t| t + 1).into_iter().collect();
         ends.extend([height - 1, height]);
-        let mut tail = volas_core::Column::f64(Vec::new());
+        let mut tail: Option<volas_core::Column> = None;
         let mut points = Vec::with_capacity(ends.len());
         let mut at = checkpoint.clone();
         for end in ends {
             let (part, next) = volas_directive::exec::replay(df, node, &at, end).ok_or_else(fail)?;
-            tail.append(&part).map_err(pyerr)?;
+            if !part.is_empty() {
+                match &mut tail {
+                    Some(tail) => tail.append(&part).map_err(pyerr)?,
+                    None => tail = Some(part),
+                }
+            }
             points.push(next.clone());
             at = next;
         }
         let kept = pending.and_then(|p| points.iter().find(|cp| cp.at == p).cloned());
         let (last, before) = (points.pop().expect("the last row"), points.pop().expect("the row before"));
         self.inner
-            .continue_computed(name, from, &tail, last.state, before.state)
+            .continue_computed(name, from, &tail.expect("a replay advances rows"), last.state, before.state)
             .map_err(pyerr)?;
         if kept.is_some() {
             self.inner.set_computed_pending(name, kept);

@@ -6,6 +6,8 @@
 
 mod cascade;
 mod generic;
+mod stage;
+pub use stage::MaStage;
 mod kama;
 mod ma;
 mod macd;

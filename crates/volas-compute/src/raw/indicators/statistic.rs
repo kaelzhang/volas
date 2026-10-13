@@ -14,11 +14,15 @@ use crate::guard::{NonFiniteRows, RowGuard, Unguarded};
 /// O(n·period), matching TA-Lib's own inner loop (the constants close-form the
 /// `Σx` / `Σx²` of `0..period`, so only `Σy` and `Σxy` are summed per window).
 fn linreg_fit(data: &[f64], period: usize, origin: usize) -> (Vec<f64>, Vec<f64>) {
-    let (m, b, finite) = linreg_fit_with::<Unguarded>(data, period, origin);
+    linreg_fit_pass(data, period, origin, &mut ())
+}
+
+fn linreg_fit_pass(data: &[f64], period: usize, origin: usize, states: &mut impl crate::pass::StateSink) -> (Vec<f64>, Vec<f64>) {
+    let (m, b, finite) = linreg_fit_with::<Unguarded>(data, period, origin, states);
     if finite {
         (m, b)
     } else {
-        let (m, b, _) = linreg_fit_with::<NonFiniteRows>(data, period, origin);
+        let (m, b, _) = linreg_fit_with::<NonFiniteRows>(data, period, origin, states);
         (m, b)
     }
 }
@@ -36,7 +40,7 @@ fn linreg_fit(data: &[f64], period: usize, origin: usize) -> (Vec<f64>, Vec<f64>
 /// window's anchor-row value `K` ([`linreg_fit_of`]), so the slope's numerator carries
 /// no cancellation between the level and the trend. Shared by linearreg / slope /
 /// intercept / angle / tsf.
-fn linreg_fit_with<G: RowGuard>(data: &[f64], period: usize, origin: usize) -> (Vec<f64>, Vec<f64>, bool) {
+fn linreg_fit_with<G: RowGuard>(data: &[f64], period: usize, origin: usize, states: &mut impl crate::pass::StateSink) -> (Vec<f64>, Vec<f64>, bool) {
     let n = data.len();
     if period == 0 || period > n {
         return (vec![f64::NAN; n], vec![f64::NAN; n], true);
@@ -70,6 +74,11 @@ fn linreg_fit_with<G: RowGuard>(data: &[f64], period: usize, origin: usize) -> (
                 (sum_d, sum_ad) = linreg_sums(rows, |y| guard.counts(y.is_finite()));
             }
         }
+        states.record(i, n, || {
+            let mut v = Slide::state([sum_d, sum_ad], guard.bad(), (i + 1).min(period));
+            v.push((origin + i + 1) as f64);
+            v
+        });
         if !full {
             continue;
         }
@@ -199,11 +208,16 @@ pub fn tsf(data: &[f64], period: usize, origin: usize) -> Vec<f64> {
 /// `stddev`. Window-local: a non-finite row affects only the windows holding it (a
 /// window holding one is NaN — see [`crate::guard`]).
 fn rolling_var(data: &[f64], period: usize, origin: usize) -> Vec<f64> {
-    let (out, finite) = rolling_var_with::<Unguarded>(data, period, origin);
+    var_pass(data, period, origin, &mut ())
+}
+
+/// Variance batch pass with terminal-state publication.
+pub fn var_pass(data: &[f64], period: usize, origin: usize, states: &mut impl crate::pass::StateSink) -> Vec<f64> {
+    let (out, finite) = rolling_var_with::<Unguarded>(data, period, origin, states);
     if finite {
         out
     } else {
-        rolling_var_with::<NonFiniteRows>(data, period, origin).0
+        rolling_var_with::<NonFiniteRows>(data, period, origin, states).0
     }
 }
 
@@ -212,7 +226,7 @@ fn rolling_var(data: &[f64], period: usize, origin: usize) -> Vec<f64> {
 /// `K` the value at the window's anchor row ([`shift_row`]): the latest row whose
 /// absolute position is a multiple of `period` (the first row before one). They are
 /// rebuilt at every anchor — where `K` changes — and whenever one went inexact.
-fn rolling_var_with<G: RowGuard>(data: &[f64], period: usize, origin: usize) -> (Vec<f64>, bool) {
+fn rolling_var_with<G: RowGuard>(data: &[f64], period: usize, origin: usize, states: &mut impl crate::pass::StateSink) -> (Vec<f64>, bool) {
     let n = data.len();
     if period == 0 || period > n {
         return (vec![f64::NAN; n], true);
@@ -255,6 +269,7 @@ fn rolling_var_with<G: RowGuard>(data: &[f64], period: usize, origin: usize) -> 
                 s.sub(t);
             }
         }
+        states.record(i, n, || Slide::state(sums, guard.bad(), origin + i + 1));
         out.set(i, value);
     }
     (out.finish(), finite && sums.iter().all(|s| s.value().is_finite()))
@@ -311,6 +326,11 @@ pub fn stddev(data: &[f64], period: usize, nbdev: f64, origin: usize) -> Vec<f64
 /// raw moments also give `|r| > 1`, and `±1` for some flat windows). Row 0 is at
 /// absolute position `origin`. Lookback `period-1`.
 pub fn correl(x: &[f64], y: &[f64], period: usize, origin: usize) -> Vec<f64> {
+    correl_pass(x, y, period, origin, &mut ())
+}
+
+/// Batch computation with terminal-state publication.
+pub fn correl_pass<S: crate::pass::StateSink>(x: &[f64], y: &[f64], period: usize, origin: usize, states: &mut S) -> Vec<f64> {
     if !super::same_len(&[x, y]) {
         return Vec::new();
     }
@@ -350,13 +370,18 @@ pub fn correl(x: &[f64], y: &[f64], period: usize, origin: usize) -> Vec<f64> {
         if full {
             out.set(i, correl_of_sums(&s, k, p));
         }
+        states.record(i, n, || Slide::state(s, 0, origin + i + 1));
     }
     if clean && s.iter().all(|a| a.value().is_finite()) {
         return out.finish();
     }
     // A non-finite row entered: window-local careful path (see `crate::guard`).
     let mut slide = Slide::<5>::at(origin);
-    (0..n).map(|i| correl_row(&mut slide, x, y, period, i)).collect()
+    (0..n).map(|i| {
+        let v = correl_row(&mut slide, x, y, period, i);
+        states.record(i, n, || { let mut v = vec![0.0; Slide::<5>::STATE]; slide.write_state(&mut v); v });
+        v
+    }).collect()
 }
 
 /// The per-row terms of [`correl`]'s exact sums under the shift `(kx, ky)`: `x`, `y`,
@@ -405,6 +430,11 @@ fn correl_row(slide: &mut Slide<5>, x: &[f64], y: &[f64], period: usize, i: usiz
 /// instead. Row 0 is at absolute position `origin` (return `j`, of bar `j + 1`, at
 /// `origin + j`). First value at index `period` (lookback = period).
 pub fn beta(x: &[f64], y: &[f64], period: usize, origin: usize) -> Vec<f64> {
+    beta_pass(x, y, period, origin, &mut ())
+}
+
+/// Batch computation with terminal-state publication.
+pub fn beta_pass<S: crate::pass::StateSink>(x: &[f64], y: &[f64], period: usize, origin: usize, states: &mut S) -> Vec<f64> {
     let n = x.len();
     if period == 0 || period + 1 > n {
         return vec![f64::NAN; n];
@@ -444,6 +474,7 @@ pub fn beta(x: &[f64], y: &[f64], period: usize, origin: usize) -> Vec<f64> {
         for (a, v) in s.iter_mut().zip(beta_terms(ring[(j + 1 - period) % period], k)) {
             a.sub(v);
         }
+        states.record(j + 1, n, || Slide::state(s, 0, origin + j + 1));
     }
     if clean && s.iter().all(|a| a.value().is_finite()) {
         return out.finish();
@@ -453,6 +484,7 @@ pub fn beta(x: &[f64], y: &[f64], period: usize, origin: usize) -> Vec<f64> {
     let mut slide = Slide::<4>::at(origin);
     for j in 0..n - 1 {
         let v = beta_row(&mut slide, x, y, period, j);
+        states.record(j + 1, n, || { let mut v = vec![0.0; Slide::<4>::STATE]; slide.write_state(&mut v); v });
         if j + 1 >= period {
             out.set(j + 1, v);
         }
@@ -701,4 +733,16 @@ pub fn beta_step(
     let out = beta_row(&mut slide, x, y, period, row - 1);
     slide.write_state(next);
     Some(out)
+}
+
+/// Linear-regression batch pass with the same fit and terminal-state publication.
+pub fn linreg_pass(data: &[f64], period: usize, line: LinregLine, origin: usize, states: &mut impl crate::pass::StateSink) -> Vec<f64> {
+    let (m, b) = linreg_fit_pass(data, period, origin, states);
+    m.into_iter().zip(b).map(|(m, b)| match line {
+        LinregLine::Value => b + m * period.saturating_sub(1) as f64,
+        LinregLine::Slope => m,
+        LinregLine::Intercept => b,
+        LinregLine::Angle => m.atan() * (180.0 / std::f64::consts::PI),
+        LinregLine::Forecast => b + m * period as f64,
+    }).collect()
 }

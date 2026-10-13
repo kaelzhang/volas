@@ -13,26 +13,27 @@
 
 use std::borrow::Cow;
 
-use volas_compute::missing::{CompleteRows, Input, ResumeRows};
+use volas_compute::missing::{CompleteRows, Input};
 use volas_core::{Column, DataFrame, Result};
 
-use crate::lookback::own_lookback;
 use crate::operands::Operands;
-use crate::types::{ArgValue, Ast};
+use crate::spec::CommandSpec;
+use crate::types::{ArgValue, BoundNode};
 
-/// A bound command: canonical name / sub, typed arguments, `@` series.
+/// A bound command: canonical name / sub, typed arguments, `@` series, its line's spec.
 #[derive(Clone, Copy)]
 pub(crate) struct BoundCommand<'a> {
     pub(crate) name: &'a str,
     pub(crate) sub: Option<&'a str>,
     pub(crate) args: &'a [ArgValue],
-    pub(crate) series: &'a [Ast],
+    pub(crate) series: &'a [BoundNode],
+    pub(crate) spec: &'a CommandSpec,
 }
 
 impl BoundCommand<'_> {
     /// How many rows before its first new row a resume of the command reads, at most.
     pub(crate) fn reach(&self) -> usize {
-        own_lookback(self.name, self.sub, self.args) + 1
+        self.spec.resume_reach(self.args)
     }
 }
 
@@ -58,7 +59,7 @@ fn recorded<'o>(ops: &'o Operands, remember: bool) -> Vec<Recorded<'o>> {
     ops.reads()
         .map(|(slot, read)| Recorded {
             slot,
-            values: read.view(),
+            values: Cow::Borrowed(read.view()),
             has_nan: if remember { Some(read.has_nan()) } else { read.known_has_nan() },
         })
         .collect()
@@ -68,10 +69,11 @@ fn inputs<'v>(recorded: &'v [Recorded], end: usize) -> Vec<Input<'v>> {
     recorded.iter().map(|r| r.input(end)).collect()
 }
 
-/// Operands that read, for each recorded slot, `gather(values)`.
+/// Operands that read, for each slot `ops` recorded, `gather(values)`.
 fn over<'v>(
+    ops: &Operands<'v>,
     df: &'v DataFrame,
-    series: &'v [Ast],
+    series: &'v [BoundNode],
     recorded: &'v [Recorded<'v>],
     gather: impl Fn(&'v [f64]) -> Cow<'v, [f64]>,
 ) -> Operands<'v> {
@@ -80,11 +82,11 @@ fn over<'v>(
     for r in recorded {
         views[r.slot] = Some(gather(&r.values));
     }
-    Operands::over(df, series, views)
+    Operands::over(df, series, ops.start(), views)
 }
 
 /// A result column's values as `f64`, taken over without a copy when they are.
-fn into_f64(column: Column) -> Vec<f64> {
+pub(crate) fn into_f64(column: Column) -> Vec<f64> {
     match column {
         Column::F64(values) => values.into_vec(),
         other => other.to_f64_vec(),
@@ -92,15 +94,16 @@ fn into_f64(column: Column) -> Vec<f64> {
 }
 
 /// Run a full computation (or a state capture) of a recursive command over the
-/// complete rows of its inputs: `run` is its arm, `finish` places the result of a run
-/// over the complete rows back on the frame's rows.
+/// complete rows of its inputs' rows `[0, end)`: `run` is its arm, `finish` places the
+/// result of a run over the complete rows back on those rows.
 fn on_complete_rows<T>(
     df: &DataFrame,
-    series: &[Ast],
+    series: &[BoundNode],
+    end: usize,
     run: impl Fn(&Operands) -> T,
     finish: impl FnOnce(T, &CompleteRows, usize) -> T,
 ) -> T {
-    let ops = Operands::stopping(df, series);
+    let ops = Operands::stopping(df, series, end);
     let first = run(&ops);
     if ops.failed() || (!ops.missing() && ops.clean()) {
         return first;
@@ -122,126 +125,32 @@ fn on_complete_rows<T>(
         // it runs in place again, never stopping: a stale fact is never the answer.
         return if ops.missing() { run(&Operands::new(df, series)) } else { first };
     }
-    let out = run(&over(df, series, &recorded, |v| rows.gather(v)));
-    finish(out, &rows, df.height())
+    let out = run(&over(&ops, df, series, &recorded, |v| rows.gather(v)));
+    finish(out, &rows, ops.len())
 }
 
 /// Compute a recursive command over the complete rows of its inputs: `run` is its
 /// dispatch arm.
 pub(crate) fn compute(
     df: &DataFrame,
-    series: &[Ast],
+    series: &[BoundNode],
     run: impl Fn(&Operands) -> Result<Column>,
 ) -> Result<Column> {
-    on_complete_rows(df, series, run, |out, rows, n| {
+    on_complete_rows(df, series, df.height(), run, |out, rows, n| {
         Ok(Column::f64(rows.scatter(n, into_f64(out?))))
     })
 }
 
 /// The carried state of a recursive command after a full computation over the
-/// complete rows of its inputs — the state as of the last complete row. `run` is its
-/// state-capture arm.
+/// complete rows of its inputs' rows `[0, end)` — the state as of the last complete row
+/// among them. `run` is its state-capture arm.
 pub(crate) fn state(
     df: &DataFrame,
-    series: &[Ast],
+    series: &[BoundNode],
+    end: usize,
     run: impl Fn(&Operands) -> Option<Vec<f64>>,
 ) -> Option<Vec<f64>> {
-    on_complete_rows(df, series, run, |out, _, _| out)
-}
-
-/// Whether the resume `ops` just ran read every input's rows `[from - reach, end)`
-/// complete (see [`ResumeRows::in_place`]) — free for a column known complete, and with
-/// no allocation for a frame column (the live single-row refresh runs this per row).
-fn read_in_place(ops: &Operands, cmd: &BoundCommand, from: usize, end: usize) -> bool {
-    let mut reach = None; // only needed for an input that must be scanned
-    ops.reads().all(|(slot, read)| {
-        let r = Recorded { slot, values: read.view(), has_nan: read.known_has_nan() };
-        r.has_nan == Some(false)
-            || ResumeRows::in_place(r.input(end), from, *reach.get_or_insert_with(|| cmd.reach()))
-    })
-}
-
-/// Whether a resume over gathered complete rows lacks history it reads: fewer complete
-/// rows before its first new row than it may read, while the column's history (from the
-/// absolute row `since`) starts before the frame's row 0 — the rows it needs were dropped
-/// with the frame's head. It then declines; the caller replays from the column's
-/// checkpoint instead. A frame holding the whole history lacks nothing: fewer rows are
-/// all the series has.
-fn lacks_history(df: &DataFrame, cmd: &BoundCommand, rows: &ResumeRows, since: usize) -> bool {
-    rows.from < cmd.reach() && df.origin() > since
-}
-
-/// Resume a recursive command over the new rows `[from, end)` from `prev_state`, on the
-/// complete rows only: a missing new row is NaN and leaves the state where the last
-/// complete row put it. `run(operands, from)` is its resume arm; it reads the inputs'
-/// rows `[0, end)` (borrowed). The column's history starts at the absolute row `since`.
-///
-/// The arm runs in place first: when every input it read is known complete, or the
-/// rows it read turn out complete, that is the answer. Otherwise it runs again over the
-/// complete rows of the same inputs — declining when the frame dropped complete rows of
-/// the history it reads ([`lacks_history`]).
-pub(crate) fn resume(
-    df: &DataFrame,
-    cmd: &BoundCommand,
-    prev_state: &[f64],
-    (from, end, since): (usize, usize, usize),
-    run: impl Fn(&Operands, usize) -> Option<(Column, Vec<f64>)>,
-) -> Option<(Column, Vec<f64>)> {
-    let ops = Operands::upto(df, cmd.series, end);
-    let n = ops.len();
-    let out = run(&ops, from);
-    if ops.failed() || ops.clean() || read_in_place(&ops, cmd, from, n) {
-        return out;
-    }
-    let recorded = recorded(&ops, false);
-    let refs: Vec<&[f64]> = recorded.iter().map(|r| &r.values[..n]).collect();
-    let rows = ResumeRows::of(&refs, from, cmd.reach());
-    if !rows.has_new() {
-        return Some((Column::f64(vec![f64::NAN; n - from]), prev_state.to_vec()));
-    }
-    if lacks_history(df, cmd, &rows, since) {
-        return None;
-    }
-    let gathered = over(df, cmd.series, &recorded, |v| {
-        Cow::Owned(rows.rows.iter().map(|&i| v[i]).collect())
-    });
-    let (col, st) = run(&gathered, rows.from)?;
-    Some((Column::f64(rows.scatter(n, from, into_f64(col))), st))
-}
-
-/// Resume a recursive command at the single row `row` (the scalar twin of [`resume`]):
-/// `missing` when that row is missing, else `run(operands, row)` on the complete rows
-/// (declining like it when the frame dropped history it reads; `since` as there).
-/// As there, the arm runs in place first and its answer stands when the rows it read
-/// are complete; an `@` operand is evaluated once.
-pub(crate) fn resume_one<T>(
-    df: &DataFrame,
-    cmd: &BoundCommand,
-    (row, since): (usize, usize),
-    missing: impl FnOnce() -> Option<T>,
-    mut run: impl FnMut(&Operands, usize) -> Option<T>,
-) -> Option<T> {
-    let ops = Operands::new(df, cmd.series);
-    let out = run(&ops, row);
-    // The rows up to and including `row` (an out-of-range `row` resumes in place, where
-    // the arm declines it).
-    let end = (row + 1).min(df.height());
-    if ops.failed() || ops.clean() || read_in_place(&ops, cmd, row, end) {
-        return out;
-    }
-    let recorded = recorded(&ops, false);
-    let upto: Vec<&[f64]> = recorded.iter().map(|r| &r.values[..end]).collect();
-    let rows = ResumeRows::of(&upto, row, cmd.reach());
-    if !rows.has_new() {
-        return missing();
-    }
-    if lacks_history(df, cmd, &rows, since) {
-        return None;
-    }
-    let gathered = over(df, cmd.series, &recorded, |v| {
-        Cow::Owned(rows.rows.iter().map(|&i| v[i]).collect())
-    });
-    run(&gathered, rows.from)
+    on_complete_rows(df, series, end, run, |out, _, _| out)
 }
 
 #[cfg(test)]
@@ -309,7 +218,7 @@ mod tests {
         let open: Vec<f64> = (0..n).map(|i| 40.0 + (i as f64 * 0.3).cos()).collect();
         let node = parse("rsi:3@open").unwrap();
         let head = frame(open[..n - 1].to_vec());
-        let st = initial_state(&head, &node, &Column::f64(vec![])).unwrap();
+        let st = initial_state(&head, &node, usize::MAX).unwrap();
         let full = frame(open.clone());
         let mut next = vec![0.0; st.len()];
         let value = execute_resume_step(&full, &node, &st, (n - 1, 0), &mut next).unwrap();
@@ -322,12 +231,10 @@ mod tests {
         assert_eq!(next, st);
     }
 
-    /// A resume over gathered complete rows reads `reach` of them before its first new
-    /// row: on a frame that dropped its history's head (the history starts before row 0)
-    /// with fewer of them held — a run of missing rows reaching the frame's start — it
-    /// declines, scalar and `Vec` alike; on a frame holding the whole history it runs.
+    /// A resume carries the complete rows its kernel needs, so a dropped head and a
+    /// missing run no longer force either scalar or Vec resume to restart the history.
     #[test]
-    fn a_resume_lacking_dropped_history_declines() {
+    fn a_resume_carries_dropped_complete_history() {
         use crate::exec::execute_resume;
         let n = 40;
         let mut open: Vec<f64> = (0..n).map(|i| 40.0 + (i as f64 * 0.3).cos()).collect();
@@ -335,12 +242,12 @@ mod tests {
             *x = f64::NAN;
         }
         let node = parse("rsi:3@open").unwrap();
-        let st = initial_state(&frame(open[..20].to_vec()), &node, &Column::f64(vec![])).unwrap();
+        let st = initial_state(&frame(open[..20].to_vec()), &node, usize::MAX).unwrap();
         // the frame keeps rows 18.. (origin 18): two complete rows before row 30
         let kept = frame(open.clone()).slice_data(18, n);
         let mut next = vec![0.0; st.len()];
-        assert!(execute_resume(&kept, &node, &st, 12, kept.height(), 0).is_none());
-        assert!(execute_resume_step(&kept, &node, &st, (12, 0), &mut next).is_none());
+        assert!(execute_resume(&kept, &node, &st, 12, kept.height(), 0).is_some());
+        assert!(execute_resume_step(&kept, &node, &st, (12, 0), &mut next).is_some());
         // the history starts at row 18: nothing is missing, the resume runs
         assert!(execute_resume(&kept, &node, &st, 12, kept.height(), 18).is_some());
         assert!(execute_resume_step(&kept, &node, &st, (12, 18), &mut next).is_some());
@@ -371,7 +278,7 @@ mod tests {
             for d in ["nvi", "pvi", "pvt", "obv", "efi:2", "ad", "adosc"] {
                 let err = execute(&df, &parse(d).unwrap()).unwrap_err();
                 assert!(err.to_string().contains("not found"), "{d}: {err}");
-                assert!(initial_state(&df, &parse(d).unwrap(), &Column::f64(vec![])).is_none(), "{d}");
+                assert!(initial_state(&df, &parse(d).unwrap(), usize::MAX).is_none(), "{d}");
             }
         }
     }

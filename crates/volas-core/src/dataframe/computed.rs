@@ -14,15 +14,17 @@
 use crate::column::Column;
 use crate::error::{Result, VolasError};
 
-use super::{ComputedMeta, DataFrame, Reach, STALE_BY_APPEND, STALE_BY_WRITE};
+use super::{ComputedMeta, DataFrame, Directive, Reach, STALE_BY_APPEND, STALE_BY_WRITE};
 
-/// A stale cached column as the refresh reads it: its name, reach, valid-row
-/// cursor, where its history starts, and whether its processed history is past the
-/// warm-up ([`ComputedMeta::warm`]).
-#[derive(Clone, Debug, PartialEq)]
+/// A stale cached column as the refresh reads it: its name, bound directive, reach,
+/// valid-row cursor, and whether its processed history is past the warm-up
+/// ([`ComputedMeta::warm`]).
+#[derive(Clone, Debug)]
 pub struct StaleComputed {
     /// The column (= its canonical directive).
     pub name: String,
+    /// The bound directive it computes.
+    pub directive: Directive,
     /// The rows the column reads around its own.
     pub reach: Reach,
     /// Rows `[0, valid_rows)` hold valid values.
@@ -40,13 +42,14 @@ impl DataFrame {
         self.first_computed = self.computed.keys().filter_map(|k| self.name_to_idx.get(k).copied()).min();
     }
 
-    /// Record that column `name` is a materialized directive result (valid for
-    /// all current rows), its history starting at this frame's row 0, reading `reach`
-    /// rows around its own.
-    pub fn set_computed(&mut self, name: &str, reach: Reach) {
+    /// Record that column `name` is a materialized result of `directive` (valid for all
+    /// current rows), its history starting at this frame's row 0, reading `reach` rows
+    /// around its own.
+    pub fn set_computed(&mut self, name: &str, directive: Directive, reach: Reach) {
         self.computed.insert(
             name.to_string(),
             ComputedMeta {
+                directive,
                 reach,
                 valid_rows: self.height,
                 state: None,
@@ -172,6 +175,11 @@ impl DataFrame {
         Some((meta.state.as_deref()?, self.origin))
     }
 
+    /// The bound directive the cached column `name` computes, if it is one.
+    pub fn computed_directive(&self, name: &str) -> Option<&Directive> {
+        self.computed.get(name).map(|meta| &meta.directive)
+    }
+
     /// The absolute position of cached column `name`'s first present value — where its
     /// warm-up ended — if one has been computed.
     pub fn computed_first_present(&self, name: &str) -> Option<usize> {
@@ -200,6 +208,7 @@ impl DataFrame {
             })
             .map(|(name, meta)| StaleComputed {
                 name: name.clone(),
+                directive: std::sync::Arc::clone(&meta.directive),
                 reach: meta.reach,
                 valid_rows: meta.valid_rows,
                 since: meta.since,
@@ -273,13 +282,18 @@ impl DataFrame {
         })
     }
 
-    /// Overwrite one F64 computed value and mark the column valid through that row,
+    /// Overwrite one numeric or boolean computed value and mark the column valid through that row,
     /// under the same rule as [`update_computed_tail`](Self::update_computed_tail).
     /// This avoids allocating a one-value tail column on the single-bar append path.
-    pub fn update_computed_f64_value(&mut self, name: &str, row: usize, value: f64) -> Result<()> {
+    pub fn update_computed_value(&mut self, name: &str, row: usize, value: f64) -> Result<()> {
         self.write_computed(name, row, 1, |col| match col {
             Column::F64(buf) => {
                 buf.set(row, value);
+                Ok(())
+            }
+            Column::Bool(buf, valid) => {
+                valid.set(row, buf.len(), !value.is_nan());
+                buf.make_mut()[row] = value != 0.0;
                 Ok(())
             }
             col => Err(VolasError::DType(format!(

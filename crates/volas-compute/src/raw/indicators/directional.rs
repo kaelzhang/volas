@@ -286,31 +286,38 @@ mod tests {
             let c = &close[..from];
 
             let st = plus_dm_final_state(h, l, p).unwrap();
-            let (tail, _) = plus_dm_resume(&high, &low, p, from, &st).unwrap();
+            let mut tail = Vec::new();
+            let _ = plus_dm_resume(&high, &low, p, from, &st, &mut tail).unwrap();
             assert_bits(&tail, &plus_dm(&high, &low, p)[from..], "plus_dm");
 
             let st = minus_dm_final_state(h, l, p).unwrap();
-            let (tail, _) = minus_dm_resume(&high, &low, p, from, &st).unwrap();
+            let mut tail = Vec::new();
+            let _ = minus_dm_resume(&high, &low, p, from, &st, &mut tail).unwrap();
             assert_bits(&tail, &minus_dm(&high, &low, p)[from..], "minus_dm");
 
             let st = plus_di_final_state(h, l, c, p).unwrap();
-            let (tail, _) = plus_di_resume(&high, &low, &close, p, from, &st).unwrap();
+            let mut tail = Vec::new();
+            let _ = plus_di_resume(&high, &low, &close, p, from, &st, &mut tail).unwrap();
             assert_bits(&tail, &plus_di(&high, &low, &close, p)[from..], "plus_di");
 
             let st = minus_di_final_state(h, l, c, p).unwrap();
-            let (tail, _) = minus_di_resume(&high, &low, &close, p, from, &st).unwrap();
+            let mut tail = Vec::new();
+            let _ = minus_di_resume(&high, &low, &close, p, from, &st, &mut tail).unwrap();
             assert_bits(&tail, &minus_di(&high, &low, &close, p)[from..], "minus_di");
 
             let st = dx_final_state(h, l, c, p).unwrap();
-            let (tail, _) = dx_resume(&high, &low, &close, p, from, &st).unwrap();
+            let mut tail = Vec::new();
+            let _ = dx_resume(&high, &low, &close, p, from, &st, &mut tail).unwrap();
             assert_bits(&tail, &dx(&high, &low, &close, p)[from..], "dx");
 
             let st = adx_final_state(h, l, c, p).unwrap();
-            let (tail, _) = adx_resume(&high, &low, &close, p, from, &st).unwrap();
+            let mut tail = Vec::new();
+            let _ = adx_resume(&high, &low, &close, p, from, &st, &mut tail).unwrap();
             assert_bits(&tail, &adx(&high, &low, &close, p)[from..], "adx");
 
             let st = adxr_final_state(h, l, c, p).unwrap();
-            let (tail, _) = adxr_resume(&high, &low, &close, p, from, &st).unwrap();
+            let mut tail = Vec::new();
+            let _ = adxr_resume(&high, &low, &close, p, from, &st, &mut tail).unwrap();
             assert_bits(&tail, &adxr(&high, &low, &close, p)[from..], "adxr");
         }
     }
@@ -322,13 +329,13 @@ mod tests {
         let (high, low, close) = ohlc(60);
         let p = 14usize;
         let dummy = vec![0.0; 8]; // longer than any family's state, unread on the None path
-        assert!(plus_dm_resume(&high, &low, p, 0, &dummy).is_none()); // :284
-        assert!(minus_dm_resume(&high, &low, p, 0, &dummy).is_none()); // :305
-        assert!(plus_di_resume(&high, &low, &close, p, 0, &dummy).is_none()); // :378
-        assert!(minus_di_resume(&high, &low, &close, p, 0, &dummy).is_none()); // :409
-        assert!(dx_resume(&high, &low, &close, p, 0, &dummy).is_none()); // :457
-        assert!(adx_resume(&high, &low, &close, p, 0, &dummy).is_none()); // :525
-        assert!(adxr_resume(&high, &low, &close, p, 0, &dummy).is_none()); // :605
+        assert!(plus_dm_resume(&high, &low, p, 0, &dummy, &mut Vec::new()).is_none()); // :284
+        assert!(minus_dm_resume(&high, &low, p, 0, &dummy, &mut Vec::new()).is_none()); // :305
+        assert!(plus_di_resume(&high, &low, &close, p, 0, &dummy, &mut Vec::new()).is_none()); // :378
+        assert!(minus_di_resume(&high, &low, &close, p, 0, &dummy, &mut Vec::new()).is_none()); // :409
+        assert!(dx_resume(&high, &low, &close, p, 0, &dummy, &mut Vec::new()).is_none()); // :457
+        assert!(adx_resume(&high, &low, &close, p, 0, &dummy, &mut Vec::new()).is_none()); // :525
+        assert!(adxr_resume(&high, &low, &close, p, 0, &dummy, &mut Vec::new()).is_none()); // :605
     }
 
     /// `*_final_state` declines before the indicator seeds, so the caller keeps the
@@ -363,19 +370,22 @@ mod tests {
         let flat = vec![50.0; 40];
         let from = 20usize;
         let st = plus_di_final_state(&flat[..from], &flat[..from], &flat[..from], p).unwrap();
-        let (tail, _) = plus_di_resume(&flat, &flat, &flat, p, from, &st).unwrap();
+        let mut tail = Vec::new();
+        let _ = plus_di_resume(&flat, &flat, &flat, p, from, &st, &mut tail).unwrap();
         assert!(
             tail.iter().all(|&x| x == 0.0),
             "plus_di resume flat TR -> 0"
         ); // :355
         let st = minus_di_final_state(&flat[..from], &flat[..from], &flat[..from], p).unwrap();
-        let (tail, _) = minus_di_resume(&flat, &flat, &flat, p, from, &st).unwrap();
+        let mut tail = Vec::new();
+        let _ = minus_di_resume(&flat, &flat, &flat, p, from, &st, &mut tail).unwrap();
         assert!(
             tail.iter().all(|&x| x == 0.0),
             "minus_di resume flat TR -> 0"
         );
         let st = dx_final_state(&flat[..from], &flat[..from], &flat[..from], p).unwrap();
-        let (tail, _) = dx_resume(&flat, &flat, &flat, p, from, &st).unwrap();
+        let mut tail = Vec::new();
+        let _ = dx_resume(&flat, &flat, &flat, p, from, &st, &mut tail).unwrap();
         assert!(tail.iter().all(|&x| x == 0.0), "dx resume flat TR -> 0"); // :427
 
         // +DI + −DI ~ 0 while TR > 0 -> dx_val's inner sum guard (:433). Strictly shrinking
@@ -391,7 +401,8 @@ mod tests {
             assert!(high[i] < high[i - 1] && low[i] > low[i - 1] && high[i] > low[i]);
         }
         let st = dx_final_state(&high[..from], &low[..from], &close[..from], p).unwrap();
-        let (tail, _) = dx_resume(&high, &low, &close, p, from, &st).unwrap();
+        let mut tail = Vec::new();
+        let _ = dx_resume(&high, &low, &close, p, from, &st, &mut tail).unwrap();
         assert!(tail.iter().all(|&x| x == 0.0), "dx resume zero DI-sum -> 0"); // :433
     }
 }

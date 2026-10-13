@@ -25,6 +25,8 @@ enum Resolved {
 /// A new directive computed over the binding frame, not yet cached.
 struct Computed {
     canonical: String,
+    /// The directive bound against the binding frame (what a refresh continues).
+    directive: volas_core::Directive,
     reach: volas_core::Reach,
     col: Column,
     state: Option<Vec<f64>>,
@@ -387,8 +389,13 @@ impl PyDataFrame {
             return Ok(Resolved::Column(name.to_string()));
         }
         let node = parse(name).map_err(directive_err)?;
-        let canonical = volas_directive::stringify(&node);
+        let canonical = volas_directive::stringify(&*node);
         if self.inner.is_computed(&canonical) {
+            // the directive as written is bound against this frame like any new one: a
+            // bare name that is both a data column and a command is ambiguous, whatever
+            // column it would name (R17)
+            let is_data = |n: &str| self.inner.has_column(n) && !self.inner.is_computed(n);
+            volas_directive::bind_frame(&node, &is_data, name).map_err(value_err)?;
             return Ok(Resolved::Column(canonical));
         }
         Ok(Resolved::New(name.to_string(), node))
@@ -398,11 +405,12 @@ impl PyDataFrame {
     /// the resume states as of its last row and the row before, so a later append
     /// continues in O(new rows) and a replaced last row recomputes in one step.
     fn compute_new(&self, frame: &DataFrame, node: &volas_directive::Ast, text: &str) -> PyResult<Computed> {
-        let col = self.evaluate(frame, node, text)?;
-        let (state, before) = Self::capture_resume_states(frame, node, &col);
+        let bound = Self::bind(frame, node, text)?;
+        let (col, state, before) = volas_directive::exec::execute_with_states(frame, &bound).map_err(value_err)?;
         Ok(Computed {
-            canonical: volas_directive::stringify(node),
-            reach: volas_directive::lookback::reach(node),
+            canonical: volas_directive::stringify(&bound),
+            reach: volas_directive::lookback::reach(&bound),
+            directive: std::sync::Arc::new(bound),
             col,
             state,
             before,
@@ -410,15 +418,15 @@ impl PyDataFrame {
     }
 
     /// Cache a computed directive under its canonical name and return its values. A
-    /// data column holding that name (`change:` renders as `change`) keeps it: the
-    /// command's values are returned, not cached over the data.
+    /// data column already holding that name keeps it: the directive's values are
+    /// returned, not cached over the data.
     fn cache(&mut self, new: Computed) -> PyResult<Column> {
         if self.inner.has_column(&new.canonical) {
             return Ok(new.col);
         }
-        let Computed { canonical, reach, col, state, before } = new;
+        let Computed { canonical, directive, reach, col, state, before } = new;
         self.inner.set_column(&canonical, col).map_err(pyerr)?;
-        self.inner.set_computed(&canonical, reach);
+        self.inner.set_computed(&canonical, directive, reach);
         self.inner.set_computed_states(&canonical, state, before);
         Ok(self.inner.column(&canonical).map_err(pyerr)?.clone())
     }
@@ -439,7 +447,7 @@ impl PyDataFrame {
             let frame = self.binding_frame()?;
             for r in &resolved {
                 if let Resolved::New(text, node) = r {
-                    let canonical = volas_directive::stringify(node);
+                    let canonical = volas_directive::stringify(node.as_ref());
                     if !computed.iter().any(|c| c.canonical == canonical) {
                         computed.push(self.compute_new(&frame, node, text)?);
                     }
@@ -459,7 +467,7 @@ impl PyDataFrame {
                     self.inner.column(name).map_err(pyerr)?.clone()
                 }
                 Resolved::New(_, node) => {
-                    let canonical = volas_directive::stringify(node);
+                    let canonical = volas_directive::stringify(node.as_ref());
                     new_cols.iter().find(|(n, _)| *n == canonical).expect("computed above").1.clone()
                 }
             });
@@ -470,18 +478,22 @@ impl PyDataFrame {
         Ok(if self.window.is_some() { df.slice(start, start + len) } else { df })
     }
 
-    /// Bind and compute a new directive (`directive` as written, parsed to `node`) over
-    /// `frame` — the binding frame: a bare name that is both a data column and a
-    /// built-in command is rejected first.
+    /// Bind a new directive (`directive` as written, parsed to `node`) against `frame` —
+    /// the binding frame (see [`bind`](Self::bind)) — and compute it over that frame.
     pub(crate) fn evaluate(
         &self,
         frame: &DataFrame,
         node: &volas_directive::Ast,
         directive: &str,
     ) -> PyResult<Column> {
-        volas_directive::check_ambiguous_names(node, |n| frame.has_column(n), directive)
-            .map_err(value_err)?;
-        execute(frame, node).map_err(value_err)
+        execute(frame, &Self::bind(frame, node, directive)?).map_err(value_err)
+    }
+
+    /// Bind a new directive (`directive` as written, parsed to `node`) against `frame`:
+    /// each bare name reads the data column or the built-in command it names, and one
+    /// that is both is rejected.
+    fn bind(frame: &DataFrame, node: &volas_directive::Ast, directive: &str) -> PyResult<volas_directive::Ast> {
+        volas_directive::bind_frame(node, &|n| frame.has_column(n), directive).map_err(value_err)
     }
 
     /// Refuse a data column `name` that a cached directive reads as the built-in
@@ -489,9 +501,9 @@ impl PyDataFrame {
     /// directive refreshes. Off the hot path (a column add / overwrite).
     fn check_new_data_column(&self, name: &str) -> PyResult<()> {
         let mut users = Vec::new();
-        for cached in self.inner.names().iter().filter(|n| n.as_str() != name && self.inner.is_computed(n)) {
-            let node = parse(cached).map_err(directive_err)?;
-            if volas_directive::uses_bare_command(&node, name) {
+        for cached in self.inner.names().iter().filter(|n| n.as_str() != name) {
+            let reads = self.inner.computed_directive(cached).map(bound_directive);
+            if reads.is_some_and(|node| volas_directive::uses_bare_command(node, name)) {
                 users.push(format!("'{cached}'"));
             }
         }

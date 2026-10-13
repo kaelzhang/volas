@@ -6,27 +6,32 @@
 //! supplied token or substitutes the spec default — validation, defaulting, and
 //! type conversion are the same single pass (see [`crate::spec::ArgBound::bind`]),
 //! so there is no separate "validate then re-read" stage and the default value
-//! lives only in the spec. The resulting [`Ast`] carries canonical names and
-//! ready typed [`ArgValue`]s, so `exec` / `lookback` / `stringify` never re-parse,
-//! re-default, or re-validate.
+//! lives only in the spec. The resulting [`Ast`] carries canonical names, ready typed
+//! [`ArgValue`]s and each command's [`CommandSpec`], so `exec` / `lookback` /
+//! `stringify` never re-parse, re-default, re-validate or look the line up again.
+//!
+//! Binding has three forms: [`bind_node`] (frame-blind: a bare name stays a name),
+//! [`bind_frame`] (against a frame's data columns: a bare name becomes the column or the
+//! command it names, or is rejected as ambiguous) and [`bind_form`] (lenient on an absent
+//! argument or operand, for `directive_stringify`).
 
 use crate::spec::{
     canon_sub, command_spec, is_command, normalize, CommandSpec, HV_SESSION_MINUTES,
     HV_TRADING_DAYS,
 };
-use crate::types::{ArgValue, Ast, Command, Cst, Node};
+use crate::types::{ArgValue, Ast, Bound, BoundNode, Command, Cst, Form, FormArgs, Node};
 use volas_core::{Result, VolasError};
 use volas_time::Span;
 
 /// Lower a concrete syntax tree to a bound AST. A bare [`Node::Name`] is left
-/// unbound — without a frame it cannot be told apart from a column reference, so
-/// its command validation is deferred to `exec` (column-first, then [`bind_command`]).
-pub fn bind_node(cst: &Cst) -> Result<Ast> {
+/// unbound — without a frame it cannot be told apart from a column reference; see
+/// [`bind_frame`].
+pub(crate) fn bind_node(cst: &Cst) -> Result<BoundNode> {
     Ok(match cst {
         Node::Name(s) => Node::Name(s.clone()),
         Node::Scalar(v) => Node::Scalar(*v),
         Node::Command(c) => {
-            Node::Command(bind_command(&c.name, c.sub.as_deref(), &c.args, &c.series)?)
+            Node::Command(bind_command_node(&c.name, c.sub.as_deref(), &c.args, &c.series)?)
         }
         Node::Unary { op, operand } => Node::Unary {
             op: *op,
@@ -40,51 +45,74 @@ pub fn bind_node(cst: &Cst) -> Result<Ast> {
     })
 }
 
+/// The spec of `name` / `sub` (canonical), or the error naming why there is none.
+fn spec_of(name: &str, sub: Option<&str>) -> Result<CommandSpec> {
+    match command_spec(name, sub) {
+        Some(spec) => Ok(spec),
+        None if is_command(name) => Err(VolasError::Value(match sub {
+            Some(s) => format!("command \"{name}\" has no sub-command \"{s}\""),
+            None => format!("command \"{name}\" requires a sub-command"),
+        })),
+        None => Err(VolasError::Value(format!("unknown command \"{name}\""))),
+    }
+}
+
+/// `Err` when `name` is given more arguments or operands than its spec has slots.
+fn check_counts(name: &str, spec: &CommandSpec, args: usize, series: usize) -> Result<()> {
+    if args > spec.args.len() {
+        return Err(VolasError::Value(format!(
+            "command \"{name}\" accepts at most {} argument(s), got {args}",
+            spec.args.len()
+        )));
+    }
+    if series > spec.series.len() {
+        return Err(VolasError::Value(format!(
+            "command \"{name}\" accepts at most {} series operand(s), got {series}",
+            spec.series.len()
+        )));
+    }
+    Ok(())
+}
+
+/// Bind the supplied token `s` of slot `i` against its bound.
+fn bind_arg(name: &str, spec: &CommandSpec, i: usize, s: &str) -> Result<ArgValue> {
+    spec.args[i]
+        .bound
+        .bind(s)
+        .map_err(|why| VolasError::Value(format!("{name}: argument #{i} {why}, got '{s}'")))
+}
+
+/// Whether an operand slot is filled: an absent slot or an empty name leaves it to the
+/// command's default column.
+fn filled<A>(series: &[Node<A>], i: usize) -> bool {
+    series.get(i).is_some_and(|n| !matches!(n, Node::Name(s) if s.is_empty()))
+}
+
 /// Validate and resolve one command into its bound form: canonical name / sub,
-/// arguments parsed-checked-defaulted in a single pass, series operands lowered.
-/// The one boundary where a bad configuration errors loudly (a zero window, an
-/// out-of-domain seed, a NaN multiplier, inverted `mavp` limits, a missing
-/// required argument, an unknown command / sub) instead of becoming a
-/// valid-shaped column with no signal (V17). Also called at `exec` for a bare
-/// `Name` that resolves to a command.
-pub fn bind_command(
+/// arguments parsed-checked-defaulted in a single pass, operands lowered, the line's
+/// spec attached. The one boundary where a bad configuration errors loudly (a zero
+/// window, an out-of-domain seed, a NaN multiplier, inverted `mavp` limits, a missing
+/// required argument or operand, more operands than the line reads, an unknown
+/// command / sub) instead of becoming a valid-shaped column with no signal (V17).
+pub(crate) fn bind_command_node(
     name: &str,
     sub: Option<&str>,
     args: &[Option<String>],
     series: &[Cst],
-) -> Result<Command<Box<[ArgValue]>>> {
+) -> Result<Command<Bound>> {
     let name = normalize(name);
     let name = name.as_ref();
     let sub = canon_sub(name, sub);
     let sub = sub.as_deref();
-
-    let spec = match command_spec(name, sub) {
-        Some(spec) => spec,
-        None if is_command(name) => {
-            return Err(VolasError::Value(match sub {
-                Some(s) => format!("command \"{name}\" has no sub-command \"{s}\""),
-                None => format!("command \"{name}\" requires a sub-command"),
-            }));
-        }
-        None => return Err(VolasError::Value(format!("unknown command \"{name}\""))),
-    };
-    if args.len() > spec.args.len() {
-        return Err(VolasError::Value(format!(
-            "command \"{name}\" accepts at most {} argument(s), got {}",
-            spec.args.len(),
-            args.len()
-        )));
-    }
+    let spec = spec_of(name, sub)?;
+    check_counts(name, &spec, args.len(), series.len())?;
 
     // One pass over the spec: parse-and-check a supplied token, or take the
     // (valid-by-construction) default; a missing required argument errors.
     let mut bound = Vec::with_capacity(spec.args.len());
     for (i, arg) in spec.args.iter().enumerate() {
         let value = match args.get(i).and_then(|o| o.as_deref()) {
-            Some(s) => arg
-                .bound
-                .bind(s)
-                .map_err(|why| VolasError::Value(format!("{name}: argument #{i} {why}, got '{s}'")))?,
+            Some(s) => bind_arg(name, &spec, i, s)?,
             None => arg
                 .default
                 .value()
@@ -92,30 +120,119 @@ pub fn bind_command(
         };
         bound.push(value);
     }
-
     bind_cross_args(name, &bound)?;
+    if let Some(i) = (0..spec.series.len()).find(|&i| spec.series[i].is_empty() && !filled(series, i)) {
+        return Err(VolasError::Value(format!("{name}: series argument #{i} is required")));
+    }
 
     let series = series.iter().map(bind_node).collect::<Result<Vec<_>>>()?;
     Ok(Command {
         name: name.to_string(),
         sub: sub.map(str::to_string),
-        args: bound.into_boxed_slice(),
+        args: Bound { values: bound.into_boxed_slice(), spec, bare: None },
         series,
     })
 }
 
-/// The bare-name rule for the frame-blind APIs: without a frame a bare name is
-/// taken as a command, so a known command with no sub-less form — `kdj`, `stoch`,
-/// `vortex`, … — is rejected, exactly as `df[d]` rejects it at execute. An unknown
-/// bare name is an unverifiable column reference and passes.
-fn check_bare_name(name: &str) -> Result<()> {
-    let name = normalize(name);
-    if is_command(&name) && command_spec(&name, None).is_none() {
-        return Err(VolasError::Value(format!(
-            "command \"{name}\" requires a sub-command"
-        )));
+/// Bind a command's raw tokens and operands into an opaque executable directive.
+pub fn bind_command(
+    name: &str,
+    sub: Option<&str>,
+    args: &[Option<String>],
+    series: &[Cst],
+) -> Result<Ast> {
+    bind_command_node(name, sub, args, series).map(|cmd| finish(Node::Command(cmd)))
+}
+
+/// The command a bare `name` runs as: every argument at its default, the spelling kept.
+pub(crate) fn bind_bare(name: &str) -> Result<Command<Bound>> {
+    let mut cmd = bind_command_node(name, None, &[], &[])?;
+    cmd.args.bare = Some(name.into());
+    Ok(cmd)
+}
+
+/// Whether `name` written bare (no colon, no arguments) is a built-in command it can
+/// run as: every argument has a default and every input a default column (`repeat`,
+/// whose input is a required `@` operand, cannot run bare).
+pub fn is_bare_command(name: &str) -> bool {
+    command_spec(&normalize(name), None).is_some_and(|spec| spec.usable_bare())
+}
+
+/// The R17 error for a bare `name` in `directive` that is both a data column and a
+/// built-in command usable bare.
+fn ambiguous(name: &str, directive: &str) -> VolasError {
+    VolasError::Value(format!(
+        "ambiguous name '{name}' in '{directive}': it is both a column of this DataFrame \
+         and the built-in command '{command}'. Write '{name}:' to use the command, or \
+         rename the column — df.rename(columns={{'{name}': '{name}_pct'}}) — to use the \
+         data.",
+        command = normalize(name)
+    ))
+}
+
+/// Bind a directive against a frame whose data columns `is_column` names: each bare
+/// name becomes what it reads — a data column stays a name; a built-in command becomes
+/// that command (all defaults, its spelling kept, so it renders as written); anything
+/// else stays a name (an absent column, an error at execution). A name that is both a
+/// data column and a command usable bare is ambiguous, and `directive` (as written) is
+/// rejected, naming both ways out. The result reads no bare name as a command, so it
+/// executes the same on every later frame.
+pub fn bind_frame(node: &Ast, is_column: &impl Fn(&str) -> bool, directive: &str) -> Result<Ast> {
+    bind_frame_node(node.node(), is_column, directive).map(finish)
+}
+
+/// Seal a validated tree together with its continuation decision.
+pub(crate) fn finish(node: BoundNode) -> Ast { Ast::bound(node) }
+
+fn bind_frame_node(node: &BoundNode, is_column: &impl Fn(&str) -> bool, directive: &str) -> Result<BoundNode> {
+    Ok(match node {
+        Node::Name(name) if name.is_empty() => node.clone(),
+        Node::Name(name) if is_column(name) => {
+            if is_bare_command(name) {
+                return Err(ambiguous(name, directive));
+            }
+            node.clone()
+        }
+        Node::Name(name) if is_command(&normalize(name)) => Node::Command(bind_bare(name)?),
+        Node::Name(_) | Node::Scalar(_) => node.clone(),
+        Node::Command(c) => Node::Command(Command {
+            name: c.name.clone(),
+            sub: c.sub.clone(),
+            args: c.args.clone(),
+            series: c
+                .series
+                .iter()
+                .map(|s| bind_frame_node(s, is_column, directive))
+                .collect::<Result<_>>()?,
+        }),
+        Node::Unary { op, operand } => Node::Unary {
+            op: *op,
+            operand: Box::new(bind_frame_node(operand, is_column, directive)?),
+        },
+        Node::Binary { left, op, right } => Node::Binary {
+            left: Box::new(bind_frame_node(left, is_column, directive)?),
+            op: *op,
+            right: Box::new(bind_frame_node(right, is_column, directive)?),
+        },
+    })
+}
+
+/// Whether the frame-bound `node` reads the built-in command spelled exactly `name`
+/// through a bare name — so a data column added under that name would have changed
+/// what it reads.
+pub fn uses_bare_command(node: &Ast, name: &str) -> bool {
+    uses_bare_node(node.node(), name)
+}
+
+fn uses_bare_node(node: &BoundNode, name: &str) -> bool {
+    match node {
+        Node::Name(_) | Node::Scalar(_) => false,
+        Node::Command(c) => {
+            c.args.bare.as_deref() == Some(name) || c.series.iter().any(|s| uses_bare_node(s, name))
+        }
+        Node::Unary { operand, .. } => uses_bare_node(operand, name),
+        Node::Binary { left, right, .. } => uses_bare_node(left, name) || uses_bare_node(right, name),
     }
-    Ok(())
 }
 
 /// The bare-name rule for `directive_lookback`: without a frame a bare name is taken
@@ -125,177 +242,110 @@ fn check_bare_name(name: &str) -> Result<()> {
 /// unverifiable column reference and passes.
 fn check_bare_command(name: &str) -> Result<()> {
     if is_command(&normalize(name)) {
-        bind_command(name, None, &[], &[])?;
+        bind_command_node(name, None, &[], &[])?;
     }
     Ok(())
-}
-
-/// Whether `name` written bare (no colon, no arguments) is a built-in command it can
-/// run as: it binds with every argument at its default, and reads a default column for
-/// its input (`repeat`, whose input is a required `@` operand, cannot run bare).
-/// The fact is a property of the command alone, so it is decided once per command (on
-/// first use) and looked up after — off the refresh path's per-column cost.
-pub fn is_bare_command(name: &str) -> bool {
-    static BARE: std::sync::OnceLock<std::collections::HashSet<&'static str>> = std::sync::OnceLock::new();
-    let bare = BARE.get_or_init(|| {
-        crate::spec::COMMANDS
-            .iter()
-            .copied()
-            .filter(|c| {
-                bind_command(c, None, &[], &[]).is_ok()
-                    && command_spec(c, None).is_some_and(|spec| !spec.series.is_empty())
-            })
-            .collect()
-    });
-    bare.contains(normalize(name).as_ref())
-}
-
-/// Every bare name of a directive — the top-level one and those inside `@` operands.
-fn bare_names<'a, A>(node: &'a Node<A>, out: &mut Vec<&'a str>) {
-    match node {
-        Node::Name(name) => out.push(name),
-        Node::Scalar(_) => {}
-        Node::Command(c) => c.series.iter().for_each(|s| bare_names(s, out)),
-        Node::Unary { operand, .. } => bare_names(operand, out),
-        Node::Binary { left, right, .. } => {
-            bare_names(left, out);
-            bare_names(right, out);
-        }
-    }
-}
-
-/// The bind-time rule for a bare name that a frame could read either way: a name that
-/// is both a data column (`is_column`) and a built-in command usable bare is ambiguous,
-/// and `directive` (as written) is rejected, naming both ways out.
-pub fn check_ambiguous_names(node: &Ast, is_column: impl Fn(&str) -> bool, directive: &str) -> Result<()> {
-    let mut names = Vec::new();
-    bare_names(node, &mut names);
-    match names.into_iter().find(|n| is_column(n) && is_bare_command(n)) {
-        None => Ok(()),
-        Some(name) => Err(VolasError::Value(format!(
-            "ambiguous name '{name}' in '{directive}': it is both a column of this DataFrame \
-             and the built-in command '{command}'. Write '{name}:' to use the command, or \
-             rename the column — df.rename(columns={{'{name}': '{name}_pct'}}) — to use the \
-             data.",
-            command = normalize(name)
-        ))),
-    }
-}
-
-/// Whether `node` reads the built-in command `name` through a bare name spelled exactly
-/// `name` — so a data column added under that name would change what it reads.
-pub fn uses_bare_command(node: &Ast, name: &str) -> bool {
-    let mut names = Vec::new();
-    bare_names(node, &mut names);
-    names.contains(&name) && is_bare_command(name)
 }
 
 /// Walk a bound [`Ast`] applying only the bare-name rule — every `Command` was
 /// already validated when `bind` produced the tree. Used by `directive_lookback`.
-pub fn check_bare<A>(node: &Node<A>) -> Result<()> {
+pub fn check_bare(node: &Ast) -> Result<()> { check_bare_node(node.node()) }
+
+pub(crate) fn check_bare_node(node: &BoundNode) -> Result<()> {
     match node {
         Node::Name(name) => check_bare_command(name),
         Node::Scalar(_) => Ok(()),
-        Node::Command(c) => c.series.iter().try_for_each(check_bare),
-        Node::Unary { operand, .. } => check_bare(operand),
+        Node::Command(c) => c.series.iter().try_for_each(check_bare_node),
+        Node::Unary { operand, .. } => check_bare_node(operand),
         Node::Binary { left, right, .. } => {
-            check_bare(left)?;
-            check_bare(right)
+            check_bare_node(left)?;
+            check_bare_node(right)
         }
     }
 }
 
-/// Validate a raw [`Cst`] for the form-level `directive_stringify`. Like `bind` it
-/// rejects an unknown command / sub-command, too many arguments, an out-of-domain
-/// *supplied* argument, a bad cross-argument rule, and a bare sub-requiring name —
-/// but it is lenient on a *missing required* argument, since a form such as
-/// `donchian.upper` names a real indicator whose period is supplied only at use. So
-/// `directive_stringify` rejects exactly what `df[d]` would except for the absent
-/// period of an otherwise-valid form.
-pub fn check_form(cst: &Cst) -> Result<()> {
-    match cst {
-        Node::Name(name) => check_bare_name(name),
-        Node::Scalar(_) => Ok(()),
+/// Bind a raw [`Cst`] as a directive *form*, for `directive_stringify`. Like `bind` it
+/// rejects an unknown command / sub-command, too many arguments or operands, an
+/// out-of-domain *supplied* argument, a bad cross-argument rule, and a bare
+/// sub-requiring name — but it is lenient on an *absent required* argument or operand,
+/// since a form such as `donchian.upper` names a real indicator whose period is
+/// supplied only at use. Every supplied argument is bound, so the form renders exactly
+/// as the column the directive caches under.
+pub fn bind_form(cst: &Cst) -> Result<Form> {
+    Ok(match cst {
+        Node::Name(name) => {
+            let canonical = normalize(name);
+            if is_command(&canonical) && command_spec(&canonical, None).is_none() {
+                return Err(VolasError::Value(format!("command \"{canonical}\" requires a sub-command")));
+            }
+            Node::Name(name.clone())
+        }
+        Node::Scalar(v) => Node::Scalar(*v),
         Node::Command(c) => {
             let name = normalize(&c.name);
             let sub = canon_sub(&name, c.sub.as_deref());
-            let spec = match command_spec(&name, sub.as_deref()) {
-                Some(spec) => spec,
-                None if is_command(&name) => {
-                    return Err(VolasError::Value(match sub.as_deref() {
-                        Some(s) => format!("command \"{name}\" has no sub-command \"{s}\""),
-                        None => format!("command \"{name}\" requires a sub-command"),
-                    }));
-                }
-                None => return Err(VolasError::Value(format!("unknown command \"{name}\""))),
-            };
-            if c.args.len() > spec.args.len() {
-                return Err(VolasError::Value(format!(
-                    "command \"{name}\" accepts at most {} argument(s), got {}",
-                    spec.args.len(),
-                    c.args.len()
-                )));
-            }
-            for (i, arg) in spec.args.iter().enumerate() {
-                if let Some(s) = c.args.get(i).and_then(|o| o.as_deref()) {
-                    arg.bound.bind(s).map_err(|why| {
-                        VolasError::Value(format!("{name}: argument #{i} {why}, got '{s}'"))
-                    })?;
-                }
-            }
-            check_form_cross(&name, &spec, &c.args)?;
-            c.series.iter().try_for_each(check_form)
+            let spec = spec_of(&name, sub.as_deref())?;
+            check_counts(&name, &spec, c.args.len(), c.series.len())?;
+            let values = (0..spec.args.len())
+                .map(|i| match c.args.get(i).and_then(|o| o.as_deref()) {
+                    Some(s) => bind_arg(&name, &spec, i, s).map(Some),
+                    None => Ok(None),
+                })
+                .collect::<Result<Vec<_>>>()?;
+            check_form_cross(&name, &spec, &values)?;
+            Node::Command(Command {
+                name: name.to_string(),
+                sub: sub.map(|s| s.into_owned()),
+                args: FormArgs { values, spec },
+                series: c.series.iter().map(bind_form).collect::<Result<_>>()?,
+            })
         }
-        Node::Unary { operand, .. } => check_form(operand),
-        Node::Binary { left, right, .. } => {
-            check_form(left)?;
-            check_form(right)
-        }
-    }
+        Node::Unary { op, operand } => Node::Unary { op: *op, operand: Box::new(bind_form(operand)?) },
+        Node::Binary { left, op, right } => Node::Binary {
+            left: Box::new(bind_form(left)?),
+            op: *op,
+            right: Box::new(bind_form(right)?),
+        },
+    })
 }
 
-/// Cross-argument rules over *supplied* raw tokens (lenient): checked only when both
-/// operands are present, mirroring [`bind_cross_args`] without requiring them.
-fn check_form_cross(name: &str, spec: &CommandSpec, args: &[Option<String>]) -> Result<()> {
-    if name == "hv" {
-        // hv's time frame / trading days / session all have defaults, so the rule runs
-        // on every form; an absent slot takes its default, as `bind_command` would (a
-        // supplied slot was already bound above, so every slot resolves).
-        let slot = |i: usize| match args.get(i).and_then(|o| o.as_deref()) {
-            Some(s) => spec.args[i].bound.bind(s).ok(),
-            None => spec.args[i].default.value(),
-        };
-        let slots: Option<Vec<ArgValue>> = (1..=3).map(slot).collect();
-        slots.map_or(Ok(()), |v| check_hv_args(&v[0], &v[1], &v[2]))?;
-    }
-    if name == "mavp" {
-        let at = |i: usize| args.get(i).and_then(|o| o.as_deref()).and_then(|s| s.parse::<usize>().ok());
-        if let (Some(min_p), Some(max_p)) = (at(0), at(1)) {
-            if min_p > max_p {
-                return Err(VolasError::Value(format!(
-                    "mavp: min_period ({min_p}) must be <= max_period ({max_p})"
-                )));
-            }
+/// Cross-argument rules over a form's arguments: an absent slot takes its default, and
+/// a rule an absent required slot leaves unknown is skipped.
+fn check_form_cross(name: &str, spec: &CommandSpec, values: &[Option<ArgValue>]) -> Result<()> {
+    let slot = |i: usize| values[i].clone().or_else(|| spec.args[i].default.value());
+    match name {
+        // hv's time frame / trading days / session all have defaults: the rule runs on
+        // every form
+        "hv" => {
+            let known = |i| slot(i).expect("hv's time frame, trading days and session have defaults");
+            check_hv_args(&known(1), &known(2), &known(3))
         }
+        "mavp" => match (slot(0), slot(1)) {
+            (Some(lo), Some(hi)) => check_mavp_limits(&lo, &hi),
+            _ => Ok(()),
+        },
+        _ => Ok(()),
     }
-    Ok(())
 }
 
 /// Cross-argument domain rules — a constraint *between* two resolved arguments
 /// that no single-argument bound can express.
 fn bind_cross_args(name: &str, args: &[ArgValue]) -> Result<()> {
-    if name == "hv" {
-        check_hv_args(&args[1], &args[2], &args[3])?;
+    match name {
+        "hv" => check_hv_args(&args[1], &args[2], &args[3]),
+        "mavp" => check_mavp_limits(&args[0], &args[1]),
+        _ => Ok(()),
     }
-    if name == "mavp" {
-        // Each per-bar period is clamped into [min_period, max_period]; inverted
-        // limits are meaningless (and panic `i64::clamp`). Both are bound `>= 1`.
-        let (min_p, max_p) = (args[0].as_usize(), args[1].as_usize());
-        if min_p > max_p {
-            return Err(VolasError::Value(format!(
-                "mavp: min_period ({min_p}) must be <= max_period ({max_p})"
-            )));
-        }
+}
+
+/// `mavp`'s limits: each per-bar period is clamped into `[min_period, max_period]`;
+/// inverted limits are meaningless (and panic `i64::clamp`). Both are bound `>= 1`.
+fn check_mavp_limits(min_p: &ArgValue, max_p: &ArgValue) -> Result<()> {
+    let (min_p, max_p) = (min_p.as_usize(), max_p.as_usize());
+    if min_p > max_p {
+        return Err(VolasError::Value(format!(
+            "mavp: min_period ({min_p}) must be <= max_period ({max_p})"
+        )));
     }
     Ok(())
 }
@@ -327,108 +377,4 @@ fn check_hv_args(time_frame: &ArgValue, trading_days: &ArgValue, session: &ArgVa
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::{parse, parse_cst};
-
-    /// `bind` (via `parse`) is the single validation boundary; an out-of-domain
-    /// configuration is rejected, with the diagnostic naming the offending command.
-    fn err_msg(d: &str) -> String {
-        format!("{:?}", parse(d).unwrap_err())
-    }
-
-    #[test]
-    fn binds_every_command_error_branch() {
-        // unknown command / sub-command existence / count.
-        assert!(err_msg("frobnicate:5").contains("unknown command"));
-        assert!(err_msg("kdj:9").contains("requires a sub-command"));
-        assert!(err_msg("macd.bogus").contains("no sub-command"));
-        assert!(err_msg("ema:5,6").contains("at most"));
-        // a supplied argument out of its domain, and a missing required slot.
-        assert!(err_msg("ma:0").contains(">= 1"));
-        assert!(err_msg("ema:").contains("argument #0 is required"));
-        // cross-argument rule (mavp's inverted period limits).
-        assert!(err_msg("mavp:30,2@close,close").contains("min_period"));
-        // hv: a bar longer than the session; an argument the frame does not use.
-        assert!(err_msg("hv:10,8h,252,240").contains("a 8h bar is longer than the 240-minute"));
-        assert!(err_msg("hv:10,1d,252,390").contains("session_minutes applies to sub-day"));
-        assert!(err_msg("hv:10,1w,365").contains("trading_days applies to sub-day and day"));
-        for ok in ["hv:10,4h,252,240", "hv:10,1d,365", "hv:10,1w,252,1440", "hv:10,1M"] {
-            assert!(parse(ok).is_ok(), "{ok}");
-        }
-    }
-
-    #[test]
-    fn binds_through_operators_and_series() {
-        // A valid tree of every node kind binds; a nested invalid command anywhere
-        // (unary operand, either binary side, or a series sub-expression) is rejected.
-        for ok in ["3.5", "close", "~(close>10)", "ma:5 + close", "repeat:2@(close>10)"] {
-            assert!(parse(ok).is_ok(), "{ok} should bind");
-        }
-        for bad in ["-(ma:0)", "ma:0 + close", "close + rsi:0", "repeat:2@(ma:0>10)"] {
-            assert!(parse(bad).is_err(), "{bad} should be rejected");
-        }
-    }
-
-    #[test]
-    fn binds_bare_name_command_on_the_fly() {
-        // A bare name resolves its defaults (no-arg `obv`, default-only `boll` -> 20);
-        // a name needing a sub or a required argument errors; an unknown name too.
-        assert!(bind_command("obv", None, &[], &[]).is_ok());
-        let boll = bind_command("boll", None, &[], &[]).unwrap();
-        assert_eq!(boll.args[0], ArgValue::Usize(20));
-        assert_eq!(boll.name, "boll");
-        // `cdl` folds to the canonical `style` namespace; sub canonicalizes.
-        let doji = bind_command("CDL", Some("doji"), &[], &[]).unwrap();
-        assert_eq!(doji.name, "style");
-        assert!(bind_command("ema", None, &[], &[]).is_err()); // required period
-        assert!(bind_command("atr", None, &[], &[]).is_err()); // required period
-        assert!(bind_command("kdj", None, &[], &[]).is_err()); // needs a sub
-        assert!(bind_command("nope", None, &[], &[]).is_err()); // unknown
-    }
-
-    #[test]
-    fn check_directive_validates_commands_leniently() {
-        // Operates on a raw `Cst` (no binding): rejects an unknown command, a bad
-        // sub-command, and a bare sub-requiring name — even nested — but is lenient
-        // on arguments (`donchian.upper` names a real form, period supplied at use).
-        let check = |d: &str| check_form(&parse_cst(d).unwrap());
-        assert!(check("close").is_ok()); // column reference (unknown bare name)
-        assert!(check("obv").is_ok()); // no-arg command
-        assert!(check("3.5").is_ok()); // scalar
-        assert!(check("close > 5").is_ok()); // binary with a scalar operand
-        assert!(check("ma:5@close").is_ok()); // command with a valid series operand
-        assert!(check("rsi").is_ok()); // a required-arg command still has a main form
-        assert!(check("donchian.upper").is_ok()); // valid form, period absent (lenient)
-        assert!(check("kdj").is_err()); // bare name needs a sub
-        assert!(check("~kdj").is_err()); // nested in a unary
-        assert!(check("kdj > 0").is_err()); // nested in a binary
-        assert!(check("ma:5@vortex").is_err()); // bare sub-requiring name in a series
-        assert!(check("ma.foo").is_err()); // unknown sub-command
-        assert!(check("kdj:9").is_err()); // a Command whose command needs a sub-command
-        assert!(check("frobnicate:5").is_err()); // unknown command
-        assert!(check("ema:2,3").is_err()); // too many arguments
-        assert!(check("ma:0").is_err()); // out-of-domain supplied argument
-        assert!(check("mavp:2,30@close,close").is_ok()); // valid cross-arg (min <= max)
-        assert!(check("mavp:30,2@close,close").is_err()); // inverted period limits
-        assert!(check("mavp@close,close").is_ok()); // both absent -> cross-arg skipped
-        // hv's rule runs on the form too, absent slots taking their defaults.
-        assert!(check("hv").is_ok());
-        assert!(check("hv:,8h,252,240").is_err()); // the bar outlasts the session
-        assert!(check("hv:,1w,365").is_err()); // trading_days unused by weekly bars
-        assert!(check("hv:,1d,,390").is_err()); // session_minutes unused by day bars
-        assert!(check("hv:,4h,,240").is_ok());
-    }
-
-    #[test]
-    fn check_bare_walks_every_node_kind() {
-        // `check_bare` (the bound-`Ast` path for `directive_lookback`) applies only the
-        // bare-name rule, but visits every node kind.
-        let bare = |d: &str| check_bare(&parse(d).unwrap());
-        assert!(bare("close").is_ok()); // Name (column reference)
-        assert!(bare("5").is_ok()); // Scalar
-        assert!(bare("~(close > 5)").is_ok()); // Unary -> Binary -> Name / Scalar
-        assert!(bare("ma:5 + ma:10").is_ok()); // Binary -> Command (-> series)
-        assert!(bare("kdj").is_err()); // a bare name needing a sub
-    }
-}
+mod tests;

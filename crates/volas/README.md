@@ -160,7 +160,7 @@ assert_eq!(bullish.len(), 40);
 
 // `@`-suffix picks input columns; canonical form drops a default input.
 let ast = parse("ma:20@close").unwrap();
-assert_eq!(stringify(&ast), "ma:20");
+assert_eq!(stringify(&*ast), "ma:20");
 ```
 
 A directive has the shape `name:arg0,arg1,...@col0,col1,...` — `name` is the indicator,

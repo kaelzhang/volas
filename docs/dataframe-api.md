@@ -116,7 +116,9 @@ Which gets the 2-period simple moving average on column `"close"`.
   one (`ma`, EMA, Wilder
   smoothing, a cumulative line, …) can only be computed this way. Or pass an **int**: the
   margin alone, declaring nothing. Each list entry must be an indicator directive
-  (`'ma:50'`); a bare/typo'd name (`'ma50'`) and an empty list are rejected.
+  (`'ma:50'`); a bare/typo'd name (`'ma50'`) and an empty list are rejected, and so is a
+  directive whose column name is a data column of the frame (`'macd:'` beside a data
+  column `macd`): rename that column to declare it.
 
 ### Bounded rolling window
 
@@ -169,15 +171,15 @@ highest class among its parts.
 
 - **Declared directives** (`max_lookback=[...]`) are computed at construction over every
   row given — the whole history — and cached. A recursive one keeps a **checkpoint** of
-  its history: its carried state as of a row before the retained rows, plus the inputs a
-  resume reads before its first row. It moves with each drop of the head, and whenever
-  the column has to be recomputed (after a write, a re-sent row the state cannot follow,
-  a run of missing values) the frame replays from it — never restarting the recursion on
-  the rows it holds. A recursion no carried state covers — one inside an `@` operand
-  (`'ema:5@(rsi:5)'`) or combined with other values (`'ema:3 - ema:5'`,
-  `'close > ema:20'`), or a command that recomputes it (`kcw`, `crsi`, `stoch_momentum`,
-  a moving-average type `ma:5,1`) — cannot be kept and is rejected at construction:
-  declare the recursions it combines and combine their columns.
+  its history: the same continuation state used for append refresh, including every
+  stateful node's kernel state, complete input tail and output ring. It moves with each
+  drop of the head. A write replays the directive from that state; missing rows emit
+  NaN and leave a recursion at its last complete row. During warm-up the checkpoint
+  retains the raw input rows until all nodes have a state.
+  Declared chains such as `'ema:5@(rsi:5)'`, `'ema:3 - ema:5'`, `'close > ema:20'`,
+  `'ema:2@(maxindex:2)'` and `'close-ma:5+obv'` stay exact across appends, compaction
+  and visible writes, including on time-frame frames. CRSI, stochastic momentum,
+  and composite averages at every MA type also carry their states and can be declared.
 - **A directive requested later** (`wf[d]`, `wf[[...]]`, `wf.exec(d)`) is computed only
   when it is of class 1 and reads at most `max_lookback` rows before each row. Classes 2
   and 3 must be declared; a later request raises, naming the two correct paths (for a
@@ -189,8 +191,8 @@ ValueError: cannot compute 'ma:5' on this windowed frame: it carries a running a
 ```
 
 A frame copied into a window (`DataFrame(df, window=..., max_lookback=...)`) keeps the
-cached columns it carries only when the window keeps them exactly (within the margin, and
-not a recursion no carried state covers); otherwise the construction raises.
+cached columns it carries only when their lookbacks fit the margin; otherwise the
+construction raises.
 
 Assigning a whole column (`wf['x'] = values`, a scalar, an array or a Series of the
 visible rows) writes the visible rows only: the hidden margin keeps the history it
@@ -974,8 +976,9 @@ For an in-place, **truncating** cast (the NumPy / pandas `astype` idiom), use
 ### directive_stringify(directive: str) -> str
 
 Get the canonical full name of a `directive` — the actual column name volas caches
-it under. The command name is lowercased and default arguments / series are dropped
-to save space.
+it under. The command name is lowercased, each argument is written as its value, and
+default arguments / series are dropped to save space, so every spelling of a directive
+has one name (see [Cached column names](directives.md#cached-column-names)).
 
 ```py
 from volas import directive_stringify
@@ -986,9 +989,14 @@ directive_stringify('kdj.j')
 directive_stringify('kdj.j:9,3,2,100@high,close,close')
 # 'kdj.j:,,2,100@,close'
 
-# command names are case-insensitive and canonicalize to lowercase
+# command names are case-insensitive and canonicalize to lowercase; default
+# arguments are dropped
 directive_stringify('MACD:12,26')
 # 'macd'
+
+# arguments are written as their values
+directive_stringify('ma:05')
+# 'ma:5'
 ```
 
 ### directive_lookback(directive: str) -> int

@@ -20,7 +20,7 @@ fn frame() -> DataFrame {
         None,
     )
     .unwrap();
-    df.set_computed("c", Reach { lookback: 0, resume: 0, continuation: 0, history: History::Window });
+    df.set_computed("c", std::sync::Arc::new(()), Reach { lookback: 0, resume: 0, continuation: 0, history: History::Window });
     df
 }
 

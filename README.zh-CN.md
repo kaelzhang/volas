@@ -242,7 +242,7 @@ df['ma:2']
 
   缺失值从不被跳过：只要桶内任一值缺失，该列的聚合结果（`'first'` / `'last'` / `'max'` / `'min'` / `'sum'` 皆然）即为缺失（全缺失的桶也是缺失，从不得到 `±inf`），实时折叠与批量 `cumulate` 结果一致。`datetime` 列不支持 `'sum'`，`bool` / `str` 列只支持 `'first'` / `'last'`；不支持的组合在构造 frame 时即被拒绝。
 - **window** `Optional[int] = None` 把它变成一个**有界滚动窗口** frame，只暴露最后 `window` 行（参见[有界滚动窗口](#有界滚动窗口)）。需要配合 `max_lookback`。
-- **max_lookback** `Optional[int | list[str]] = None` **与 `window` 同时必填**（且只在有 `window` 时有效）：可见行之前保留的隐藏 margin 行数，以及该 frame 能精确计算的 directive（参见[有界窗口能计算什么](#有界窗口能计算什么)）。传一个**指标 directive 列表**即为**声明**它们：margin 取它们 lookback 的最大值（例如 `['atr:14', 'ma:50']` → margin 49），每个声明的 directive 在构造时基于全部给定行计算并缓存——滑动累加类或递归类指标（`ma`、EMA、Wilder 平滑、累积线等）只能以这种方式计算。传一个 **int** 则只给出 margin，不声明任何 directive。每个列表项必须是指标 directive（`'ma:50'`），裸名 / 笔误（`'ma50'`）和空列表会被拒绝。
+- **max_lookback** `Optional[int | list[str]] = None` **与 `window` 同时必填**（且只在有 `window` 时有效）：可见行之前保留的隐藏 margin 行数，以及该 frame 能精确计算的 directive（参见[有界窗口能计算什么](#有界窗口能计算什么)）。传一个**指标 directive 列表**即为**声明**它们：margin 取它们 lookback 的最大值（例如 `['atr:14', 'ma:50']` → margin 49），每个声明的 directive 在构造时基于全部给定行计算并缓存——滑动累加类或递归类指标（`ma`、EMA、Wilder 平滑、累积线等）只能以这种方式计算。传一个 **int** 则只给出 margin，不声明任何 directive。每个列表项必须是指标 directive（`'ma:50'`），裸名 / 笔误（`'ma50'`）和空列表会被拒绝；列名与 frame 中某个数据列相同的 directive（数据列 `macd` 旁的 `'macd:'`）同样会被拒绝：请先重命名该数据列再声明。
 
 ### 有界滚动窗口
 
@@ -278,7 +278,7 @@ wf.ready          # True ——每个可见行都已有 atr:14 的值
 
 有界窗口只持有最近的行，因此只在能精确计算的地方计算指标。每个 directive 属于三种**历史类别**之一（由命令表统一定义）：**第 1 类**只依赖一个尾部窗口、没有滑动累加器（`roc`、`llv`、`maxindex`、`willr`、`psy`、`close > open` 等）；**第 2 类**依赖尾部窗口上的滑动累加器（`ma`、`wma`、`boll`、`stddev`、`cci`、`mfi`、`linearreg` 等）；**第 3 类**依赖之前的每一行——递归、累积线或无界计数（EMA、Wilder 平滑、`obv`、`increase` 等）。一个 directive 取其各组成部分中最高的类别。
 
-- **声明的 directive**（`max_lookback=[...]`）在构造时基于全部给定行——也就是完整历史——计算并缓存。递归类 directive 会保留其历史的**检查点（checkpoint）**：它在保留行之前某一行处的携带状态，以及续算时在首行之前需要读取的输入。检查点随每次丢弃头部而前移；每当该列需要重算（写入之后、状态无法跟随的重发行、一段缺失值），frame 都从检查点重放——绝不会在它持有的行上重新开始递归。没有携带状态能覆盖的递归——位于 `@` 操作数内部（`'ema:5@(rsi:5)'`）、与其它值组合（`'ema:3 - ema:5'`、`'close > ema:20'`），或本身就是整列重算的命令（`kcw`、`crsi`、`stoch_momentum`、均线类型参数 `ma:5,1`）——无法被保持，构造时即报错：请声明它所组合的递归 directive，再组合它们的列。
+- **声明的 directive**（`max_lookback=[...]`）在构造时基于完整历史计算并缓存。递归类 directive 的**检查点（checkpoint）**与追加续算使用同一份状态，保存每个有状态节点的内核状态、最后完整输入行及输出环。检查点随丢弃头部而前移；写入后从检查点重放整个 directive。缺失行输出 NaN，递归状态停留在上一完整行；预热期间则保存原始输入行。声明的链式表达式（`'ema:5@(rsi:5)'`、`'ema:3 - ema:5'`、`'close > ema:20'`、`'ema:2@(maxindex:2)'`、`'close-ma:5+obv'`）在追加、压缩和可见行写入后仍与完整历史精确一致，带 `time_frame` 的窗口也一样。`crsi`、`stoch_momentum` 以及选择任意均线类型的复合均线命令也保存各阶段的续算状态，可直接声明在窗口 frame 上。
 - **构造之后才请求的 directive**（`wf[d]`、`wf[[...]]`、`wf.exec(d)`）只有在它属于第 1 类、且每行之前读取的行数不超过 `max_lookback` 时才会计算。第 2 类和第 3 类必须声明；构造之后再请求会报错，并给出两条正确的路径（对已经声明的 directive，`exec` 会提示读取它的列）：
 
 ```text
@@ -796,7 +796,7 @@ df = df.tz_localize('America/New_York')         # 打上显示时区标记（见
 
 ### directive_stringify(directive: str) -> str
 
-得到 `directive` 的规范全名，也就是 volas 实际缓存时使用的列名。命令名会小写化，默认参数 / series 会被省略，以节省空间。
+得到 `directive` 的规范全名，也就是 volas 实际缓存时使用的列名。命令名会小写化，每个参数写成它的取值，默认参数 / series 会被省略，以节省空间。同一指令的所有写法只对应一个名字。
 
 ```py
 from volas import directive_stringify
@@ -807,9 +807,13 @@ directive_stringify('kdj.j')
 directive_stringify('kdj.j:9,3,2,100@high,close,close')
 # 'kdj.j:,,2,100@,close'
 
-# 命令名大小写不敏感，并规范化为小写
+# 命令名大小写不敏感，并规范化为小写；默认参数被省略
 directive_stringify('MACD:12,26')
 # 'macd'
+
+# 参数写成它的取值
+directive_stringify('ma:05')
+# 'ma:5'
 ```
 
 ### directive_lookback(directive: str) -> int
@@ -1293,6 +1297,8 @@ except DirectiveSyntaxError as e:
 ## 内置指标
 
 完整 directive 参考见 [INDICATORS.md](INDICATORS.md)，其中覆盖 Volas 独有指标、内置统计命令，以及与 TA-Lib 兼容的 directive。
+
+Rust 调用方通过 `parse` 或 `bind_frame` 获得经过校验、不可变更内部表示的 `volas_directive::Ast`。通过 `node()` 与 `continuation()` 查看它；命令参数提供只读的 `values()`、`spec()` 与 `bare()` 访问器。执行、lookback 与续算 API 都接受 `&Ast`。binder 在绑定时一次性准备续算计划，包括其中的有状态子树及其隐藏输入列。`stringify` 接受 `&Ast` 或宽松的 `&Form`，使用同一个规范渲染器。
 
 # 参与与反馈
 

@@ -10,6 +10,7 @@ from hypothesis import strategies as st
 from hypothesis.stateful import initialize, precondition, rule
 
 import volas
+import volas_rs
 
 from . import build, contracts, inventory, observe
 from .directives import stored_bare_names
@@ -206,10 +207,16 @@ class PlainMachine(FrameMachine):
 
     def _invalidate_all(self):
         # A write drops every carried state: each cached column recomputes over the
-        # rows the frame retains (a slice's history restarts at its first row).
+        # rows the frame retains — except a recursion whose history started before them
+        # (a slice past its start), which only its carried state continued: every later
+        # refresh of it raises. A windowed frame replays its declared recursions from
+        # their checkpoints.
         start = self.visible_start()
-        self.cached = {n: Entry(e.name, e.directive, e.env, start) if self.window is None else e
-                       for n, e in self.cached.items()}
+        if self.window is None:
+            self.cached = {n: Entry(e.name, e.directive, e.env, e.start, lost=True)
+                           if e.lost or (e.start < start and _recursive(n))
+                           else Entry(e.name, e.directive, e.env, start)
+                           for n, e in self.cached.items()}
         self.stale = set(self.cached) if len(self.df) else set()
 
     @precondition(lambda self: len(self.df) > 0)
@@ -256,7 +263,7 @@ class PlainMachine(FrameMachine):
             name = data.draw(st.sampled_from([ln.canonical for ln in executable_lines()][:40]))
         else:
             name = data.draw(st.sampled_from(list(self.df.columns)))
-        bare = {ln.head for ln in executable_lines() if ln.canonical == ln.head and '.' not in ln.head}
+        bare = set(volas_rs._directive_bare_commands)
         if name in bare and any(name in stored_bare_names(key) for key in self.cached if key != name):
             if contracts.COLUMN_UNDER_A_CACHED_COMMAND_RAISES:
                 self.attempt(lambda: self.df.__setitem__(name, np.zeros(len(self.df))),
@@ -294,10 +301,6 @@ class PlainMachine(FrameMachine):
         """``df = df.iloc[a:]`` and keep going on the slice (I11)."""
         if self.window is not None:
             return
-        if contracts.avoids('slice-recursive-rewarm') and any(
-                _names(e.name) & inventory.unbounded_memory() or inventory.recursive(e.name)
-                for e in self.cached.values()):
-            return  # a recursive cached column is not continued across the slice
         a = data.draw(st.integers(1, len(self.df) - 1))
         if self.stale:
             self.attempt(lambda: self.df.iloc[a:], expect_error=ValueError, label='slice while stale')
@@ -314,7 +317,14 @@ class PlainMachine(FrameMachine):
             self.store.range_kind = False
             new_len = len(self.df)
             for name in list(self.cached):
-                if contracts.SLICE_CACHED_COLUMNS_CONTINUE and volas.directive_lookback(name) <= new_len:
+                kept = contracts.SLICE_CACHED_COLUMNS_CONTINUE and volas.directive_lookback(name) <= new_len
+                if kept and _recursive(name):
+                    # a recursion continues across the slice by its carried states
+                    # (one per recursion in it), and without one (a recursion that
+                    # recomputes, or one not yet past its warm-up) stays plain data:
+                    # the model follows which, the values are checked either way
+                    kept = self.df.is_computed(name)
+                if kept:
                     continue
                 values, dtype = held[name]
                 del self.cached[name]
@@ -386,6 +396,11 @@ class PlainMachine(FrameMachine):
 def _names(text: str) -> set[str]:
     """The command names a directive mentions (lower-cased, sub-commands dropped)."""
     return {m.split('.')[0] for m in re.findall(r'[a-z_][a-z_0-9.]*', text.lower())}
+
+
+def _recursive(text: str) -> bool:
+    """Whether a directive reads a recursion anywhere in it."""
+    return inventory.recursion(text)
 
 
 def _nat_index(df: volas.DataFrame, schema) -> volas.DataFrame:

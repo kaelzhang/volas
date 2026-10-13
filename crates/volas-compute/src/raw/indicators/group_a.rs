@@ -80,7 +80,12 @@ fn volume_index(close: &[f64], volume: &[f64], on_down: bool) -> Vec<f64> {
 /// DPO Detrended Price Oscillator: `Price[(n/2 + 1) ago] - SMA_n`.
 /// Source: StockCharts — Detrended Price Oscillator (displaced form).
 pub fn dpo(close: &[f64], n: usize, origin: usize) -> Vec<f64> {
-    let sma = kernels::sma(av(close), n, origin);
+    dpo_pass(close, n, origin, &mut ())
+}
+
+/// Batch computation with terminal-state publication.
+pub fn dpo_pass<S: crate::pass::StateSink>(close: &[f64], n: usize, origin: usize, states: &mut S) -> Vec<f64> {
+    let sma = kernels::sma_pass(av(close), n, origin, states);
     let shift = n / 2 + 1;
     (0..close.len())
         .map(|i| if i >= shift { close[i - shift] - sma[i] } else { f64::NAN })
@@ -91,9 +96,16 @@ pub fn dpo(close: &[f64], n: usize, origin: usize) -> Vec<f64> {
 /// — AD's money flow volume, so a bar without range carries no flow (0, not 0/0).
 /// Source: StockCharts / Fidelity — Chaikin Money Flow.
 pub fn cmf(high: &[f64], low: &[f64], close: &[f64], volume: &[f64], n: usize, origin: usize) -> Vec<f64> {
+    cmf_pass(high, low, close, volume, n, origin, &mut ())
+}
+
+/// Batch computation with terminal-state publication.
+pub fn cmf_pass<S: crate::pass::StateSink>(high: &[f64], low: &[f64], close: &[f64], volume: &[f64], n: usize, origin: usize, states: &mut S) -> Vec<f64> {
     let mfv: Vec<f64> = (0..close.len()).map(|i| mfv(high, low, close, volume, i)).collect();
-    let sum_mfv = super::sum(&mfv, n, origin);
-    let sum_vol = super::sum(volume, n, origin);
+    let (mut a, mut b) = (S::default(), S::default());
+    let sum_mfv = super::sum_pass(&mfv, n, origin, &mut a);
+    let sum_vol = super::sum_pass(volume, n, origin, &mut b);
+    states.compose(close.len(), &[&a, &b], |_, _| {});
     (0..close.len()).map(|i| sum_mfv[i] / sum_vol[i]).collect()
 }
 
@@ -115,11 +127,21 @@ pub fn chop(high: &[f64], low: &[f64], close: &[f64], n: usize, origin: usize) -
 /// `RCMA1=SMA10(ROC10)`, `RCMA2=SMA10(ROC15)`, `RCMA3=SMA10(ROC20)`, `RCMA4=SMA15(ROC30)`.
 /// Source: StockCharts — Know Sure Thing.
 pub fn kst(close: &[f64], origin: usize) -> Vec<f64> {
+    kst_pass(close, origin, &mut ())
+}
+
+/// Batch computation with terminal-state publication.
+pub fn kst_pass<S: crate::pass::StateSink>(close: &[f64], origin: usize, states: &mut S) -> Vec<f64> {
+    let mut stages = Vec::new();
     let leg = |(p, n): (usize, usize)| {
         let roc: Vec<f64> = (0..close.len()).map(|i| kst_roc(close, p, i)).collect();
-        kernels::sma(av(&roc), n, origin)
+        let mut s = S::default();
+        let values = kernels::sma_pass(av(&roc), n, origin, &mut s);
+        stages.push(s);
+        values
     };
     let [r1, r2, r3, r4] = KST_LEGS.map(leg);
+    states.compose(close.len(), &stages.iter().collect::<Vec<_>>(), |_, _| {});
     (0..close.len())
         .map(|i| r1[i] + 2.0 * r2[i] + 3.0 * r3[i] + 4.0 * r4[i])
         .collect()
@@ -129,8 +151,13 @@ pub fn kst(close: &[f64], origin: usize) -> Vec<f64> {
 /// `box = (volume / 1e8) / (high - low)`, `mid = (high + low) / 2`. The 1e8 volume scale is
 /// StockCharts' presentation convention. Source: StockCharts — Ease of Movement.
 pub fn emv(high: &[f64], low: &[f64], volume: &[f64], n: usize, origin: usize) -> Vec<f64> {
+    emv_pass(high, low, volume, n, origin, &mut ())
+}
+
+/// Batch computation with terminal-state publication.
+pub fn emv_pass<S: crate::pass::StateSink>(high: &[f64], low: &[f64], volume: &[f64], n: usize, origin: usize, states: &mut S) -> Vec<f64> {
     let emv1: Vec<f64> = (0..high.len()).map(|i| emv_term(high, low, volume, i)).collect();
-    kernels::sma(av(&emv1), n, origin).to_vec()
+    kernels::sma_pass(av(&emv1), n, origin, states).to_vec()
 }
 
 /// EFI Elder Force Index: `EMA_n((C - prev C) * volume)`.
@@ -161,37 +188,8 @@ pub fn mass_index(high: &[f64], low: &[f64], n: usize, origin: usize) -> Vec<f64
     (kernels::sma(av(&ratio), n, origin) * n as f64).to_vec()
 }
 
-/// CRSI Connors RSI: `mean( RSI(close, rsi_len), RSI(streak, streak_len),
-/// PercentRank(1-period ROC%, rank_len) )`, where `streak` is the signed run length of
-/// consecutive up / down closes and PercentRank is the share of the prior `rank_len` ROC
-/// values strictly below the current one. Source: Connors Research / TradingView.
-pub fn crsi(close: &[f64], rsi_len: usize, streak_len: usize, rank_len: usize) -> Vec<f64> {
-    let len = close.len();
-    let mut streak = vec![0.0; len];
-    for i in 1..len {
-        streak[i] = if close[i] > close[i - 1] {
-            if streak[i - 1] > 0.0 { streak[i - 1] + 1.0 } else { 1.0 }
-        } else if close[i] < close[i - 1] {
-            if streak[i - 1] < 0.0 { streak[i - 1] - 1.0 } else { -1.0 }
-        } else {
-            0.0
-        };
-    }
-    let rsi_close = super::rsi(close, rsi_len);
-    let rsi_streak = super::rsi(&streak, streak_len);
-    let roc1: Vec<f64> = (0..len)
-        .map(|i| if i > 0 { (close[i] / close[i - 1] - 1.0) * 100.0 } else { f64::NAN })
-        .collect();
-    let mut prank = vec![f64::NAN; len];
-    for i in (rank_len + 1)..len {
-        let window = &roc1[i - rank_len..i];
-        let below = window.iter().filter(|&&x| x < roc1[i]).count();
-        prank[i] = below as f64 / rank_len as f64 * 100.0;
-    }
-    (0..len)
-        .map(|i| (rsi_close[i] + rsi_streak[i] + prank[i]) / 3.0)
-        .collect()
-}
+mod crsi;
+pub use crsi::*;
 
 // --- state-carry (append O(new rows) + bit-exact slice continuation) ----------
 //
@@ -239,21 +237,23 @@ pub fn pvt_final_state(close: &[f64], volume: &[f64]) -> Option<Vec<f64>> {
 
 /// Resume [`pvt`] from `[pvt_{from-1}, close_{from-1}]` over `[from, n)`, bit-identical to a
 /// full recompute. Reads only `close[from..]` / `volume[from..]` plus the carried prev close.
+/// Appends rows `[from, n)` to `out` and returns the carried state.
 pub fn pvt_resume(
     close: &[f64],
     volume: &[f64],
     from: usize,
     state: &[f64],
-) -> (Vec<f64>, Vec<f64>) {
+    out: &mut Vec<f64>,
+) -> Vec<f64> {
     let mut acc = state[0];
     let mut prev = state[1];
-    let mut out = Vec::with_capacity(close.len().saturating_sub(from));
+    out.reserve(close.len().saturating_sub(from));
     for i in from..close.len() {
         acc += (close[i] - prev) / prev * volume[i];
         out.push(acc);
         prev = close[i];
     }
-    (out, vec![acc, prev])
+    vec![acc, prev]
 }
 
 /// `[index, prev_close, prev_volume]` after a full [`volume_index`]. `None` for an empty
@@ -285,11 +285,12 @@ fn volume_index_resume(
     from: usize,
     state: &[f64],
     on_down: bool,
-) -> (Vec<f64>, Vec<f64>) {
+    out: &mut Vec<f64>,
+) -> Vec<f64> {
     let mut val = state[0];
     let mut prev_c = state[1];
     let mut prev_v = state[2];
-    let mut out = Vec::with_capacity(close.len().saturating_sub(from));
+    out.reserve(close.len().saturating_sub(from));
     for i in from..close.len() {
         let triggered = if on_down {
             volume[i] < prev_v
@@ -303,7 +304,7 @@ fn volume_index_resume(
         prev_c = close[i];
         prev_v = volume[i];
     }
-    (out, vec![val, prev_c, prev_v])
+    vec![val, prev_c, prev_v]
 }
 
 /// `[nvi, prev_close, prev_volume]` after a full [`nvi`].
@@ -312,13 +313,15 @@ pub fn nvi_final_state(close: &[f64], volume: &[f64]) -> Option<Vec<f64>> {
 }
 
 /// Resume [`nvi`]; see [`volume_index_resume`].
+/// Appends rows `[from, n)` to `out` and returns the carried state.
 pub fn nvi_resume(
     close: &[f64],
     volume: &[f64],
     from: usize,
     state: &[f64],
-) -> (Vec<f64>, Vec<f64>) {
-    volume_index_resume(close, volume, from, state, true)
+    out: &mut Vec<f64>,
+) -> Vec<f64> {
+    volume_index_resume(close, volume, from, state, true, out)
 }
 
 /// `[pvi, prev_close, prev_volume]` after a full [`pvi`].
@@ -327,13 +330,15 @@ pub fn pvi_final_state(close: &[f64], volume: &[f64]) -> Option<Vec<f64>> {
 }
 
 /// Resume [`pvi`]; see [`volume_index_resume`].
+/// Appends rows `[from, n)` to `out` and returns the carried state.
 pub fn pvi_resume(
     close: &[f64],
     volume: &[f64],
     from: usize,
     state: &[f64],
-) -> (Vec<f64>, Vec<f64>) {
-    volume_index_resume(close, volume, from, state, false)
+    out: &mut Vec<f64>,
+) -> Vec<f64> {
+    volume_index_resume(close, volume, from, state, false, out)
 }
 
 /// `[efi_ema, prev_close]` after a full [`efi`], or `None` before the EMA seeds.
@@ -346,24 +351,26 @@ pub fn efi_final_state(close: &[f64], volume: &[f64], n: usize) -> Option<Vec<f6
 /// Resume [`efi`] from `[efi_ema_{from-1}, close_{from-1}]` over `[from, n)`. Rebuilds the
 /// raw force term from the carried prev close, then advances the EMA with the same
 /// step ([`smoothing::ema`]) as the kernel.
+/// Appends rows `[from, n)` to `out` and returns the carried state.
 pub fn efi_resume(
     close: &[f64],
     volume: &[f64],
     n: usize,
     from: usize,
     state: &[f64],
-) -> (Vec<f64>, Vec<f64>) {
+    out: &mut Vec<f64>,
+) -> Vec<f64> {
     let k = smoothing::ema_k(n);
     let mut e = state[0];
     let mut prev = state[1];
-    let mut out = Vec::with_capacity(close.len().saturating_sub(from));
+    out.reserve(close.len().saturating_sub(from));
     for i in from..close.len() {
         let x = (close[i] - prev) * volume[i];
         e = smoothing::ema(e, x, k);
         out.push(e);
         prev = close[i];
     }
-    (out, vec![e, prev])
+    vec![e, prev]
 }
 
 /// `[inner_m, outer_m, inner_am, outer_am, prev_close]` after a full [`tsi`] — the two
@@ -384,18 +391,20 @@ pub fn tsi_final_state(close: &[f64], long: usize, short: usize) -> Option<Vec<f
 
 /// Resume [`tsi`] over `[from, n)`, advancing both nested EMA chains with the kernel's exact
 /// steps ([`smoothing::ema`]).
+/// Appends rows `[from, n)` to `out` and returns the carried state.
 pub fn tsi_resume(
     close: &[f64],
     long: usize,
     short: usize,
     from: usize,
     state: &[f64],
-) -> (Vec<f64>, Vec<f64>) {
+    out: &mut Vec<f64>,
+) -> Vec<f64> {
     let kl = smoothing::ema_k(long);
     let ks = smoothing::ema_k(short);
     let (mut im, mut om, mut ia, mut oa, mut prev) =
         (state[0], state[1], state[2], state[3], state[4]);
-    let mut out = Vec::with_capacity(close.len().saturating_sub(from));
+    out.reserve(close.len().saturating_sub(from));
     #[allow(clippy::needless_range_loop)] // numeric kernel: index-loop kept for hot-path codegen stability
     for i in from..close.len() {
         let mi = close[i] - prev;
@@ -407,7 +416,7 @@ pub fn tsi_resume(
         out.push(100.0 * om / oa);
         prev = close[i];
     }
-    (out, vec![im, om, ia, oa, prev])
+    vec![im, om, ia, oa, prev]
 }
 
 /// `[single_ema, double_ema, <the n-sum's slide>, ratio[len-n..len]…]` after a full
@@ -461,25 +470,32 @@ fn mass_index_step(range: f64, n: usize, row: usize, state: &[f64], next: &mut [
 /// Resume [`mass_index`] over `[from, n)`: one [`mass_index_step`] per row — bit-identical
 /// to `kernels::sma(ratio, n) * n`. `None` for a state that is not this kernel's (the
 /// caller then recomputes in full).
+/// Appends rows `[from, n)` to `out` and returns the carried state.
 pub fn mass_index_resume(
     high: &[f64],
     low: &[f64],
     n: usize,
     from: usize,
     state: &[f64],
-) -> Option<(Vec<f64>, Vec<f64>)> {
+    out: &mut Vec<f64>,
+) -> Option<Vec<f64>> {
     let len = high.len();
     if n == 0 || from < n || state.len() != MASS_RATIOS + n {
         return None; // not this kernel's state: the caller recomputes in full
     }
     let mut prev = state.to_vec();
     let mut next = prev.clone();
-    let mut out = Vec::with_capacity(len.saturating_sub(from));
+    let at = out.len();
+    out.reserve(len.saturating_sub(from));
     for i in from..len {
-        out.push(mass_index_step(high[i] - low[i], n, i, &prev, &mut next)?);
+        let Some(value) = mass_index_step(high[i] - low[i], n, i, &prev, &mut next) else {
+            out.truncate(at);
+            return None;
+        };
+        out.push(value);
         std::mem::swap(&mut prev, &mut next);
     }
-    Some((out, prev))
+    Some(prev)
 }
 
 
@@ -771,13 +787,13 @@ mod tests {
     fn mass_index_resume_declines_a_foreign_state() {
         let (high, low, _) = ohlc(120);
         let st = mass_index_final_state(&high[..80], &low[..80], 25, 0).unwrap();
-        assert!(mass_index_resume(&high, &low, 25, 80, &st).is_some());
-        assert!(mass_index_resume(&high, &low, 25, 80, &st[..st.len() - 1]).is_none());
-        assert!(mass_index_resume(&high, &low, 25, 10, &st).is_none());
-        assert!(mass_index_resume(&high, &low, 0, 80, &st).is_none());
+        assert!(mass_index_resume(&high, &low, 25, 80, &st, &mut Vec::new()).is_some());
+        assert!(mass_index_resume(&high, &low, 25, 80, &st[..st.len() - 1], &mut Vec::new()).is_none());
+        assert!(mass_index_resume(&high, &low, 25, 10, &st, &mut Vec::new()).is_none());
+        assert!(mass_index_resume(&high, &low, 0, 80, &st, &mut Vec::new()).is_none());
         let mut bad = st.clone();
         bad[2 + 2] = 0.5; // the slide's count of non-finite rows is not a whole number
-        assert!(mass_index_resume(&high, &low, 25, 80, &bad).is_none());
+        assert!(mass_index_resume(&high, &low, 25, 80, &bad, &mut Vec::new()).is_none());
     }
 
     /// Each resume, fed the carried state of a full compute over the head `[0, from)`,
@@ -804,23 +820,35 @@ mod tests {
             let (c, v) = (&close[..from], &vol[..from]);
 
             let st = pvt_final_state(c, v).unwrap();
-            assert_bits(&pvt_resume(&close, &vol, from, &st).0, &pvt_full[from..], "pvt");
+            let mut tail = Vec::new();
+            pvt_resume(&close, &vol, from, &st, &mut tail);
+            assert_bits(&tail, &pvt_full[from..], "pvt");
 
             let st = nvi_final_state(c, v).unwrap();
-            assert_bits(&nvi_resume(&close, &vol, from, &st).0, &nvi_full[from..], "nvi");
+            let mut tail = Vec::new();
+            nvi_resume(&close, &vol, from, &st, &mut tail);
+            assert_bits(&tail, &nvi_full[from..], "nvi");
 
             let st = pvi_final_state(c, v).unwrap();
-            assert_bits(&pvi_resume(&close, &vol, from, &st).0, &pvi_full[from..], "pvi");
+            let mut tail = Vec::new();
+            pvi_resume(&close, &vol, from, &st, &mut tail);
+            assert_bits(&tail, &pvi_full[from..], "pvi");
 
             let st = efi_final_state(c, v, 13).unwrap();
-            assert_bits(&efi_resume(&close, &vol, 13, from, &st).0, &efi_full[from..], "efi");
+            let mut tail = Vec::new();
+            efi_resume(&close, &vol, 13, from, &st, &mut tail);
+            assert_bits(&tail, &efi_full[from..], "efi");
 
             let st = tsi_final_state(c, 25, 13).unwrap();
-            assert_bits(&tsi_resume(&close, 25, 13, from, &st).0, &tsi_full[from..], "tsi");
+            let mut tail = Vec::new();
+            tsi_resume(&close, 25, 13, from, &st, &mut tail);
+            assert_bits(&tail, &tsi_full[from..], "tsi");
 
             let st = mass_index_final_state(&high[..from], &low[..from], 25, 0).unwrap();
+            let mut tail = Vec::new();
+            mass_index_resume(&high, &low, 25, from, &st, &mut tail).unwrap();
             assert_bits(
-                &mass_index_resume(&high, &low, 25, from, &st).unwrap().0,
+                &tail,
                 &mi_full[from..],
                 "mass_index",
             );

@@ -66,7 +66,6 @@ def test_a_composite_never_reads_a_stale_cached_column():
     assert _same(df['close - obv'], _frame(cols, 0, 30)['close - obv'])
 
 
-@_xfail('H1 stringify-column-name', 'directive_stringify keeps argument spellings the column name normalizes')
 @pytest.mark.parametrize('directive', ['ma:05', 'sar:0.020', 'stddev:2,1.50', 'boll.upper:20,2.0'])
 def test_stringify_is_the_cached_column_name(directive):
     df = _frame(_walk(30), 0, 30)
@@ -303,12 +302,13 @@ def test_trix_resume_matches_on_zero_prices():
     assert _same(df['trix:1'], volas.DataFrame({'close': vals})['trix:1'])
 
 
-@_xfail('H19 slice-recursive-rewarm', 'a recursive composite is not continued across a slice (it stays data)')
 def test_a_recursive_composite_continues_across_a_slice():
+    # H19: each recursion in it carries its own state, so the slice keeps the column
     cols = _walk(40, 3)
     df = _frame(cols, 0, 30)
     df['(close)+(kama:3@open)']
     df = df.iloc[1:]
+    assert df.is_computed('close+kama:3@open')
     df.append(_frame(cols, 30, 31))
     df.fulfill()
     assert np.array_equal(np.asarray(df['close+kama:3@open'])[-1:],
@@ -333,8 +333,11 @@ def test_ultosc_with_unordered_periods_refreshes_like_the_full_compute(directive
     assert _same(df[directive], _frame(cols, 0, 80)[directive])
 
 
-@_xfail('slice-resend-short', 'a re-sent last row of a slice holding just the lookback reads rows it lacks')
-@pytest.mark.parametrize('directive', ['ma:5', 'roc:3', 'pivot_points.r1', 'llv:4'])
+@pytest.mark.parametrize('directive', [
+    'roc:3',
+    *[pytest.param(d, marks=_xfail('slice-resend-short', 'the slice lacks the rows a resend reads'))
+      for d in ['ma:5', 'pivot_points.r1', 'llv:4']],
+])
 def test_a_re_sent_last_row_of_a_lookback_long_slice_is_exact(directive):
     cols = _walk(40)
     keep = volas.directive_lookback(directive)

@@ -1,315 +1,64 @@
-//! Lookback (warm-up) computation for a directive — the minimum number of prior
-//! rows needed before an indicator produces a valid value.
+//! A directive's row-reach facts — its lookback (the rows before its first value), and
+//! the [`volas_core::Reach`] a cached column carries — derived from the specs of the
+//! commands in it ([`crate::spec::CommandSpec`]): each command line owns its lookback and
+//! history class, and this module only walks the tree.
 
 use std::borrow::Cow;
 
-use crate::spec::HistoryClass;
-use crate::types::{ArgValue, Ast, Command, Node};
-use volas_compute::raw::indicators::generic_ma_lookback;
+use crate::spec::{CommandSpec, History, HistoryClass, Keep};
+use crate::types::{ArgValue, Ast, BoundNode, Node};
 
-/// A bound period / count / matype argument. Arguments are resolved + type-checked
-/// by `bind`, so every position is present — there is no default to re-apply here
-/// (that knowledge lives only in the spec).
-fn arg(args: &[ArgValue], i: usize) -> usize {
-    args[i].as_usize()
-}
-
-/// The command's own lookback (ignoring its series operands). Only ever called
-/// with a bound command name (every caller binds first), so every command has an
-/// arm and an unrecognized name is unreachable.
-pub(crate) fn own_lookback(name: &str, sub: Option<&str>, args: &[ArgValue]) -> usize {
-    match name {
-        "ema" | "smma" => arg(args, 0).saturating_sub(1),
-        "ma" => generic_ma_lookback(arg(args, 0), arg(args, 1)),
-        // apo/ppo need both MAs: the later of the two warm-ups (either may be the longer).
-        "apo" | "ppo" => generic_ma_lookback(arg(args, 0), arg(args, 2)).max(generic_ma_lookback(arg(args, 1), arg(args, 2))),
-        // mavp warms up over the maximum period's MA (args: min, max, matype).
-        "mavp" => generic_ma_lookback(arg(args, 1), arg(args, 2)),
-        "macdext" => {
-            let line = generic_ma_lookback(arg(args, 0), arg(args, 1))
-                .max(generic_ma_lookback(arg(args, 2), arg(args, 3)));
-            match sub {
-                None => line,
-                _ => line + generic_ma_lookback(arg(args, 4), arg(args, 5)),
-            }
-        }
-        "wma" | "trima" => arg(args, 0).saturating_sub(1),
-        "vwma" | "alma" => arg(args, 0).saturating_sub(1),
-        // hma = wma(…, round(√n)) over a series valid from n-1, so it warms an
-        // extra round(√n)-1 rows: total n + round(√n) - 2.
-        "hma" => {
-            let n = arg(args, 0);
-            let sq = (n as f64).sqrt().round() as usize;
-            n.saturating_sub(1) + sq.saturating_sub(1)
-        }
-        "swma" => 3,
-        "dema" => 2 * arg(args, 0).saturating_sub(1),
-        "tema" => 3 * arg(args, 0).saturating_sub(1),
-        "t3" => 6 * arg(args, 0).saturating_sub(1),
-        "kama" => arg(args, 0),
-        "sar" | "sarext" => 1,
-        "boll" | "bbw" | "accbands" => arg(args, 0).saturating_sub(1),
-        "macd" => match sub {
-            None => arg(args, 0).max(arg(args, 1)).saturating_sub(1),
-            Some(_) => arg(args, 0).max(arg(args, 1)) + arg(args, 2) - 2,
-        },
-        // macdfix: fast/slow fixed at 12/26; signal period is arg 0 on the sub-lines.
-        "macdfix" => match sub {
-            None => 25,
-            _ => 24 + arg(args, 0),
-        },
-        // bbi = the mean of four SMAs: first value where the longest SMA's is, max − 1.
-        "bbi" => arg(args, 0)
-            .max(arg(args, 1))
-            .max(arg(args, 2))
-            .max(arg(args, 3))
-            .saturating_sub(1),
-        // psy averages `n` rising flags, each reading a close and the one before it
-        "psy" => arg(args, 0),
-        // pvt / nvi / pvi are cumulative (lookback 0); like obv/ad they carry a running-line
-        // state so append resumes in O(new rows) and continues past a slice (see exec_resume).
-        "pvt" | "nvi" | "pvi" => 0,
-        // dpo reads the SMA (n−1) and the close n/2+1 bars back: the later of the two.
-        "dpo" => arg(args, 0).saturating_sub(1).max(arg(args, 0) / 2 + 1),
-        "cmf" => arg(args, 0).saturating_sub(1),
-        // chop's TR sum needs one prior close, so it warms up one bar past the window.
-        "chop" => arg(args, 0),
-        // kst's slowest term is SMA15 over ROC30: 30 + 15 - 1.
-        "kst" => 44,
-        "emv" => arg(args, 0),
-        // mass_index: EMA9 of EMA9 warms up at 2*(9-1)=16, then the n-sum adds n-1.
-        "mass_index" => 15 + arg(args, 0),
-        "efi" => arg(args, 0),
-        "tsi" => arg(args, 0) + arg(args, 1) - 1,
-        // crsi averages RSI(close) (rsi_len), RSI(streak) (streak_len; the streak starts
-        // at bar 0) and the percent rank of ROC1 over rank_len prior values (rank_len+1).
-        "crsi" => arg(args, 0).max(arg(args, 1)).max(arg(args, 2) + 1),
-        // bias ≡ ppo:1,N,0 — the slow SMA_N gates it (the fast SMA_1 has no warm-up).
-        "bias" => arg(args, 0).saturating_sub(1),
-        // dma's DDD line = SMA(fast) − SMA(slow) (the later of the two SMAs gates it); AMA adds
-        // its own SMA_M warm-up.
-        "dma" => {
-            let line = arg(args, 0).max(arg(args, 1)).saturating_sub(1);
-            match sub {
-                None => line,
-                _ => line + arg(args, 2).saturating_sub(1),
-            }
-        }
-        // +VM/−VM/TR each need one prior bar, so the n-sum warms up at bar n.
-        "vortex" => arg(args, 0),
-        // up/down/flat volume is classified vs the prior close, so the n-sum warms up at n.
-        "vr" => arg(args, 0),
-        // brar AR (H−O, O−L) has no prior-bar term (n−1); BR (vs prior close) has one (n).
-        "brar" => match sub {
-            Some("br") => arg(args, 0),
-            _ => arg(args, 0).saturating_sub(1),
-        },
-        // coppock: the longer ROC plus the WMA warm-up.
-        "coppock" => arg(args, 1).max(arg(args, 2)) + arg(args, 0).saturating_sub(1),
-        // relative_vigor: swma4 (3) + SMAₙ (n−1) = n+2; the signal adds another swma4 (3).
-        "relative_vigor" => match sub {
-            Some("signal") => arg(args, 0) + 5,
-            _ => arg(args, 0) + 2,
-        },
-        // dkx: the DDX line is WMA(20) (19); the MADKX signal adds SMA_m (m−1).
-        "dkx" => match sub {
-            Some("ma") => 18 + arg(args, 0),
-            _ => 19,
-        },
-        "wvad" => arg(args, 0).saturating_sub(1),
-        // cdp reads only the prior bar; mike's TYP±range is gated by the n-day HH/LL.
-        "cdp" | "pivot_points" => 1,
-        // wad / asi are cumulative (lookback 0); like obv they carry state for O(new rows)
-        // append and slice continuation (see exec_resume).
-        "wad" | "asi" => 0,
-        // supertrend seeds with its ATR.
-        "supertrend" => arg(args, 0),
-        "mike" => arg(args, 0).saturating_sub(1),
-        // ichimoku: midpoint lines warm up at period−1; the leading spans add the kijun
-        // displacement; the lagging span (chikou = close) has none.
-        "ichimoku" => {
-            let (t, k, sb) = (arg(args, 0), arg(args, 1), arg(args, 2));
-            match sub {
-                Some("tenkan") => t.saturating_sub(1),
-                Some("kijun") => k.saturating_sub(1),
-                // senkou_a averages tenkan and kijun: the longer of the two, displaced.
-                Some("senkou_a") => t.max(k).saturating_sub(1) + k,
-                Some("senkou_b") => sb.saturating_sub(1) + k,
-                _ => 0,
-            }
-        }
-        // keltner: middle = EMA (ema_period−1); bands also wait for the ATR (atr_period).
-        "keltner" => {
-            let ema = arg(args, 0).saturating_sub(1);
-            match sub {
-                None => ema,
-                _ => ema.max(arg(args, 1)),
-            }
-        }
-        // stoch_momentum: HH/LL (k−1) + the double EMA_d (2·(d−1)); the signal adds EMA_signal.
-        "stoch_momentum" => {
-            let base = arg(args, 0).saturating_sub(1) + 2 * arg(args, 1).saturating_sub(1);
-            match sub {
-                Some("signal") => base + arg(args, 2).saturating_sub(1),
-                _ => base,
-            }
-        }
-        // ttm_squeeze: the squeeze flag waits for SMAₙ(TR) (n); the momentum's linreg over the
-        // n-bar delta (itself gated at n−1) warms up at 2·(n−1).
-        "ttm_squeeze" => match sub {
-            Some("on") => arg(args, 0),
-            _ => 2 * arg(args, 0).saturating_sub(1),
-        },
-        "tr" => 1,
-        "atr" => arg(args, 0),
-        "llv" | "hhv" | "donchian" | "rsv" => arg(args, 0).saturating_sub(1),
-        "kdj" => arg(args, 0) * 3,
-        "rsi" => arg(args, 0),
-        "hv" => arg(args, 0),
-        // increase:k ANDs k steps, each reading a value and its predecessor: k + 1 values.
-        "increase" => arg(args, 0),
-        "repeat" => arg(args, 0).saturating_sub(1),
-        // style.<x>: candlestick patterns warm up over their candle-settings avg period
-        // (from the compute registry); bullish/bearish need none. (`cdl` resolves here too.)
-        "style" => sub
-            .and_then(|p| volas_compute::raw::indicators::candle_pattern(p).map(|(_, lb)| lb))
-            .unwrap_or(0),
-        "change" => arg(args, 0).saturating_sub(1),
-        "mom" | "roc" | "rocp" | "rocr" | "rocr100" => arg(args, 0),
-        "willr" | "midpoint" | "midprice" => arg(args, 0).saturating_sub(1),
-        "cmo" | "natr" => arg(args, 0),
-        "cci" | "imi" => arg(args, 0).saturating_sub(1),
-        "mfi" => arg(args, 0),
-        "ultosc" => arg(args, 0).max(arg(args, 1)).max(arg(args, 2)),
-        // %K (lookback fastk-1) then matype-MA smoothing stage(s).
-        "stoch" => {
-            let base =
-                arg(args, 0).saturating_sub(1) + generic_ma_lookback(arg(args, 1), arg(args, 2));
-            match sub {
-                Some("d") => base + generic_ma_lookback(arg(args, 3), arg(args, 4)),
-                _ => base,
-            }
-        }
-        "stochf" => {
-            let base = arg(args, 0).saturating_sub(1);
-            match sub {
-                Some("d") => base + generic_ma_lookback(arg(args, 1), arg(args, 2)),
-                _ => base,
-            }
-        }
-        "stochrsi" => {
-            // RSI lookback (period) + the %K window (fastk_period-1), then the d-line MA.
-            let base = arg(args, 0) + arg(args, 1).saturating_sub(1);
-            match sub {
-                Some("d") => base + generic_ma_lookback(arg(args, 2), arg(args, 3)),
-                _ => base,
-            }
-        }
-        // ±DM seed at bar `period - 1`, but never bar 0 (period 1 seeds at bar 1).
-        "plus_dm" | "minus_dm" => volas_compute::raw::indicators::wilder_seed_bar(arg(args, 0)).unwrap_or(0),
-        "plus_di" | "minus_di" | "dx" => arg(args, 0),
-        "adx" => 2 * arg(args, 0) - 1,
-        "adxr" => 3 * arg(args, 0) - 2,
-        "trix" => 3 * arg(args, 0).saturating_sub(1) + 1,
-        "aroon" | "aroonosc" => arg(args, 0),
-        "sum" | "maxindex" | "minindex" | "minmax" | "minmaxindex" => {
-            arg(args, 0).saturating_sub(1)
-        }
-        "bop" => 0,
-        "linearreg" | "linearreg_slope" | "linearreg_intercept" | "linearreg_angle" | "tsf" => {
-            arg(args, 0).saturating_sub(1)
-        }
-        "var" | "stddev" => arg(args, 0).saturating_sub(1),
-        "median" | "quantile" | "rank" | "skew" | "kurt" | "sem" => {
-            arg(args, 0).saturating_sub(1)
-        }
-        "cog" | "rci" | "dev" | "mode" => arg(args, 0).saturating_sub(1),
-        // iii is pointwise (no warm-up); kcw warms with its slower component
-        // (EMA(ema_period) vs ATR(atr_period)).
-        "iii" => 0,
-        // kcw = 2·mult·ATR/EMA: the EMA warms up at ema_period−1, the ATR at atr_period.
-        "kcw" => arg(args, 0).saturating_sub(1).max(arg(args, 1)),
-        // a pivot is confirmed `rightbars` after a point needing `leftbars` of
-        // history, so the first possible output is at bar left+right.
-        "pivothigh" | "pivotlow" => arg(args, 0) + arg(args, 1),
-        "correl" => arg(args, 0).saturating_sub(1),
-        "beta" => arg(args, 0),
-        "obv" | "ad" => 0,
-        "adosc" => arg(args, 0).max(arg(args, 1)).saturating_sub(1),
-        "avgprice" | "medprice" | "typprice" | "wclprice" => 0,
-        // Hilbert-transform suite: fixed warm-up (DCPERIOD/PHASOR/MAMA = 32; the
-        // phase-dependent DCPHASE/SINE/TRENDLINE/TRENDMODE need 63).
-        "ht_dcperiod" | "ht_phasor" | "mama" => 32,
-        "ht_dcphase" | "ht_sine" | "ht_trendline" | "ht_trendmode" => 63,
-        _ => unreachable!("every bound command has a lookback arm"), // LCOV_EXCL_LINE
+/// The spec and bound arguments of a command node, or of a bare name binding to a
+/// command (`None` for anything else: a column, a scalar, an operation).
+fn command_of(node: &BoundNode) -> Option<(Cow<'_, CommandSpec>, Cow<'_, [ArgValue]>)> {
+    match node {
+        Node::Command(c) => Some((Cow::Borrowed(&c.args.spec), Cow::Borrowed(&c.args.values[..]))),
+        Node::Name(name) => crate::bind::bind_command_node(name, None, &[], &[])
+            .ok()
+            .map(|c| (Cow::Owned(c.args.spec), Cow::Owned(c.args.values.into_vec()))),
+        _ => None,
     }
 }
 
-/// Lookback for a parsed directive: a command's own lookback plus the largest
-/// lookback among its series operands; an operator takes the max of its operands plus
-/// the earlier rows it reads itself ([`crate::types::Op::lookback`]).
-pub fn lookback(node: &Ast) -> usize {
+/// Lookback for a bound directive: a command's own lookback plus the largest lookback
+/// among its series operands; an operator takes the max of its operands plus the earlier
+/// rows it reads itself ([`crate::types::Op::lookback`]: a cross reads one).
+pub fn lookback(node: &Ast) -> usize { lookback_node(node.node()) }
+
+pub(crate) fn lookback_node(node: &BoundNode) -> usize {
     match node {
         Node::Scalar(_) => 0,
-        // A bare name is a column (no warm-up) or a no-argument command: bind it to
-        // resolve its defaults — the same single bind `exec` uses — and an unbindable
-        // name (a column reference) contributes no lookback.
-        Node::Name(name) => match crate::bind::bind_command(name, None, &[], &[]) {
-            Ok(cmd) => own_lookback(&cmd.name, cmd.sub.as_deref(), &cmd.args),
-            Err(_) => 0,
-        },
-        Node::Command(Command {
-            name,
-            sub,
-            args,
-            series,
-        }) => {
-            let own = own_lookback(name, sub.as_deref(), args);
-            let series_max = series.iter().map(lookback).max().unwrap_or(0);
-            own + series_max
-        }
-        Node::Unary { operand, .. } => lookback(operand),
-        Node::Binary { left, op, right } => op.lookback() + lookback(left).max(lookback(right)),
-    }
-}
-
-fn command_recomputes_on_a_window(name: &str, sub: Option<&str>, args: &[ArgValue]) -> bool {
-    !crate::spec::is_recursive(name, args)
-        && !crate::spec::emits_position(name)
-        && !crate::spec::accumulates(name, sub)
-}
-
-/// Whether every value of a directive can be recomputed exactly from a trailing window
-/// of its inputs: each command in it has finite memory, a position-free output, and no
-/// running accumulator ([`crate::spec::accumulates`] — those resume from a state). A
-/// refresh after an append then recomputes only a window (its lookback plus a margin)
-/// instead of the whole column; anything else recomputes from row 0. A bare name is
-/// taken as the command it names (conservative); an unbindable one is a column.
-pub fn recomputes_on_a_window(node: &Ast) -> bool {
-    match node {
-        Node::Scalar(_) => true,
-        Node::Name(name) => match crate::bind::bind_command(name, None, &[], &[]) {
-            Ok(cmd) => command_recomputes_on_a_window(&cmd.name, cmd.sub.as_deref(), &cmd.args),
-            Err(_) => true,
-        },
+        // A bare name is a column (no warm-up) or a no-argument command.
+        Node::Name(_) => command_of(node).map_or(0, |(spec, args)| spec.lookback_of(&args)),
         Node::Command(c) => {
-            command_recomputes_on_a_window(&c.name, c.sub.as_deref(), &c.args)
-                && c.series.iter().all(recomputes_on_a_window)
+            let own = c.args.spec.lookback_of(&c.args);
+            own + c.series.iter().map(lookback_node).max().unwrap_or(0)
         }
-        Node::Unary { operand, .. } => recomputes_on_a_window(operand),
-        Node::Binary { left, right, .. } => {
-            recomputes_on_a_window(left) && recomputes_on_a_window(right)
-        }
+        Node::Unary { operand, .. } => lookback_node(operand),
+        Node::Binary { left, op, right } => op.lookback() + lookback_node(left).max(lookback_node(right)),
     }
 }
 
-/// The command a directive's resumable state belongs to — its name and sub-command: a
-/// top-level command, or a bare name binding to one (a composite carries no state).
-fn top_command(node: &Ast) -> Option<(String, Option<String>)> {
+/// Whether a directive evaluated over a trailing window of the frame's rows (keeping
+/// their absolute positions) gives, on the window's rows past its lookback, exactly its
+/// values over the whole frame: no recursion and no row-position output anywhere in it
+/// — each command a pure window, or a running accumulator whose sums are exact and
+/// whose anchors are absolute positions. A continuation evaluates such an `@` operand
+/// over the window it reads instead of the frame, and a refresh recomputes such a
+/// directive with no carried state over a trailing window (its lookback plus a margin)
+/// instead of the whole column. A bare name is taken as the command it names; an
+/// unbindable one is a column.
+pub fn evaluates_on_a_window(node: &Ast) -> bool { evaluates_on_a_window_node(node.node()) }
+
+pub(crate) fn evaluates_on_a_window_node(node: &BoundNode) -> bool {
+    let own = |node: &BoundNode| {
+        command_of(node).is_none_or(|(spec, args)| spec.history(&args) != History::Recursive && !spec.emits_position())
+    };
     match node {
-        Node::Name(name) => crate::bind::bind_command(name, None, &[], &[]).ok().map(|c| (c.name, c.sub)),
-        Node::Command(c) => Some((c.name.clone(), c.sub.clone())),
-        _ => None,
+        Node::Scalar(_) | Node::Name(_) => own(node),
+        Node::Command(c) => own(node) && c.series.iter().all(evaluates_on_a_window_node),
+        Node::Unary { operand, .. } => evaluates_on_a_window_node(operand),
+        Node::Binary { left, right, .. } => evaluates_on_a_window_node(left) && evaluates_on_a_window_node(right),
     }
 }
 
@@ -317,72 +66,67 @@ fn top_command(node: &Ast) -> Option<(String, Option<String>)> {
 /// fixed per directive: computed once when the column is cached, never per refresh.
 pub fn reach(node: &Ast) -> volas_core::Reach {
     volas_core::Reach {
-        lookback: lookback(node),
-        resume: resume_reach(node),
-        continuation: continuation_reach(node),
+        lookback: lookback_node(node.node()),
+        resume: resume_reach(node.node()),
+        continuation: continuation_reach(node.node()),
         history: history(node),
     }
 }
 
-/// How a directive's values depend on the rows before them ([`volas_core::History`]),
-/// derived from the history class of each command in it ([`crate::spec::history_class`]):
-/// its highest class, and for class 3 how a frame keeps it — by the state of its top
-/// command when that is the one recursion in it (its operands of a lower class or
-/// counts), by its window when every class-3 part is a count, otherwise not at all.
+/// The highest command history class, with recursive keeping derived solely from
+/// the stored continuation plan. Every recursive line publishes a continuation.
 pub fn history(node: &Ast) -> volas_core::History {
-    use crate::spec::Keep;
+    use crate::types::Continuation;
     use volas_core::History;
-    let (class, recursions) = classes(node);
+    let (class, recursions) = classes(node.node());
     match class {
         0 | 1 => return History::Window,
         2 => return History::Accumulator,
         _ if recursions == 0 => return History::Counted,
         _ => {}
     }
-    let carried = |c: &Command<Box<[ArgValue]>>| {
-        matches!(crate::spec::history_class(&c.name, c.sub.as_deref(), &c.args), HistoryClass::Recursion(Keep::State))
-            && c.series.iter().all(|s| classes(s).1 == 0)
+    let operands = match node.continuation() {
+        Continuation::Own(_) => series_of(node.node()).iter().map(lookback_node).max().unwrap_or(0),
+        Continuation::Chain(p) => p.frame_span,
+        Continuation::None => unreachable!("every recursive line has a continuation"), // LCOV_EXCL_LINE
     };
-    let top = match node {
-        Node::Command(c) => Some(Cow::Borrowed(c)),
-        Node::Name(name) => crate::bind::bind_command(name, None, &[], &[]).ok().map(Cow::Owned),
-        _ => None,
-    };
-    match top {
-        Some(c) if carried(&c) => History::Carried { operands: c.series.iter().map(lookback).max().unwrap_or(0) },
-        _ => History::Unkept,
+    History::Carried { operands }
+}
+
+/// The `@` operands of a command node (none for anything else).
+fn series_of(node: &BoundNode) -> &[BoundNode] {
+    match node {
+        Node::Command(c) => &c.series,
+        _ => &[],
     }
 }
 
 /// The highest history class among a directive's commands (0 with none), and how many of
 /// them are recursions (class 3 not kept by its window). A bare name is the command it
 /// binds to; an unbindable one is a column.
-fn classes(node: &Ast) -> (u8, usize) {
-    let of = |name: &str, sub: Option<&str>, args: &[ArgValue]| match crate::spec::history_class(name, sub, args) {
-        HistoryClass::Window => (1, 0),
-        HistoryClass::Accumulator => (2, 0),
-        HistoryClass::Recursion(crate::spec::Keep::Window) => (3, 0),
-        HistoryClass::Recursion(_) => (3, 1),
+fn classes(node: &BoundNode) -> (u8, usize) {
+    let own = |node: &BoundNode| {
+        command_of(node).map_or((0, 0), |(spec, args)| match spec.history_class(&args) {
+            HistoryClass::Window => (1, 0),
+            HistoryClass::Accumulator => (2, 0),
+            HistoryClass::Recursion(Keep::Window) => (3, 0),
+            HistoryClass::Recursion(_) => (3, 1),
+        })
     };
     let join = |a: (u8, usize), b: (u8, usize)| (a.0.max(b.0), a.1 + b.1);
     match node {
-        Node::Scalar(_) => (0, 0),
-        Node::Name(name) => crate::bind::bind_command(name, None, &[], &[])
-            .map_or((0, 0), |c| of(&c.name, c.sub.as_deref(), &c.args)),
-        Node::Command(c) => c.series.iter().map(classes).fold(of(&c.name, c.sub.as_deref(), &c.args), join),
+        Node::Scalar(_) | Node::Name(_) => own(node),
+        Node::Command(c) => c.series.iter().map(classes).fold(own(node), join),
         Node::Unary { operand, .. } => classes(operand),
         Node::Binary { left, right, .. } => join(classes(left), classes(right)),
     }
 }
 
-/// The rows before a new row that resuming a directive's carried state reads: none
-/// for a state that is all its command needs (a recursion), its lookback plus one for a
-/// command that reads the row its window drops or SAR's earlier bar
-/// ([`crate::spec::reads_past_lookback`]). A frame holding fewer valid rows cannot
-/// resume it.
-fn resume_reach(node: &Ast) -> usize {
-    match top_command(node) {
-        Some((n, s)) if crate::spec::reads_past_lookback(&n, s.as_deref()) => lookback(node) + 1,
+/// The kernel's published resume reach plus the window of its operands. Complete
+/// input tails carry those kernel rows across missing runs and head compaction.
+fn resume_reach(node: &BoundNode) -> usize {
+    match command_of(node) {
+        Some((spec, args)) => spec.resume_reach(&args) + series_of(node).iter().map(lookback_node).max().unwrap_or(0),
         _ => 0,
     }
 }
@@ -393,16 +137,13 @@ fn resume_reach(node: &Ast) -> usize {
 /// rows when its state cannot resume; any other command reading past its lookback (a
 /// recursion — SAR, KAMA) continues exactly only with
 /// its [`resume_reach`] rows.
-fn continuation_reach(node: &Ast) -> usize {
-    match top_command(node) {
-        Some((n, s))
-            if !crate::spec::accumulates(&n, s.as_deref()) && !crate::spec::emits_position(&n) =>
-        {
-            resume_reach(node).max(lookback(node))
-        }
-        _ => lookback(node),
+fn continuation_reach(node: &BoundNode) -> usize {
+    match command_of(node) {
+        Some((spec, _)) if !spec.accumulates() && !spec.emits_position() => resume_reach(node).max(lookback_node(node)),
+        _ => lookback_node(node),
     }
 }
+
 /// Like [`lookback`], but requires the directive to name an **indicator**. A
 /// top-level bare name that binds to no command — a raw column reference, or a
 /// typo'd directive such as `ma5` for `ma:5` — is rejected (the same
@@ -414,16 +155,18 @@ fn continuation_reach(node: &Ast) -> usize {
 /// Dataframe-agnostic: it validates the directive's form only — it never consults
 /// a column — so it stays a pure function of the directive, exactly like
 /// [`lookback`].
-pub fn indicator_lookback(node: &Ast) -> volas_core::Result<usize> {
+pub fn indicator_lookback(node: &Ast) -> volas_core::Result<usize> { indicator_lookback_node(node.node()) }
+
+fn indicator_lookback_node(node: &BoundNode) -> volas_core::Result<usize> {
     // Reject a bare sub-requiring name anywhere (e.g. `kdj`, or nested `ma:5@kdj`).
-    crate::bind::check_bare(node)?;
+    crate::bind::check_bare_node(node)?;
     // A standalone bare name must bind to a real command; an unbindable one is a
     // typo / column reference, not an indicator. (Nested bare names are data-source
     // column references, validated at execution, and intentionally not rejected.)
     if let Node::Name(name) = node {
-        crate::bind::bind_command(name, None, &[], &[])?;
+        crate::bind::bind_command_node(name, None, &[], &[])?;
     }
-    Ok(lookback(node))
+    Ok(lookback_node(node))
 }
 
 #[cfg(test)]
@@ -431,7 +174,7 @@ mod tests {
     use super::lookback;
     use crate::parser::parse;
 
-    /// Every `own_lookback` arm (and every generic-MA type) must compute without
+    /// Every line's lookback (and every generic-MA type) must compute without
     /// panicking. `lookback` is only reached on column caching, so `df.exec`-based
     /// parity tests never touch it — this is its coverage.
     #[test]
@@ -478,7 +221,7 @@ mod tests {
             "rsi:14",
             "hv:10",
             "increase:3",
-            "repeat:2",
+            "repeat:2@(close > 1)",
             "style.doji",
             "cdl.doji",
             "change:2",
@@ -547,6 +290,7 @@ mod tests {
             "close",
             "~(close > 5)",
             "ma:5 + ma:10",
+            "ma:5 >< ma:10",
         ];
         for d in directives {
             let _ = lookback(&parse(d).unwrap());
@@ -571,5 +315,31 @@ mod tests {
                 "{bad:?} must be rejected as a non-indicator directive"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod reach_tests {
+    use super::{evaluates_on_a_window, lookback};
+    use crate::parser::parse;
+
+    /// A cross reads the row before, so it warms up one row after its operands — and a
+    /// nested cross one more each level.
+    #[test]
+    fn a_cross_reads_one_row_more() {
+        let lb = |d: &str| lookback(&parse(d).unwrap());
+        assert_eq!(lb("close >< open"), 1);
+        assert_eq!(lb("ma:5 // ma:3"), 5);
+        assert_eq!(lb("((close >< open) >< (open > close)) >< (close > 1)"), 3);
+        assert_eq!(lb("close > open"), 0);
+    }
+
+    #[test]
+    fn a_window_evaluation_needs_no_recursion_and_no_position() {
+        let e = |d: &str| evaluates_on_a_window(&parse(d).unwrap());
+        assert!(e("llv:5 + 1") && e("-(roc:3)") && e("stochf.k:5,3,1") && e("close > ma:20"));
+        assert!(!e("ema:5") && !e("maxindex:5") && !e("llv:5@(ema:3)"));
+        assert!(e("ma:5") && e("sum:3@(close-open)") && e("-(var:4)") && e("close") && e("llv:5"));
+        assert!(!e("ema:3") && !e("ma:5@(rsi:3)") && !e("minindex:4") && !e("obv") && !e("1+ma:3,1"));
     }
 }

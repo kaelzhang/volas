@@ -126,6 +126,7 @@ pub fn atr_final_state(
 
 /// Resume [`atr`] from `state = [atr_{from-1}]` over rows `[from, n)`. `None` at
 /// `from == 0`. Reads only `high/low/close[from-1..]`.
+/// Appends rows `[from, n)` to `out` and returns the carried state.
 pub fn atr_resume(
     high: &[f64],
     low: &[f64],
@@ -133,19 +134,20 @@ pub fn atr_resume(
     period: usize,
     from: usize,
     state: &[f64],
-) -> Option<(Vec<f64>, Vec<f64>)> {
+    out: &mut Vec<f64>,
+) -> Option<Vec<f64>> {
     if from == 0 {
         return None;
     }
     let n = high.len();
     let wilder = smoothing::Wilder::new(period);
     let mut atr = state[0];
-    let mut out = Vec::with_capacity(n.saturating_sub(from));
+    out.reserve(n.saturating_sub(from));
     for i in from..n {
         atr = wilder.step(atr, tr_at(high, low, close, i));
         out.push(atr);
     }
-    Some((out, vec![atr]))
+    Some(vec![atr])
 }
 
 /// Scalar single-row twin of [`atr_resume`]: the Wilder ATR at `row` continued from
@@ -173,6 +175,7 @@ pub fn atr_resume_one(
 /// Resume [`natr`] from `state = [atr_{from-1}]` over rows `[from, n)`: the ATR resume,
 /// rescaled per row by `atr/close·100`. `None` at `from == 0`. Reads only
 /// `high/low/close[from-1..]`.
+/// Appends rows `[from, n)` to `out` and returns the carried state.
 pub fn natr_resume(
     high: &[f64],
     low: &[f64],
@@ -180,10 +183,12 @@ pub fn natr_resume(
     period: usize,
     from: usize,
     state: &[f64],
-) -> Option<(Vec<f64>, Vec<f64>)> {
-    let (atr_tail, new_state) = atr_resume(high, low, close, period, from, state)?;
-    let vals = (from..high.len())
-        .map(|i| natr_value(atr_tail[i - from], close[i]))
-        .collect();
-    Some((vals, new_state))
+    out: &mut Vec<f64>,
+) -> Option<Vec<f64>> {
+    let at = out.len();
+    let new_state = atr_resume(high, low, close, period, from, state, out)?;
+    for (v, &c) in out[at..].iter_mut().zip(&close[from..high.len()]) {
+        *v = natr_value(*v, c);
+    }
+    Some(new_state)
 }

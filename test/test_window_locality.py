@@ -6,7 +6,7 @@ what it gives on clean data. A **recursive** indicator (infinite memory: EMA / W
 cumulative / Hilbert families) skips a missing row altogether (`test_missing_rows.py`);
 here, a leading run of missing rows is a series that simply starts later.
 
-Every command in the Rust registry (spec.rs COMMANDS) must be classified here, so a
+Every command in the Rust registry (the spec's COMMANDS) must be classified here, so a
 new indicator cannot skip this contract.
 """
 
@@ -279,7 +279,7 @@ def _exec(directive, mutate=None, start=0):
 
 
 def test_registry_fully_classified():
-    src = (ROOT / "crates/volas-directive/src/spec.rs").read_text()
+    src = (ROOT / "crates/volas-directive/src/spec/mod.rs").read_text()
     body = re.search(r"pub const COMMANDS[^=]*=\s*&\[(.*?)\];", src, re.S).group(1)
     commands = set(re.findall(r'"([a-z0-9_]+)"', body))
     assert not set(FINITE) & set(RECURSIVE)

@@ -87,17 +87,14 @@ impl HilbertVar {
     /// Append this channel's 10 state words (`odd[3] even[3] prev_odd prev_even
     /// prev_in_odd prev_in_even`) to `v`, for state-carry serialisation.
     #[inline]
-    pub(super) fn push_state(&self, v: &mut Vec<f64>) {
-        v.extend_from_slice(&self.odd);
-        v.extend_from_slice(&self.even);
-        v.push(self.prev_odd);
-        v.push(self.prev_even);
-        v.push(self.prev_in_odd);
-        v.push(self.prev_in_even);
+    fn write_state(&self, v: &mut [f64]) {
+        v[..3].copy_from_slice(&self.odd);
+        v[3..6].copy_from_slice(&self.even);
+        v[6..10].copy_from_slice(&[self.prev_odd, self.prev_even, self.prev_in_odd, self.prev_in_even]);
     }
 
     /// Reconstruct a channel from 10 consecutive state words at `s[*off..]`,
-    /// advancing `off`. Inverse of [`HilbertVar::push_state`].
+    /// advancing `off`. Inverse of [`HilbertVar::write_state`].
     #[inline]
     pub(super) fn from_state(s: &[f64], off: &mut usize) -> Self {
         let o = *off;
@@ -340,28 +337,20 @@ impl HtCoreState {
 
     /// Serialise to `CORE_STATE_LEN` `f64` words (see the type doc for the layout).
     pub(super) fn serialize(&self) -> Vec<f64> {
-        let mut v = Vec::with_capacity(CORE_STATE_LEN);
-        v.push(self.wma.sub);
-        v.push(self.wma.sum);
-        v.push(self.wma.trailing);
-        v.push(self.hilbert_idx as f64);
-        v.push(if self.even { 1.0 } else { 0.0 });
-        self.detrender.push_state(&mut v);
-        self.q1v.push_state(&mut v);
-        self.ji.push_state(&mut v);
-        self.jq.push_state(&mut v);
-        v.push(self.period);
-        v.push(self.smooth_period);
-        v.push(self.prev_i2);
-        v.push(self.prev_q2);
-        v.push(self.re);
-        v.push(self.im);
-        v.push(self.i1_odd_prev3);
-        v.push(self.i1_even_prev3);
-        v.push(self.i1_odd_prev2);
-        v.push(self.i1_even_prev2);
-        debug_assert_eq!(v.len(), CORE_STATE_LEN);
+        let mut v = vec![0.0; CORE_STATE_LEN];
+        self.write_state(&mut v);
         v
+    }
+
+    pub(super) fn write_state(&self, v: &mut [f64]) {
+        v[..5].copy_from_slice(&[self.wma.sub, self.wma.sum, self.wma.trailing,
+            self.hilbert_idx as f64, if self.even { 1.0 } else { 0.0 }]);
+        for (i, channel) in [&self.detrender, &self.q1v, &self.ji, &self.jq].iter().enumerate() {
+            channel.write_state(&mut v[5 + i * 10..15 + i * 10]);
+        }
+        v[45..CORE_STATE_LEN].copy_from_slice(&[self.period, self.smooth_period,
+            self.prev_i2, self.prev_q2, self.re, self.im, self.i1_odd_prev3,
+            self.i1_even_prev3, self.i1_odd_prev2, self.i1_even_prev2]);
     }
 
     /// Reconstruct from the first `CORE_STATE_LEN` words of `s` (inverse of

@@ -1,30 +1,16 @@
 //! Execute a directive AST against a [`DataFrame`], producing a [`Column`].
 
-use std::borrow::Cow;
 
-use crate::bind::bind_command;
+use crate::bind::bind_command_node;
 use crate::operands::Operands;
-use crate::types::{ArgValue, Ast, Node, Number, Op, UnaryOp};
+use crate::spec::History;
+use crate::types::{ArgValue, Ast, Bound, BoundNode, Command, Node, Number};
 use volas_compute::raw::indicators as ind;
 use volas_compute::missing::{on_complete_rows, Input};
-use volas_core::{BoolOp, CmpOp, Column};
+use volas_core::Column;
 use volas_core::DataFrame;
 use volas_core::{Result, VolasError};
 use volas_time::Span;
-
-/// Execute for the computed-column REFRESH path: identical to [`execute`]
-/// except a bare `Name` node is dispatched as a COMMAND, never resolved as a
-/// column. The refresh caller knows the node IS the directive being recomputed
-/// (a computed meta only exists for a validated command), and the live frame
-/// already holds the *stale* cached column under that very name — resolving it
-/// would return the stale cache instead of recomputing (a self-referential
-/// no-op).
-pub fn execute_refresh(df: &DataFrame, node: &Ast) -> Result<Column> {
-    match node {
-        Node::Name(name) if !name.is_empty() => exec_bare_command(df, name),
-        _ => execute(df, node),
-    }
-}
 
 /// Execute a directive node against `df`.
 ///
@@ -34,6 +20,10 @@ pub fn execute_refresh(df: &DataFrame, node: &Ast) -> Result<Column> {
 /// (contract #26). Booleans carry presence (contract #27): a comparison with a
 /// missing operand is missing, and `~ & | ^` use Kleene logic.
 pub fn execute(df: &DataFrame, node: &Ast) -> Result<Column> {
+    execute_node(df, node.node())
+}
+
+pub(crate) fn execute_node(df: &DataFrame, node: &BoundNode) -> Result<Column> {
     match node {
         Node::Scalar(Number::Int(v)) => Ok(Column::i64(vec![*v; df.height()])),
         Node::Scalar(Number::Float(v)) => Ok(Column::f64(vec![*v; df.height()])),
@@ -44,89 +34,25 @@ pub fn execute(df: &DataFrame, node: &Ast) -> Result<Column> {
             if df.has_column(name) {
                 Ok(df.column(name)?.clone())
             } else {
-                exec_bare_command(df, name)
+                // not bound against a frame (`crate::bind::bind_frame`): a bare name that
+                // is no column is the command it names
+                dispatch(df, &bind_command_node(name, None, &[], &[])?)
             }
         }
-        Node::Command(cmd) => dispatch(df, &cmd.name, cmd.sub.as_deref(), &cmd.args, &cmd.series),
+        Node::Command(cmd) => dispatch(df, cmd),
         Node::Unary { op, operand } => {
-            let c = execute(df, operand)?;
+            let c = execute_node(df, operand)?;
             require_numeric(&c)?; // a str/datetime operand can't go through the f64 funnel (C4)
-            match op {
-                UnaryOp::Not => Ok(c.not()),
-                UnaryOp::Neg => Ok(Column::f64(c.to_f64_domain(ARITHMETIC)?.iter().map(|&x| -x).collect())),
-            }
+            crate::element::unary_column(*op, &c)
         }
         Node::Binary { left, op, right } => {
-            let l = execute(df, left)?;
-            let r = execute(df, right)?;
+            let l = execute_node(df, left)?;
+            let r = execute_node(df, right)?;
             require_numeric(&l)?; // both operands must be numeric (or bool) — C4, no
             require_numeric(&r)?; // silent str -> NaN arithmetic / comparison
-            apply_binary(*op, &l, &r)
+            crate::element::binary_column(*op, &l, &r)
         }
     }
-}
-
-/// How directive float64 arithmetic names itself in a past-2^53 error.
-const ARITHMETIC: &str = "directive arithmetic";
-
-fn apply_binary(op: Op, l: &Column, r: &Column) -> Result<Column> {
-    let arith = |f: fn(f64, f64) -> f64| -> Result<Column> {
-        let (lf, rf) = (l.to_f64_domain(ARITHMETIC)?, r.to_f64_domain(ARITHMETIC)?);
-        Ok(Column::f64(lf.iter().zip(&rf).map(|(&a, &b)| f(a, b)).collect()))
-    };
-    match op {
-        Op::Add => arith(|a, b| a + b),
-        Op::Sub => arith(|a, b| a - b),
-        Op::Mul => arith(|a, b| a * b),
-        Op::Div => arith(|a, b| a / b),
-        Op::And => l.logical(r, BoolOp::And),
-        Op::Or => l.logical(r, BoolOp::Or),
-        Op::Xor => l.logical(r, BoolOp::Xor),
-        _ => compare(op, l, r),
-    }
-}
-
-/// A comparison or cross of `l` against `r`, row by row, by exact order
-/// ([`Column::order_rows`]); a row with a missing side is a missing truth. A cross
-/// is the Kleene AND of the previous row's order and this row's (the row before the
-/// first is missing): `//` is `prev <= && now >`, `\\` is `prev >= && now <`, and
-/// `><` either of them.
-fn compare(op: Op, l: &Column, r: &Column) -> Result<Column> {
-    let order = l.order_rows(r)?;
-    let at = |i: usize, cmp: CmpOp| order[i].map(|o| cmp.matches(o));
-    let crossed = |i: usize, before: CmpOp, now: CmpOp| {
-        kleene_and(i.checked_sub(1).and_then(|p| at(p, before)), at(i, now))
-    };
-    let rows = 0..order.len();
-    let simple = |cmp: CmpOp| Column::bool_from_options(rows.clone().map(|i| at(i, cmp)));
-    Ok(match op {
-        Op::Lt => simple(CmpOp::Lt),
-        Op::Le => simple(CmpOp::Le),
-        Op::Eq => simple(CmpOp::Eq),
-        Op::Ne => simple(CmpOp::Ne),
-        Op::Ge => simple(CmpOp::Ge),
-        Op::Gt => simple(CmpOp::Gt),
-        Op::CrossUp => Column::bool_from_options(rows.map(|i| crossed(i, CmpOp::Le, CmpOp::Gt))),
-        Op::CrossDown => Column::bool_from_options(rows.map(|i| crossed(i, CmpOp::Ge, CmpOp::Lt))),
-        Op::Cross => Column::bool_from_options(rows.map(|i| {
-            kleene_or(crossed(i, CmpOp::Le, CmpOp::Gt), crossed(i, CmpOp::Ge, CmpOp::Lt))
-        })),
-        _ => unreachable!("arithmetic / logical ops are applied above"), // LCOV_EXCL_LINE
-    })
-}
-
-/// Kleene AND: a present `false` decides; otherwise a missing side is missing.
-fn kleene_and(a: Option<bool>, b: Option<bool>) -> Option<bool> {
-    match (a, b) {
-        (Some(false), _) | (_, Some(false)) => Some(false),
-        (Some(true), Some(true)) => Some(true),
-        _ => None,
-    }
-}
-
-/// Kleene OR: a present `true` decides; otherwise a missing side is missing.
-fn kleene_or(a: Option<bool>, b: Option<bool>) -> Option<bool> {
-    kleene_and(a.map(|x| !x), b.map(|x| !x)).map(|x| !x)
 }
 
 // --- argument accessors -----------------------------------------------------
@@ -150,7 +76,7 @@ pub(crate) fn arg_i64(args: &[ArgValue], i: usize) -> i64 {
 
 /// The `@` operand filling series slot `i`, if any: an absent slot or an empty name
 /// leaves it to the command's default series.
-pub(crate) fn operand(series: &[Ast], i: usize) -> Option<&Ast> {
+pub(crate) fn operand(series: &[BoundNode], i: usize) -> Option<&BoundNode> {
     series
         .get(i)
         .filter(|n| !matches!(n, Node::Name(s) if s.is_empty()))
@@ -178,29 +104,6 @@ pub(crate) fn require_f64_input(col: &Column) -> Result<()> {
     col.check_f64_domain("an indicator input")
 }
 
-/// Borrow a frame column as `&[f64]` without copying when it is already `F64`;
-/// otherwise convert (e.g. an `I64` volume column). A command's arm reads its inputs
-/// through [`Operands`](crate::operands::Operands) instead.
-pub(crate) fn col_f64<'a>(df: &'a DataFrame, name: &str) -> Result<Cow<'a, [f64]>> {
-    let col = df.column(name)?;
-    require_f64_input(col)?;
-    Ok(match col.as_f64() {
-        Some(s) => Cow::Borrowed(s),
-        None => Cow::Owned(col.to_f64_vec()),
-    })
-}
-
-/// A boolean operand's truths, row by row: a bool reads its value, a number
-/// `x != 0`, and a missing cell is a missing truth (contract #27).
-pub(crate) fn series_truths(df: &DataFrame, series: &[Ast], i: usize) -> Result<Vec<Option<bool>>> {
-    let node = series
-        .get(i)
-        .ok_or_else(|| VolasError::Value("a boolean series argument is required".into()))?;
-    let col = execute(df, node)?;
-    require_numeric(&col)?;
-    Ok((0..col.len()).map(|i| col.truth_at(i)).collect())
-}
-
 /// The generic moving average (TA-Lib `TA_MA`, [`ind::generic_ma`]) of `period` and
 /// `matype` over `data`. A recursive average runs on the complete rows of its input — the
 /// input may be a derived line that warms up with NaN (see `volas_compute::missing`). A
@@ -222,36 +125,27 @@ mod momentum;
 mod overlap;
 pub(crate) use overlap::percent_oscillator;
 
-/// The dispatch entry point: a bound command (canonical name / sub, typed args,
-/// bound series) routed to its kernel. Validation / defaulting / normalization
-/// already happened at `bind`, so this is pure dispatch — the `overlap` ->
-/// `momentum` -> `cycle` chain is an internal split of the one command table. A
-/// recursive command runs on the complete rows of its inputs (see `crate::complete`).
-fn dispatch(
-    df: &DataFrame,
-    name: &str,
-    sub: Option<&str>,
-    args: &[ArgValue],
-    series: &[Ast],
-) -> Result<Column> {
-    if crate::spec::is_recursive(name, args) {
-        return crate::complete::compute(df, series, |ops| overlap::dispatch(ops, name, sub, args));
+/// The dispatch entry point: a bound command (canonical name / sub, typed args, bound
+/// series, its line's spec) routed to its kernel. Validation / defaulting /
+/// normalization already happened at `bind`, so this is pure dispatch — the `overlap`
+/// -> `momentum` -> `cycle` chain is an internal split of the one command table. A
+/// recursive line runs on the complete rows of its inputs (see `crate::complete`).
+fn dispatch(df: &DataFrame, cmd: &Command<Bound>) -> Result<Column> {
+    let (name, sub, args) = (cmd.name.as_str(), cmd.sub.as_deref(), &cmd.args.values[..]);
+    if cmd.args.spec.history(args) == History::Recursive {
+        return crate::complete::compute(df, &cmd.series, |ops| overlap::dispatch(ops, name, sub, args));
     }
-    overlap::dispatch(&Operands::new(df, series), name, sub, args)
+    overlap::dispatch(&Operands::new(df, &cmd.series), name, sub, args)
 }
 
-/// Execute a bare `Name` that is not a frame column: bind it as a no-argument
-/// command — the same single `bind` a parsed command gets, so it validates the
-/// name / sub and resolves any defaults — then dispatch. A bare name needing a
-/// sub-command, or a required argument, errors here rather than reaching dispatch.
-fn exec_bare_command(df: &DataFrame, name: &str) -> Result<Column> {
-    let cmd = bind_command(name, None, &[], &[])?;
-    dispatch(df, &cmd.name, cmd.sub.as_deref(), &cmd.args, &cmd.series)
+/// Execute one bound command against inputs already resolved by the continuation owner.
+pub(crate) fn execute_inputs(ops: &Operands, cmd: &crate::complete::BoundCommand) -> Result<Column> {
+    overlap::dispatch(ops, cmd.name, cmd.sub, cmd.args)
 }
 
 pub use crate::exec_resume::{
-    capture, checkpoint, execute_resume, execute_resume_default_series, execute_resume_default_series_one,
-    execute_resume_step, initial_state, replay,
+    capture, capture_states, checkpoint, execute_resume, execute_resume_step, execute_with_states, initial_state, replay,
+    WithStates,
 };
 
 /// `hv`'s annualization factor √(bars per year), from its bound arguments
@@ -650,7 +544,7 @@ mod tests {
         let bars_per_year = |d: &str| {
             let args: Vec<Option<String>> =
                 d["hv:".len()..].split(',').map(|t| Some(t.to_string())).collect();
-            hv_annualization(&bind_command("hv", None, &args, &[]).unwrap().args).powi(2)
+            hv_annualization(&bind_command_node("hv", None, &args, &[]).unwrap().args).powi(2)
         };
         let close = |d: &str, want: f64| {
             let got = bars_per_year(d);
@@ -728,21 +622,20 @@ mod tests {
 
     #[test]
     fn empty_name_is_an_error() {
-        assert!(execute(&stock(), &Node::Name(String::new())).is_err());
+        assert!(execute_node(&stock(), &Node::Name(String::new())).is_err());
     }
 
     /// `initial_state` / `execute_resume` decline (return `None`, so the engine keeps the
-    /// full-recompute fallback) on the off-the-happy-path arms: a non-SMA stochrsi `.d`
-    /// matype, a `*_resume` that returns `None` (from below its warm-up), and a directive
+    /// full-recompute fallback) on malformed states, a `*_resume` that returns `None`
+    /// (from below its warm-up), and a directive
     /// with no resume kernel at all (the `_ => None` catch-all).
     #[test]
     fn state_carry_none_propagation() {
         let df = ohlcv_n(80);
-        let col = Column::f64(vec![0.0; 80]); // `initial_state`'s computed arg is unused
         let p = |d: &str| parse(d).unwrap();
 
-        // initial_state: stochrsi `.d` with a non-SMA matype (arg 3 != 0) -> None (exec:1021).
-        assert!(initial_state(&df, &p("stochrsi.d:14,14,3,1"), &col).is_none());
+        // Every StochRSI MA type now carries a state.
+        assert!(initial_state(&df, &p("stochrsi.d:14,14,3,1"), usize::MAX).is_some());
 
         // execute_resume: SAR / SAREXT at from_row < 2 -> the inner `*_resume` is None, the
         // `?` propagates (exec:1095 / 1114). State contents are unread on the None path.
@@ -773,7 +666,7 @@ mod tests {
         let kdj_state = vec![50.0, 50.0];
         assert!(execute_resume(&df, &p("kdj.j"), &kdj_state, 2, df.height(), 0).is_none());
 
-        // execute_resume: stochrsi `.d` non-SMA matype -> `return None` (exec:1355).
+        // execute_resume: a recursive-MA StochRSI state of the wrong shape declines.
         let sr_state = vec![0.0; 20];
         assert!(execute_resume(&df, &p("stochrsi.d:14,14,3,1"), &sr_state, 40, df.height(), 0).is_none());
 
@@ -796,7 +689,7 @@ mod tests {
         assert!(execute_resume_step(&df, &p("rsi:14"), &[1.0, 1.0], (5, 0), &mut next[..1]).is_none());
         // a composite average declines a state of the wrong length, and a row past the end
         assert!(execute_resume_step(&df, &p("apo"), &[1.0, 1.0], (5, 0), &mut next[..2]).is_none());
-        let apo = initial_state(&df, &p("apo"), &Column::f64(vec![])).unwrap();
+        let apo = initial_state(&df, &p("apo"), usize::MAX).unwrap();
         let mut n = apo.clone();
         assert!(execute_resume_step(&df, &p("apo"), &apo, (df.height(), 0), &mut n).is_none());
     }

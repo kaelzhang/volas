@@ -38,7 +38,7 @@ fn a_position_window_holding_a_missing_row_is_missing_on_every_path() {
     for (full, state, resume) in [
         (ind::maxindex as fn(&[f64], usize, usize) -> Vec<f64>,
          ind::maxindex_final_state as fn(&[f64], usize, usize) -> Option<Vec<f64>>,
-         ind::maxindex_resume as fn(&[f64], usize, usize, usize, &[f64]) -> Option<(Vec<f64>, Vec<f64>)>),
+         ind::maxindex_resume as fn(&[f64], usize, usize, usize, &[f64], &mut Vec<f64>) -> Option<Vec<f64>>),
         (ind::minindex, ind::minindex_final_state, ind::minindex_resume),
     ] {
         let got = full(&close, 5, 7);
@@ -46,8 +46,10 @@ fn a_position_window_holding_a_missing_row_is_missing_on_every_path() {
         // a resume over rows whose windows hold the missing row agrees with the full one
         for from in [18, 21, 24, 30] {
             let st = state(&close[..from], 5, 7).unwrap();
-            let (tail, _) = resume(&close, 5, from, 7, &st).unwrap();
-            assert!(same(&tail, &got[from..]), "resume from {from}");
+            let mut tail = vec![-0.0];
+            resume(&close, 5, from, 7, &st, &mut tail).unwrap();
+            assert_eq!(tail[0].to_bits(), (-0.0f64).to_bits());
+            assert!(same(&tail[1..], &got[from..]), "resume from {from}");
         }
     }
 }

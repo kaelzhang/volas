@@ -21,7 +21,9 @@ import numpy.typing as npt
 __all__ = [
     "DataFrame",
     "DatetimeAccessor",
+    "_directive_bare_commands",
     "_directive_commands",
+    "_directive_facts",
     "_dtypes",
     "Rolling",
     "Expanding",
@@ -708,9 +710,13 @@ def directive_lookback(directive: str) -> int: ...
 
 
 # Machine-readable audit vocabularies (SPEC §6.3 external anchors): the dtype
-# names generated from the Rust DType enum, and the directive command registry.
+# names generated from the Rust DType enum, the directive command registry, the
+# commands usable as a bare name, and a command line's structural facts.
 _dtypes: list[str]
 _directive_commands: list[str]
+_directive_bare_commands: list[str]
+
+def _directive_facts(directive: str) -> dict[str, Any]: ...
 
 # --- window aggregators ------------------------------------------------------
 
