@@ -82,7 +82,7 @@ pub(crate) fn column_to_pandas<'py>(
                 .collect();
             let list = PyList::new(py, items)?;
             let kwargs = PyDict::new(py);
-            kwargs.set_item("dtype", "str")?;
+            kwargs.set_item("dtype", "string")?;
             pd.call_method("array", (list,), Some(&kwargs))
         }
         // float (NaN in-band) has no nullable masked form here.
@@ -101,17 +101,24 @@ pub(crate) fn frame_from_pandas(py: Python<'_>, pdf: &Bound<'_, PyAny>) -> PyRes
 
     // Each column -> a constructor-ingestible value, keyed by its (stringified) name.
     let data = PyDict::new(py);
+    let mut names = std::collections::HashSet::new();
+    let mut labels = Vec::new();
     for c in pdf.getattr("columns")?.try_iter()? {
         let c = c?;
+        let name = c.str()?.to_string();
+        if !names.insert(name.clone()) {
+            return Err(PyValueError::new_err(format!(
+                "duplicate column name {name:?} after stringification"
+            )));
+        }
+        labels.push((c, name));
+    }
+    for (c, name) in labels {
         let series = pdf.get_item(&c)?;
-        data.set_item(c.str()?.to_string(), pandas_series_to_values(py, &types, &series)?)?;
+        data.set_item(name, pandas_series_to_values(py, &types, &series)?)?;
     }
 
-    // A default RangeIndex carries no labels — a fresh volas RangeIndex (just the columns).
     let idx = pdf.getattr("index")?;
-    if idx.is_instance(&pd.getattr("RangeIndex")?)? {
-        return PyDataFrame::new(data.as_any(), None, None, None, None, None, None, None);
-    }
 
     // The index is built as an index directly — never routed through the column
     // namespace, where it would collide with (and replace) a same-named column. An
@@ -123,14 +130,20 @@ pub(crate) fn frame_from_pandas(py: Python<'_>, pdf: &Bound<'_, PyAny>) -> PyRes
     let datetime_index = types
         .call_method1("is_datetime64_any_dtype", (idx.getattr("dtype")?,))?
         .extract::<bool>()?;
-    let instants = if datetime_index {
-        // The absolute (UTC) instants in their native unit (no strftime round-trip);
-        // the column coercion scales them to ns, checked.
-        idx.getattr("values")?
+    let index = if idx.is_instance(&pd.getattr("RangeIndex")?)?
+        && idx.getattr("start")?.extract::<i64>()? == 0
+        && idx.getattr("step")?.extract::<i64>()? == 1
+    {
+        Index::range(idx.len()?).with_name(idx_name)
     } else {
-        idx.call_method0("to_numpy")?
+        let instants = if datetime_index {
+            // Read UTC instants in their native unit; coercion scales to ns, checked.
+            idx.getattr("values")?
+        } else {
+            idx.call_method0("to_numpy")?
+        };
+        Index::from_column(&pyany_to_column(&instants)?).map_err(pyerr)?.with_name(idx_name)
     };
-    let index = Index::from_column(&pyany_to_column(&instants)?).map_err(pyerr)?.with_name(idx_name);
     let cols = PyDataFrame::new(data.as_any(), None, None, None, None, None, None, None)?.inner;
     let df = PyDataFrame::plain(
         DataFrame::new(cols.names().to_vec(), cols.columns().to_vec(), Some(index))
@@ -176,7 +189,10 @@ fn pandas_series_to_values<'py>(
             let mask = s.call_method0("isna")?.call_method0("tolist")?;
             let masked = mask.extract::<Vec<bool>>()?;
             let (volas_dtype, filler): (&str, Bound<'py, PyAny>) = if is_int {
-                let dt = if dtype.str()?.to_str()? == "Int32" { "int32" } else { "int64" };
+                let numpy_dtype = dtype.getattr("numpy_dtype")?;
+                let dt = if numpy_dtype.getattr("kind")?.extract::<String>()? == "i"
+                    && numpy_dtype.getattr("itemsize")?.extract::<usize>()? == 4
+                { "int32" } else { "int64" };
                 (dt, 0i64.into_pyobject(py)?.into_any())
             } else if is_bool {
                 ("bool", false.into_pyobject(py)?.to_owned().into_any())

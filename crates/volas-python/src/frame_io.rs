@@ -243,7 +243,7 @@ impl PyDataFrame {
         if header {
             if index {
                 // pandas writes the index name, or an empty field for an unnamed index.
-                out.push_str(df.index().name().unwrap_or(""));
+                out.push_str(&csv_escape(df.index().name().unwrap_or("").to_string(), sep));
                 out.push_str(sep);
             }
             let hdr: Vec<String> = positions
@@ -255,7 +255,7 @@ impl PyDataFrame {
         }
         for i in 0..df.height() {
             if index {
-                out.push_str(&index_label_csv(df.index(), i));
+                out.push_str(&csv_escape(index_label_csv(df.index(), i), sep));
                 out.push_str(sep);
             }
             let cells: Vec<String> = positions
@@ -286,7 +286,7 @@ impl PyDataFrame {
         let _ = requested_schema;
         let view = self.read()?;
         let df = view.as_ref();
-        crate::arrow::frame_c_stream(py, df.names(), df.columns())
+        crate::arrow::frame_c_stream(py, df.names(), df.columns(), df.height())
     }
 
     /// Build a volas `DataFrame` from a `pandas.DataFrame` (the inverse of
@@ -307,8 +307,8 @@ impl PyDataFrame {
     /// where dtypes match. The result carries a fresh `RangeIndex`.
     #[staticmethod]
     pub(crate) fn from_arrow(data: &Bound<'_, PyAny>) -> PyResult<PyDataFrame> {
-        let (names, cols) = crate::arrow::frame_from_arrow_obj(data)?;
-        Ok(PyDataFrame::plain(DataFrame::new(names, cols, None).map_err(pyerr)?))
+        let (names, cols, height) = crate::arrow::frame_from_arrow_obj(data)?;
+        Ok(PyDataFrame::plain(DataFrame::new(names, cols, Some(Index::range(height))).map_err(pyerr)?))
     }
 
     /// Export as a `pyarrow.Table` (zero-copy where dtypes match; requires pyarrow).
