@@ -658,9 +658,9 @@ impl PyDataFrame {
                         let tz = match crate::convert::timestamp_zone(&ts)? {
                             crate::convert::Zone::Aware(tz) => tz,
                             crate::convert::Zone::Naive => volas_core::Tz::Naive,
-                            crate::convert::Zone::Unzoned => *frame_tz,
+                            crate::convert::Zone::Unzoned => frame_tz.clone(),
                         };
-                        let ns = crate::convert::parse_ts_in_tz(&ts, tz)?;
+                        let ns = crate::convert::parse_ts_in_tz(&ts, &tz)?;
                         Index::datetime(vec![ns], tz)
                     }
                     IndexKind::Int64(_) => {

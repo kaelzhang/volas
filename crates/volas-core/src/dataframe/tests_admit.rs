@@ -467,6 +467,9 @@ fn refolding_the_forming_row_is_the_period_reduce() {
         None,
     )
     .unwrap();
+    let before = snapshot(&df);
+    df.check_refold(1, &period, &period.slice_data(2, 3), &ops).unwrap();
+    assert_eq!(snapshot(&df), before); // float / NaN validation leaves cells and cache states alone
     df.refold_forming_row(1, &period, &ops).unwrap();
     assert_eq!(df.column("first").unwrap().get_f64(1), 4.0);
     // a missing input makes the period's max missing (no skipped value)

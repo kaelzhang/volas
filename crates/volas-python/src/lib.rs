@@ -19,6 +19,7 @@ use volas_directive::parse;
 mod format;
 mod readers;
 mod timeframe;
+mod timezone;
 
 use format::parse_float_format;
 use readers::read_csv;
@@ -295,6 +296,7 @@ fn volas_rs(m: &Bound<'_, PyModule>) -> PyResult<()> {
     )?;
     m.add_function(wrap_pyfunction!(read_csv, m)?)?;
     m.add_function(wrap_pyfunction!(to_datetime, m)?)?;
+    m.add_function(wrap_pyfunction!(timezone::tz_database, m)?)?;
     m.add_function(wrap_pyfunction!(directive_stringify, m)?)?;
     m.add_function(wrap_pyfunction!(directive_lookback, m)?)?;
     m.add_function(wrap_pyfunction!(_directive_facts, m)?)?;

@@ -192,7 +192,7 @@ impl PyDataFrame {
         let pdf = pd.call_method("DataFrame", (data,), Some(&kwargs))?;
         // A tz-aware frame exports a UTC-naive datetime64 index (index_values); restore the
         // display zone so the pandas index is tz-aware — a faithful round-trip with from_pandas.
-        if let Some(tz) = self.tz() {
+        if let Some(tz) = crate::timezone::to_python(py, &df.index().tz())? {
             let aware = pdf
                 .getattr("index")?
                 .call_method1("tz_localize", ("UTC",))?

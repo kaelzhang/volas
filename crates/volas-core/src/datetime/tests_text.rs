@@ -42,24 +42,24 @@ fn strftime_keeps_every_field_of_the_instant() {
     let ns = parse_ns("2024-01-01 04:00:00.123456789").unwrap(); // 12:00 at +08:00
     let p8 = Tz::parse("+08:00").unwrap();
     let f = |tz, fmt| strftime(ns, tz, fmt).unwrap();
-    assert_eq!(f(p8, "%H:%M:%S.%f %z %:z %::z %:::z %Z"), "12:00:00.123456 +0800 +08:00 +08:00:00 +08 UTC+08:00");
-    assert_eq!(f(p8, "%s %%f"), "1704081600 %f");
-    assert_eq!(f(Tz::Naive, "%H %z%Z|"), "04 |");
-    assert_eq!(f(Tz::Utc, "%Z %z"), "UTC +0000");
+    assert_eq!(f(&p8, "%H:%M:%S.%f %z %:z %::z %:::z %Z"), "12:00:00.123456 +0800 +08:00 +08:00:00 +08 UTC+08:00");
+    assert_eq!(f(&p8, "%s %%f"), "1704081600 %f");
+    assert_eq!(f(&Tz::Naive, "%H %z%Z|"), "04 |");
+    assert_eq!(f(&Tz::Utc, "%Z %z"), "UTC +0000");
     let ny = Tz::parse("America/New_York").unwrap();
-    assert_eq!(f(ny, "%H %Z %z"), "23 EST -0500");
+    assert_eq!(f(&ny, "%H %Z %z"), "23 EST -0500");
     let lmt = parse_ns("1900-01-01 00:00:00").unwrap();
     let kolkata = Tz::parse("Asia/Kolkata").unwrap();
-    assert_eq!(strftime(lmt, kolkata, "%z %::z").unwrap(), "+052110 +05:21:10");
+    assert_eq!(strftime(lmt, &kolkata, "%z %::z").unwrap(), "+052110 +05:21:10");
     // a numeric tzdata abbreviation is spelled from the offset
     let sao_paulo = Tz::parse("America/Sao_Paulo").unwrap();
-    assert_eq!(f(sao_paulo, "%Z"), "-03");
+    assert_eq!(f(&sao_paulo, "%Z"), "-03");
     let kathmandu = Tz::parse("Asia/Kathmandu").unwrap();
-    assert_eq!(f(kathmandu, "%Z"), "+0545");
+    assert_eq!(f(&kathmandu, "%Z"), "+0545");
     // an invalid or unformattable spec is an error, never a panic
-    assert!(strftime(ns, p8, "%Q").is_err());
-    assert!(strftime(ns, p8, "%#z").is_err());
-    assert!(strftime(ns, p8, "100%").is_err()); // a dangling %
+    assert!(strftime(ns, &p8, "%Q").is_err());
+    assert!(strftime(ns, &p8, "%#z").is_err());
+    assert!(strftime(ns, &p8, "100%").is_err()); // a dangling %
 }
 
 #[test]
@@ -67,12 +67,12 @@ fn csv_text_carries_the_offset_of_an_aware_instant() {
     let ny = Tz::parse("America/New_York").unwrap();
     let first = parse_ns("2024-11-03 05:30:00").unwrap();
     let second = first + 3_600 * NS_PER_SEC;
-    assert_eq!(format_ns_offset(first, ny), "2024-11-03 01:30:00-04:00");
-    assert_eq!(format_ns_offset(second, ny), "2024-11-03 01:30:00-05:00");
-    assert_eq!(parse_ns(&format_ns_offset(second, ny)).unwrap(), second);
-    assert_eq!(format_ns_offset(first, Tz::Naive), "2024-11-03 05:30:00");
-    assert_eq!(format_ns_offset(NAT, ny), "NaT");
-    assert_eq!(format_ns_offset(first, Tz::Utc), "2024-11-03 05:30:00+00:00");
+    assert_eq!(format_ns_offset(first, &ny), "2024-11-03 01:30:00-04:00");
+    assert_eq!(format_ns_offset(second, &ny), "2024-11-03 01:30:00-05:00");
+    assert_eq!(parse_ns(&format_ns_offset(second, &ny)).unwrap(), second);
+    assert_eq!(format_ns_offset(first, &Tz::Naive), "2024-11-03 05:30:00");
+    assert_eq!(format_ns_offset(NAT, &ny), "NaT");
+    assert_eq!(format_ns_offset(first, &Tz::Utc), "2024-11-03 05:30:00+00:00");
 }
 
 #[test]

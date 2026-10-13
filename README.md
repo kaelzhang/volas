@@ -120,6 +120,7 @@ entry below links into its guide.
 - [Indexing & selection](docs/pandas-compatibility.md#indexing--selection)
 - [Writing & assignment](docs/pandas-compatibility.md#writing--assignment)
 - [Timezones](docs/cumulation.md#timezones)
+- [Reproducible timezone deployment](docs/cumulation.md#reproducible-timezone-deployment)
 - [Missing values (`volas.NA`)](docs/pandas-compatibility.md#missing-values-volasna)
 - [pandas interop](docs/interop.md#pandas-interop)
   - [Datetime columns are UTC instants](docs/interop.md#datetime-columns-are-utc-instants)

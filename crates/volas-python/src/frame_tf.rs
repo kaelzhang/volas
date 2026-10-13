@@ -7,8 +7,8 @@ use std::sync::Arc;
 
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
-use volas_core::{CellWrites, Column, CombineOp, DType, DataFrame, IndexKind};
-use volas_time::{aggregate_period, AggSpec, Cumulator, OpenPeriod, TimeFrame};
+use volas_core::{CellWrites, Column, CombineOp, DataFrame, IndexKind};
+use volas_time::{aggregate_period, AggSpec, Cumulator, OpenPeriod, PeriodAggregate, TimeFrame};
 
 #[allow(unused_imports)]
 use crate::*;
@@ -44,71 +44,30 @@ pub(crate) struct TfState {
     /// so caching it lets `fold_append` skip a second `period_start` on every
     /// same-period bar.
     open_key: Option<i64>,
-    /// Cached fold plan (`None` until the first fold), reused across appends: a new bar
-    /// and the open period share the frame's data-column schema, so one plan folds a
-    /// bar into the forming row and re-cumulates the open period into it alike.
+    /// The raw period's aggregate and before-last checkpoint. A schema / forming
+    /// value write invalidates it; ordinary folds and last-bar corrections update
+    /// it in O(columns), independently of the raw period's length.
+    aggregate: Option<PeriodAggregate>,
+    /// Copy the aggregate into the forming row positionally, skipping cached
+    /// directives. Schema writes clear this; materialization changes `names`.
     fold_plan: Option<FoldPlan>,
-    /// Whether the forming row differs from the cumulation of `open` in a column that
-    /// entered the bars as missing (see the invariant): the next bar of the period then
-    /// re-cumulates the whole period instead of folding into the forming row, so the
-    /// written cell goes missing as the bars say.
+    /// A column added as missing to the raw bars supersedes its written forming
+    /// value on the next fold, as a re-send's complete re-reduction does.
     refold_next: bool,
 }
 
-/// The cached forming-row fold plan: the `(dst_col, src_col, combine_op)` triples,
-/// plus the inner schema (name `Arc` + dtypes) and source column names they were built
-/// for. The hot append path reuses it so it never re-runs the per-bar `column_pos` /
-/// `agg_for` HashMap name lookups (whose SipHash dominated the per-bar cost); it is
-/// rebuilt only when a schema actually changes, which `matches` detects without
-/// hashing — and, on the inner side, in O(1).
 #[derive(Clone)]
-pub(crate) struct FoldPlan {
-    inner_names: Arc<Vec<String>>,
-    inner_dtypes: Vec<DType>,
-    src_names: Vec<String>,
+struct FoldPlan {
+    names: Arc<Vec<String>>,
     ops: Vec<(usize, usize, CombineOp)>,
 }
 
 impl FoldPlan {
-    /// The plan folding `src`'s rows (bars of the frame's data columns, see
-    /// [`DataFrame::admit_data_rows`]) into `inner`'s forming row: each data column of
-    /// `inner` paired with `src`'s column of that name and its aggregator's combine op.
-    /// A cached directive column is not folded (its refresh computes it).
-    fn build(inner: &DataFrame, src: &DataFrame, spec: &AggSpec) -> FoldPlan {
-        let mut ops = Vec::with_capacity(inner.width());
-        for (j, name) in inner.names().iter().enumerate() {
-            if inner.is_computed(name) {
-                continue;
-            }
-            let Some(k) = src.column_pos(name) else {
-                unreachable!("a tf bar carries every data column") // LCOV_EXCL_LINE
-            };
-            ops.push((j, k, spec.agg_for(name).as_combine_op()));
-        }
-        FoldPlan {
-            inner_names: inner.names_arc().clone(),
-            inner_dtypes: inner.columns().iter().map(|c| c.dtype()).collect(),
-            src_names: src.names().to_vec(),
-            ops,
-        }
-    }
-
-    /// Whether this plan still matches `inner` + `src` (no schema change).
-    fn matches(&self, inner: &DataFrame, src: &DataFrame) -> bool {
-        // The inner frame is pointer-stable across the fold's row-only mutations
-        // (append / forming-row update), so an O(1) `Arc::ptr_eq` replaces the
-        // inner-name comparison; the source names are compared by value (a column
-        // turning from cached to data changes them, not the inner names). Dtypes are
-        // still checked — a cell can be replaced in place, changing dtype without
-        // touching the name `Arc` — but that is a cheap enum compare, never a hash.
-        Arc::ptr_eq(&self.inner_names, inner.names_arc())
-            && self.src_names.as_slice() == src.names()
-            && self.inner_dtypes.len() == inner.width()
-            && self
-                .inner_dtypes
-                .iter()
-                .zip(inner.columns())
-                .all(|(d, c)| *d == c.dtype())
+    fn build(inner: &DataFrame, aggregate: &DataFrame, spec: &AggSpec) -> Self {
+        let ops = aggregate.names().iter().enumerate().map(|(i, name)| {
+            (inner.column_pos(name).expect("an open period holds the frame's data columns"), i, spec.agg_for(name).as_combine_op())
+        }).collect();
+        Self { names: inner.names_arc().clone(), ops }
     }
 }
 
@@ -219,13 +178,13 @@ impl TfState {
             0 => None,
             _ => Some(forming_bar(frame)?),
         };
-        Ok(TfState { time_frame, cumulators, open, open_key: None, fold_plan: None, refold_next: false })
+        Ok(TfState { time_frame, cumulators, open, open_key: None, aggregate: None, fold_plan: None, refold_next: false })
     }
 
     /// The tf state of a `cumulate` result: the cumulator's open period carries on.
     pub(crate) fn from_cumulator(time_frame: TimeFrame, cumulators: AggSpec, cum: &Cumulator) -> TfState {
         let open = cum.open_period().cloned();
-        TfState { time_frame, cumulators, open, open_key: None, fold_plan: None, refold_next: false }
+        TfState { time_frame, cumulators, open, open_key: None, aggregate: cum.period_aggregate().cloned(), fold_plan: None, refold_next: false }
     }
 
     /// This state's time frame and aggregators over the rows of `frame` (a re-labelled or
@@ -239,7 +198,6 @@ impl TfState {
     /// turns into data enters the bars as missing.
     pub(crate) fn projected(&self, inner: &DataFrame) -> PyResult<TfState> {
         let mut t = self.clone();
-        t.fold_plan = None; // the columns changed: rebuilt on the next fold
         let row = forming_row(inner);
         t.follow(row.as_ref(), row.as_ref())?; // every kept value is unchanged
         Ok(t)
@@ -283,6 +241,8 @@ impl TfState {
     ///   `ValueError`. A column whose bars cannot take a new dtype losslessly counts as a
     ///   new forming value.
     fn follow(&mut self, before: Option<&DataFrame>, after: Option<&DataFrame>) -> PyResult<()> {
+        self.aggregate = None; // rebuilt from the changed raw bars, never from the written coarse cell
+        self.fold_plan = None;
         let (Some(before), Some(after)) = (before, after) else {
             self.open = None;
             self.open_key = None;
@@ -425,12 +385,12 @@ impl PyDataFrame {
         // rows yet takes the first bar's), never to an incoming bar's: bars are instants,
         // and the frame decides which local day / hour they fall in.
         let tz = match inner.index().kind() {
-            IndexKind::Datetime(_, tz) => *tz,
+            IndexKind::Datetime(_, tz) => tz.clone(),
             _ => bars.index().tz(), // LCOV_EXCL_LINE (a tf frame's index is datetime)
         };
         for (i, &bar_ts) in fine_ts.iter().enumerate() {
             // A period is identified by its start on the frame's grid.
-            let key = frame.period_start(bar_ts, tz).map_err(pyerr)?;
+            let key = frame.period_start(bar_ts, &tz).map_err(pyerr)?;
             // The open period's start is invariant while it forms, so memoize it
             // (lazily, also covering construction paths that set `open` without one)
             // and skip the second per-bar `period_start` of the forming bar.
@@ -440,7 +400,7 @@ impl PyDataFrame {
                     let open_key = match tfs.open_key {
                         Some(k) => k,
                         None => {
-                            let k = frame.period_start(open.last_ts(), tz).map_err(pyerr)?;
+                            let k = frame.period_start(open.last_ts(), &tz).map_err(pyerr)?;
                             tfs.open_key = Some(k);
                             k
                         }
@@ -461,48 +421,53 @@ impl PyDataFrame {
                 // stale row like any appended one, resumed from the state as of the closed
                 // bar (never stepping the closed bar again). The open period switches only
                 // once the row is in.
-                let agg =
-                    aggregate_period(bar, &tfs.cumulators, tfs.time_frame, tz).map_err(pyerr)?;
                 let open = OpenPeriod::new(bar.clone()).map_err(pyerr)?;
-                inner.append_new(&agg).map_err(pyerr)?;
+                let row = aggregate_period(bar, &tfs.cumulators, frame, &tz).map_err(pyerr)?;
+                inner.append_new(&row).map_err(pyerr)?;
+                if let Some(aggregate) = &mut tfs.aggregate { aggregate.restart(row, bar); }
                 tfs.open = Some(open);
+                tfs.open_key = Some(key);
                 tfs.refold_next = false;
-                tfs.open_key = Some(key); // the new open period's key (no recompute next bar)
                 continue;
             }
             let open = tfs.open.as_mut().unwrap();
-            // A re-sent forming bar (same ts) replaces the open period's last bar.
-            let resent = open.last_ts() == bar_ts;
-            let last = inner.height() - 1;
-            // A new distinct fine bar updates the forming row IN PLACE — no period
-            // re-reduce, no column clone, no allocation. The fold plan is CACHED in
-            // `tfs.fold_plan` and reused while the schema is unchanged, so the hot path
-            // never re-runs the per-bar `column_pos` / `agg_for` HashMap name lookups
-            // (whose SipHash dominated the per-bar cost). A re-sent bar re-cumulates the
-            // whole open period instead (a max / min cannot be un-combined) — also in
-            // place, from the same plan (the bar and the open period share the frame's
-            // data columns).
-            if !tfs.fold_plan.as_ref().is_some_and(|fp| fp.matches(inner, bar)) {
+            if tfs.aggregate.is_none() {
+                tfs.aggregate = PeriodAggregate::new(open, &tfs.cumulators, frame, &tz).ok();
+            }
+            if !tfs.fold_plan.as_ref().is_some_and(|plan| Arc::ptr_eq(&plan.names, inner.names_arc())) {
                 tfs.fold_plan = Some(FoldPlan::build(inner, bar, &tfs.cumulators));
             }
             let ops = &tfs.fold_plan.as_ref().unwrap().ops;
-            if resent {
-                inner.check_refold(last, open.bars(), bar, ops).map_err(pyerr)?;
-                open.push(bar).map_err(pyerr)?;
-                inner.refold_forming_row(last, open.bars(), ops).map_err(pyerr)?;
-                tfs.refold_next = false;
-            } else if tfs.refold_next {
-                // the forming row is re-cumulated from the bars, the new one included
-                let mut next = open.clone();
-                next.push(bar).map_err(pyerr)?;
-                inner.check_refold(last, next.bars(), bar, ops).map_err(pyerr)?;
-                inner.refold_forming_row(last, next.bars(), ops).map_err(pyerr)?;
-                *open = next;
-                tfs.refold_next = false;
+            let resent = open.last_ts() == bar_ts;
+            let reduced = tfs.aggregate.as_mut().map(|aggregate| aggregate.push(bar, resent));
+            if resent || tfs.refold_next {
+                if let Some(result) = reduced {
+                    result.map_err(pyerr)?;
+                    inner.write_folded_row(tfs.aggregate.as_ref().unwrap().current(), ops).map_err(pyerr)?;
+                } else {
+                    // A lossless dtype write can leave the displayed coarse value
+                    // valid while reducing the converted fine bars overflows. Keep
+                    // the original error timing and let a correction repair the
+                    // last bar before trying to reduce that exceptional period.
+                    let mut next = open.clone();
+                    next.push(bar).map_err(pyerr)?;
+                    inner.refold_forming_row(inner.height() - 1, next.bars(), ops).map_err(pyerr)?;
+                    *open = next;
+                    tfs.aggregate = PeriodAggregate::new(open, &tfs.cumulators, frame, &tz).ok();
+                    tfs.refold_next = false;
+                    continue;
+                }
             } else {
-                inner.fold_forming_row(last, bar, 0, ops).map_err(pyerr)?;
-                open.push(bar).map_err(pyerr)?;
+                // Preserve the single-cell fold as well as the batch reduction:
+                // their NaN payloads (and rounding after a dtype write) can differ.
+                let result = inner.fold_forming_row(inner.height() - 1, bar, 0, ops);
+                if result.is_err() || reduced.is_some_and(|r| r.is_err()) {
+                    tfs.aggregate = None; // rebuild from unchanged raw bars after an error
+                }
+                result.map_err(pyerr)?;
             }
+            open.push(bar).map_err(pyerr)?;
+            tfs.refold_next = false;
         }
         Ok(())
     }

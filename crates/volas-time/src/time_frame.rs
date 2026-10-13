@@ -97,12 +97,22 @@ impl TimeFrame {
     ///   resolves to the day's earliest real instant ([`Tz::day_start`]).
     ///
     /// A period starting outside the datetime64[ns] range is an `Overflow` error.
-    pub fn period_start(&self, ns: i64, tz: Tz) -> Result<i64> {
+    pub fn period_start(&self, ns: i64, tz: &Tz) -> Result<i64> {
+        self.period_cursor(tz).period_start(ns)
+    }
+
+    /// A borrowed interval cursor for ordered bulk bucketing.
+    pub fn period_cursor(self, tz: &Tz) -> PeriodCursor<'_> {
+        PeriodCursor { tf: self, zone: tz, cursor: tz.cursor() }
+    }
+
+    fn period_start_with(&self, ns: i64, tz: &Tz, cursor: &mut volas_core::tz::TzCursor<'_>) -> Result<i64> {
         use TimeFrame::*;
         if let Some(step) = self.sub_day_ns() {
-            return tz.floor_local_grid(ns, step).map_err(|_| self.out_of_range(ns));
+            return cursor.floor_local_grid(ns, step).map_err(|_| self.out_of_range(ns));
         }
-        let (y, mo, d, _, _, _) = tz.civil_parts(ns);
+        let civil = cursor.civil(ns);
+        let (y, mo, d) = (civil.year(), civil.month(), civil.day());
         let days = volas_core::datetime::days_from_civil(y, mo, d);
         let (y, mo, d) = match self {
             Day3 => volas_core::datetime::civil_from_days(days.div_euclid(3) * 3),
@@ -229,6 +239,20 @@ pub enum Span {
     Years(i64),
 }
 
+/// Reuses the time-zone interval while bucketing ordered instants. The cursor
+/// borrows the immutable snapshot held by the frame or open period.
+pub struct PeriodCursor<'a> {
+    tf: TimeFrame,
+    zone: &'a Tz,
+    cursor: volas_core::tz::TzCursor<'a>,
+}
+
+impl PeriodCursor<'_> {
+    pub fn period_start(&mut self, ns: i64) -> Result<i64> {
+        self.tf.period_start_with(ns, self.zone, &mut self.cursor)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -239,7 +263,7 @@ mod tests {
     #[test]
     fn period_start_floors_to_the_grid() {
         let ns = datetime::parse_ns("2024-05-22 13:47:23").unwrap(); // a Wednesday
-        let start = |tf: TimeFrame| tf.period_start(ns, Tz::Utc).unwrap();
+        let start = |tf: TimeFrame| tf.period_start(ns, &Tz::Utc).unwrap();
         let at = |s: &str| datetime::parse_ns(s).unwrap();
         assert_eq!(start(TimeFrame::Sec1), at("2024-05-22 13:47:23"));
         assert_eq!(start(TimeFrame::Min1), at("2024-05-22 13:47:00"));
@@ -270,7 +294,7 @@ mod tests {
         let sh = Tz::parse("Asia/Shanghai").unwrap();
         let ns = datetime::parse_ns("2024-05-22 03:30:00").unwrap(); // 11:30 in Shanghai
         assert_eq!(
-            TimeFrame::Day1.period_start(ns, sh).unwrap(),
+            TimeFrame::Day1.period_start(ns, &sh).unwrap(),
             datetime::parse_ns("2024-05-21 16:00:00").unwrap() // 05-22 00:00 +08
         );
         // America/New_York 2024-11-03: 01:00-02:00 repeats (fold). Sub-day bars
@@ -279,25 +303,25 @@ mod tests {
         let ny = Tz::parse("America/New_York").unwrap();
         let in_fold = datetime::parse_ns("2024-11-03 05:30:00").unwrap(); // first 01:30 EDT
         assert_eq!(
-            TimeFrame::Hour1.period_start(in_fold, ny).unwrap(),
+            TimeFrame::Hour1.period_start(in_fold, &ny).unwrap(),
             datetime::parse_ns("2024-11-03 05:00:00").unwrap()
         );
         let repeated = datetime::parse_ns("2024-11-03 06:30:00").unwrap(); // second 01:30 EST
         assert_eq!(
-            TimeFrame::Hour1.period_start(repeated, ny).unwrap(),
+            TimeFrame::Hour1.period_start(repeated, &ny).unwrap(),
             datetime::parse_ns("2024-11-03 06:00:00").unwrap()
         );
         // a day-and-longer bar stays one civil day across the fold
         assert_eq!(
-            TimeFrame::Day1.period_start(repeated, ny).unwrap(),
-            TimeFrame::Day1.period_start(in_fold, ny).unwrap()
+            TimeFrame::Day1.period_start(repeated, &ny).unwrap(),
+            TimeFrame::Day1.period_start(in_fold, &ny).unwrap()
         );
         // 2024-03-10: 02:00-03:00 EST does not exist (gap). A 02:xx-grid start is
         // unreachable from real timestamps, but a Day1 bar over the gap day still
         // starts at the (existing) local midnight.
         let gap_day = datetime::parse_ns("2024-03-10 12:00:00").unwrap();
         assert_eq!(
-            TimeFrame::Day1.period_start(gap_day, ny).unwrap(),
+            TimeFrame::Day1.period_start(gap_day, &ny).unwrap(),
             datetime::parse_ns("2024-03-10 05:00:00").unwrap() // 00:00 EST
         );
         // América/São_Paulo 2018-11-04: midnight itself did not exist (the clock
@@ -306,7 +330,7 @@ mod tests {
         let sp = Tz::parse("America/Sao_Paulo").unwrap();
         let mid_day = datetime::parse_ns("2018-11-04 15:00:00").unwrap();
         assert_eq!(
-            TimeFrame::Day1.period_start(mid_day, sp).unwrap(),
+            TimeFrame::Day1.period_start(mid_day, &sp).unwrap(),
             datetime::parse_ns("2018-11-04 03:00:00").unwrap()
         );
     }
@@ -334,7 +358,7 @@ mod tests {
     /// Two instants share a period iff their period starts are equal.
     #[test]
     fn period_start_groups_same_5min_block() {
-        let start = |t: &str| TimeFrame::Min5.period_start(datetime::parse_ns(t).unwrap(), Tz::Utc).unwrap();
+        let start = |t: &str| TimeFrame::Min5.period_start(datetime::parse_ns(t).unwrap(), &Tz::Utc).unwrap();
         assert_eq!(start("2020-01-01 00:00:00"), start("2020-01-01 00:04:59"));
         assert_ne!(start("2020-01-01 00:00:00"), start("2020-01-01 00:05:00"));
     }
@@ -342,7 +366,7 @@ mod tests {
     #[test]
     fn week_is_continuous_and_monday_anchored() {
         // 2024-01-29 is a Monday; the run Mon..Sun (2024-02-04) crosses Feb 1.
-        let week = |t: &str| TimeFrame::Week1.period_start(datetime::parse_ns(t).unwrap(), Tz::Utc).unwrap();
+        let week = |t: &str| TimeFrame::Week1.period_start(datetime::parse_ns(t).unwrap(), &Tz::Utc).unwrap();
         // one continuous week, even across the month boundary
         assert_eq!(week("2024-01-29 00:00:00"), week("2024-02-04 23:59:59"));
         // boundaries land on Monday
@@ -354,7 +378,7 @@ mod tests {
     fn day3_is_continuous_across_month_boundary() {
         // Each calendar day keeps the epoch-anchored 3-day period or starts the
         // next one 3 days later — never a month-reset jump at Feb 1.
-        let day3 = |t: &str| TimeFrame::Day3.period_start(datetime::parse_ns(t).unwrap(), Tz::Utc).unwrap();
+        let day3 = |t: &str| TimeFrame::Day3.period_start(datetime::parse_ns(t).unwrap(), &Tz::Utc).unwrap();
         const THREE_DAYS: i64 = 3 * 86_400_000_000_000;
         let mut prev = day3("2024-01-28 00:00:00");
         for day in ["2024-01-29", "2024-01-30", "2024-01-31", "2024-02-01", "2024-02-02"] {
@@ -372,14 +396,14 @@ mod tests {
         let first = i64::MIN + 1; // 1677-09-21 00:12:43.145224193
         for tf in [TimeFrame::Sec1, TimeFrame::Day1, TimeFrame::Day3, TimeFrame::Week1,
                    TimeFrame::Month1, TimeFrame::Year1] {
-            let err = tf.period_start(first, Tz::Utc).unwrap_err();
+            let err = tf.period_start(first, &Tz::Utc).unwrap_err();
             assert!(matches!(err, VolasError::Overflow(_)), "{tf:?}: {err}");
             assert!(err.to_string().contains(&format!("the {} period holding", tf.label())), "{err}");
         }
         let ny = Tz::parse("America/New_York").unwrap();
-        assert!(TimeFrame::Hour1.period_start(first, ny).is_err());
+        assert!(TimeFrame::Hour1.period_start(first, &ny).is_err());
         // the last instant still has a representable start
-        assert!(TimeFrame::Year1.period_start(i64::MAX, Tz::Utc).is_ok());
+        assert!(TimeFrame::Year1.period_start(i64::MAX, &Tz::Utc).is_ok());
     }
 
     #[test]
@@ -463,9 +487,9 @@ mod tests {
         // is its own period's start.
         let ns = datetime::parse_ns("2021-07-19 22:47:53").unwrap();
         for tf in ALL {
-            let start = tf.period_start(ns, Tz::Utc).unwrap();
+            let start = tf.period_start(ns, &Tz::Utc).unwrap();
             assert!(start <= ns, "{tf:?}");
-            assert_eq!(tf.period_start(start, Tz::Utc).unwrap(), start, "{tf:?}");
+            assert_eq!(tf.period_start(start, &Tz::Utc).unwrap(), start, "{tf:?}");
         }
     }
 

@@ -50,6 +50,7 @@ __all__ = [
     "directive_stringify",
     "read_csv",
     "to_datetime",
+    "tz_database",
 ]
 
 # A single cell read out of a Series / Row / cell-accessor. The concrete type depends
@@ -814,3 +815,8 @@ class EwmFrame:
     def sum(self) -> DataFrame: ...
     def var(self, bias: bool = ...) -> DataFrame: ...
     def std(self, bias: bool = ...) -> DataFrame: ...
+
+
+def tz_database(key: str = "UTC") -> dict[str, str | None]:
+    """First-use TZif source and IANA version; initializes an unused key."""
+    ...

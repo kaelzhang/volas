@@ -209,10 +209,20 @@ Two properties make this safe for a live feed:
   `to_numpy()` does not auto-refresh; call `cum.fulfill()` first, or just read
   the directive.)
 - **Re-sent bars do not double-count.** The forming period keeps its bars, and
-  folding a bar whose timestamp is already among them **replaces** that bar — the
-  same dedup rule shown at the top of this section — matching exchanges that
-  revise their most recent bar. Re-sending a bar of the frame's own time frame
-  (`5m` here, stamped `00:05`) replaces the whole forming row.
+  a bar whose timestamp equals the **latest fine bar's** timestamp replaces that
+  bar, matching exchanges that revise their most recent bar. An earlier timestamp
+  raises and leaves the frame unchanged. Re-sending a bar of the frame's own time
+  frame (`5m` here, stamped `00:05`) replaces the whole forming row while that bar
+  is the only one held in the period.
+
+Batch cumulation computes period boundaries once and builds each output column
+directly, preserving each period's input fold order. Live cumulation keeps the
+running aggregate and the aggregate before the latest fine bar alongside the raw
+bars. Correcting that latest bar therefore costs **O(columns)** regardless of the
+number of fine bars in the open period, including for min/max and when a correction
+removes a missing value. A copy shares buffers until its first write; that first
+write can copy the shared raw bars. A schema or forming-value change rebuilds the
+aggregate checkpoints from the retained bars on the next fold.
 
 See [Live cumulation](dataframe-api.md#live-cumulation--a-tf-aware-dataframe) for the API summary.
 
@@ -321,9 +331,23 @@ HK and A-share equity frames coexist and align on the absolute instant. A
 `DatetimeIndex` additionally carries a **per-frame timezone** that governs how
 those instants render, how bare-string labels match, and how `cumulate` aligns
 day-and-coarser buckets. A timezone is either a **fixed offset** (`'+08:00'`,
-cheap; A-share / HK equities) or a **named IANA zone** (`'America/New_York'`,
-DST-aware via `chrono-tz`; US / EU — past 2099 each zone follows its tzdb rule, as
-Python's `zoneinfo` does). The default is UTC.
+cheap; A-share / HK equities) or a **named IANA zone** (`'America/New_York'`).
+volas reads named-zone TZif bytes from the running interpreter's `zoneinfo.TZPATH`
+directories in order, then the `tzdata` package, and evaluates them in Rust across
+the full `datetime64[ns]` range, including future POSIX footer rules. `tzdata` is a
+runtime dependency. The first successful initialization establishes one immutable
+rules object per named key and process. All later timestamps, frames, and open cumulation
+periods using that key share the same immutable rules without reading files or
+recompiling. Named Python exports use the interpreter's standard `ZoneInfo(key)`;
+volas retains that object so its identity remains stable for pandas interop.
+A supplied keyed tzinfo selects these canonical key rules, including an object
+constructed with `ZoneInfo.from_file`; its private rule table is not imported.
+An aware datetime still supplies its own UTC offset when determining its instant.
+For an unkeyed tzinfo passed as `tz=`, volas uses its whole-second
+`utcoffset(None)` as a fixed offset. An aware datetime uses that fixed offset
+when available; if its unkeyed tzinfo provides no fixed offset, volas captures
+its offset at that instant instead. Sub-second offsets are rejected; no dynamic
+custom rule table is imported.
 
 Here is the whole picture. Build a `DatetimeIndex` by parsing a column with
 `to_datetime`, promoting it with `set_index`, then tagging the display zone with
@@ -382,6 +406,39 @@ aware.tz_convert('+08:00')                   # restate: instants kept, wall-cloc
 naive.tz_convert('+08:00')                   # TypeError — anchor with tz_localize first
 aware.tz_localize('UTC')                     # TypeError — already anchored; use tz_convert
 ```
+
+### Reproducible timezone deployment
+
+Pin `tzdata` to an exact release in your deployment lockfile and set
+`PYTHONTZPATH=""` before starting Python. This makes every host resolve zones from
+that package instead of a host-specific system or Conda directory. volas does
+not bundle or download a second timezone database. Configure `TZPATH` before any
+timezone use, and restart the process after updating timezone data. Changing
+files, resetting `TZPATH`, or clearing `ZoneInfo` caches after a key has been used
+is not a supported way to update that key within a running process.
+
+```sh
+PYTHONTZPATH="" python your_service.py
+```
+
+Assert the chosen source and IANA version at startup:
+
+```py
+import volas
+
+# The IANA release selected by this deployment's pinned tzdata package.
+expected_iana_version = "2026b"
+assert volas.tz_database() == {"source": "tzdata", "version": expected_iana_version}
+```
+
+`volas.tz_database(key="UTC")` returns `{"source": str, "version": str | None}`.
+`source` is the selected `TZPATH` directory, or `"tzdata"` for
+the package. `version` is the `# version` entry in that directory's `tzdata.zi`,
+or `tzdata.IANA_VERSION`; it is `None` when the source does not identify a release.
+Pass a specific IANA key to inspect its source when directories contain only
+some zones, for example `volas.tz_database("America/New_York")`. This initializes
+an unused key; later calls report its first-use source and version. The default
+key is `UTC`. String `"UTC"` and numeric UTC offsets remain fixed specifications.
 
 `cumulate` to a daily (or coarser) bar aligns buckets to the frame's local
 trading day — DST-aware for a named zone — while the raw `.index` numpy export
