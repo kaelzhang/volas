@@ -4,7 +4,7 @@ candlestick (OHLCV) time-series data.
 
 from volas_rs import (
     DataFrame, Series, Row, Timestamp, read_csv, to_datetime, TimeFrame,
-    directive_stringify, directive_lookback,
+    directive_stringify, directive_lookback, tz_database,
     DirectiveError, DirectiveSyntaxError, DirectiveValueError,
     NA,
 )
@@ -15,7 +15,7 @@ __version__ = _get_version('volas')
 
 __all__ = [
     'DataFrame', 'Series', 'Row', 'Timestamp', 'read_csv', 'to_datetime', 'TimeFrame',
-    'directive_stringify', 'directive_lookback',
+    'directive_stringify', 'directive_lookback', 'tz_database',
     'NA',
     'DirectiveError', 'DirectiveSyntaxError', 'DirectiveValueError',
     '__version__',

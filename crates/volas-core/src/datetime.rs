@@ -1,8 +1,6 @@
 //! Datetime parsing / formatting for the `DatetimeIndex`. Storage is **UTC
 //! epoch-ns**; per-frame display/matching tz lives in [`crate::tz`].
 
-use chrono::{DateTime, Datelike, NaiveDate, NaiveDateTime, TimeZone, Timelike};
-
 use crate::error::{Result, VolasError};
 use crate::tz::Tz;
 
@@ -94,50 +92,39 @@ pub fn round_wall(ns: i64, offset_secs: i32, unit_ns: i64, mode: Rounding) -> Re
 /// string (RFC3339 `...+HH:MM` / `...Z`) is an absolute instant and converts
 /// directly; a **naive** `YYYY-MM-DD[ HH:MM:SS]` string is interpreted as UTC.
 pub fn parse_ns(s: &str) -> Result<i64> {
-    parse_ns_in_tz(s, Tz::Utc)
+    parse_ns_in_tz(s, &Tz::Utc)
 }
 
 /// Like [`parse_ns`], but a **naive** string is interpreted in `tz` (then stored
 /// as UTC). An **offset-aware** string is already absolute, so `tz` is ignored.
 /// A `Value` error for text that is not a datetime (or a wall clock `tz` skips /
 /// repeats); an `Overflow` error for an instant outside the datetime64[ns] range.
-pub fn parse_ns_in_tz(s: &str, tz: Tz) -> Result<i64> {
+pub fn parse_ns_in_tz(s: &str, tz: &Tz) -> Result<i64> {
     let s = s.trim();
     if let Some((wall, offset)) = parse_offset_aware(s) {
-        return fixed_wall_instant(&wall, offset);
+        return wall.instant(offset);
     }
-    if let Some(wall) = naive_wall(s) {
-        return tz.localize(wall);
+    if let Some(wall) = parse::naive_wall(s) {
+        return tz.localize_with_carry(wall.civil, wall.carry);
     }
     // A bare time-of-day ("09:30" / "09:30:15") means *today* at that wall-clock
     // (pandas `Timestamp('09:00')` parity, F24) — today as seen in `tz`.
-    for fmt in ["%H:%M:%S", "%H:%M"] {
-        if let Ok(t) = chrono::NaiveTime::parse_from_str(s, fmt) {
-            let now = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map_or(0, |d| d.as_nanos() as i64);
-            return tz.localize(tz.wall(now).date().and_time(t));
-        }
+    if let Some((h, mi, sec, nano)) = parse::time_parts(s, false) {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_nanos() as i64);
+        let today = tz.wall(now);
+        let wall = today.with_time(h, mi, sec.min(59), nano).expect("a parsed time is valid");
+        return tz.localize_with_carry(wall, i64::from(sec == 60) * NS_PER_SEC);
     }
     Err(VolasError::Value(format!("could not parse datetime {s:?}")))
-}
-
-/// The UTC instant of an offset-aware chrono datetime, through the range gate
-/// (exact: whole seconds and the fraction are combined without an intermediate
-/// that could leave the range first).
-pub(crate) fn instant_of<T: TimeZone>(dt: &DateTime<T>) -> Result<i64> {
-    fixed_wall_instant(&dt.naive_utc(), 0)
 }
 
 /// The instant of the wall clock `wall` read at the fixed offset `offset_secs`
 /// east of UTC — exact wide arithmetic, so a wall clock past the range whose
 /// instant is inside it (or the reverse) is judged on the instant alone.
-pub(crate) fn fixed_wall_instant(wall: &NaiveDateTime, offset_secs: i32) -> Result<i64> {
-    let utc = wall.and_utc();
-    instant_wide(
-        (utc.timestamp() as i128 - offset_secs as i128) * NS_PER_SEC as i128
-            + utc.timestamp_subsec_nanos() as i128,
-    )
+pub(crate) fn fixed_wall_instant(wall: &Civil, offset_secs: i32) -> Result<i64> {
+    instant_wide(wall.epoch_nanoseconds() - offset_secs as i128 * NS_PER_SEC as i128)
 }
 
 /// The fixed offset (seconds east of UTC) carried by an **offset-aware** string,
@@ -153,39 +140,14 @@ pub fn offset_suffix_secs(s: &str) -> Option<i32> {
 /// second-precision offset round-trips). The wall clock and the offset in seconds.
 ///
 /// [`format_offset`]: crate::tz::format_offset
-fn parse_offset_aware(s: &str) -> Option<(NaiveDateTime, i32)> {
-    if let Some(wall) = s.strip_suffix(['Z', 'z']).and_then(|w| naive_wall(w.trim_end())) {
+fn parse_offset_aware(s: &str) -> Option<(parse::ParsedWall, i32)> {
+    if let Some(wall) = s.strip_suffix(['Z', 'z']).and_then(|w| parse::naive_wall(w.trim_end())) {
         return Some((wall, 0));
     }
     // the offset's sign comes after the date's own dashes (`YYYY-MM-DD`)
     let at = s.rfind(['+', '-']).filter(|&i| i > 10)?;
-    let wall = naive_wall(s[..at].trim_end())?;
+    let wall = parse::naive_wall(s[..at].trim_end())?;
     Some((wall, crate::tz::parse_offset_seconds(&s[at..])?))
-}
-
-/// Parse the supported **naive** forms into a wall-clock datetime (with its
-/// fractional second; no tz applied yet).
-fn naive_wall(s: &str) -> Option<NaiveDateTime> {
-    // Full time, with an optional fractional second (`%.f` also matches its
-    // absence) — the form `format_ns` emits, so text output round-trips at ns
-    // precision (D1); then minute resolution (`14:30`, the everyday intraday
-    // spelling, pandas-parity).
-    [
-        "%Y-%m-%d %H:%M:%S%.f",
-        "%Y-%m-%dT%H:%M:%S%.f",
-        "%Y/%m/%d %H:%M:%S%.f",
-        "%Y-%m-%d %H:%M",
-        "%Y-%m-%dT%H:%M",
-        "%Y/%m/%d %H:%M",
-    ]
-    .iter()
-    .find_map(|fmt| NaiveDateTime::parse_from_str(s, fmt).ok())
-    .or_else(|| {
-        ["%Y-%m-%d", "%Y/%m/%d"]
-            .iter()
-            .find_map(|fmt| NaiveDate::parse_from_str(s, fmt).ok())
-            .map(|d| d.and_time(chrono::NaiveTime::MIN))
-    })
 }
 
 /// A fixed-length time unit (NumPy `datetime64` / `timedelta64` vocabulary) as
@@ -231,11 +193,10 @@ pub fn datetime64_to_ns(value: i64, unit: &str, count: i64) -> Result<i64> {
         "M" => value as i128 * count as i128,
         _ => return instant_wide(fixed_unit_ns(value, unit, count)?),
     };
-    let date = i32::try_from(1970 + months.div_euclid(12))
-        .ok()
-        .and_then(|year| NaiveDate::from_ymd_opt(year, months.rem_euclid(12) as u32 + 1, 1))
+    let year = i64::try_from(1970 + months.div_euclid(12)).map_err(|_| out_of_range())?;
+    let date = Civil::new(year, months.rem_euclid(12) as i64 + 1, 1, 0, 0, 0, 0)
         .ok_or_else(out_of_range)?;
-    instant_of(&date.and_time(chrono::NaiveTime::MIN).and_utc())
+    fixed_wall_instant(&date, 0)
 }
 
 /// A NumPy `datetime64[count unit]` array's raw values as a `Datetime` column's
@@ -409,24 +370,15 @@ pub fn civil_parts(ns: i64) -> (i64, i64, i64, i64, i64, i64) {
 /// decomposed instant; an invalid date is a broken invariant and panics, never a
 /// silent epoch day.
 pub fn days_from_civil(y: i64, mo: i64, d: i64) -> i64 {
-    let date = i32::try_from(y)
-        .ok()
-        .zip(u32::try_from(mo).ok().zip(u32::try_from(d).ok()))
-        .and_then(|(y, (mo, d))| NaiveDate::from_ymd_opt(y, mo, d))
-        .expect("days_from_civil takes the parts of a valid civil date");
-    date.signed_duration_since(NaiveDate::default()).num_days()
+    civil::checked_days_from_civil(y, mo, d)
+        .expect("days_from_civil takes the parts of a valid civil date")
 }
 
 /// The civil date for a continuous epoch-day count — the inverse of
 /// [`days_from_civil`], used to map a multi-day bucket index back to the bucket's
 /// first calendar day (the period-start label of Day3 / Week1 bars).
 pub fn civil_from_days(days: i64) -> (i64, i64, i64) {
-    // a day count derived from an instant (~±106 752 days, a bucket floor a few
-    // days past either end) is far inside chrono's ±262 000-year range
-    let date = chrono::TimeDelta::try_days(days)
-        .and_then(|span| NaiveDate::default().checked_add_signed(span))
-        .expect("an epoch-day count derived from an instant is a civil date");
-    (date.year() as i64, date.month() as i64, date.day() as i64)
+    civil::civil_from_days(days)
 }
 
 /// The `.fff` / `.ffffff` / `.fffffffff` fractional-second suffix for a
@@ -452,14 +404,13 @@ pub fn format_ns(ns: i64) -> String {
     if ns == i64::MIN {
         return "NaT".to_string(); // missing instant — not a real 1677 civil date
     }
-    let wall = DateTime::from_timestamp_nanos(ns).naive_utc();
-    format!("{}{}", wall.format("%Y-%m-%d %H:%M:%S"), subsec_suffix(wall.nanosecond()))
+    Civil::from_epoch_ns(ns).to_string()
 }
 
 /// Format epoch nanoseconds as the wall-clock
 /// `YYYY-MM-DD HH:MM:SS[.fff[fff[fff]]]` in `tz` (the human/string form; bulk
 /// numpy export stays UTC). Sub-second precision is preserved like [`format_ns`].
-pub fn format_ns_tz(ns: i64, tz: Tz) -> String {
+pub fn format_ns_tz(ns: i64, tz: &Tz) -> String {
     if ns == i64::MIN {
         return "NaT".to_string();
     }
@@ -476,7 +427,7 @@ pub fn format_ns_tz(ns: i64, tz: Tz) -> String {
 
 /// The wall-clock civil parts `(year, month, day, hour, minute, second)` of the
 /// instant `ns` in `tz` ([`Tz::civil_parts`]).
-pub fn civil_parts_tz(ns: i64, tz: Tz) -> (i64, i64, i64, i64, i64, i64) {
+pub fn civil_parts_tz(ns: i64, tz: &Tz) -> (i64, i64, i64, i64, i64, i64) {
     tz.civil_parts(ns)
 }
 
@@ -484,7 +435,7 @@ pub fn civil_parts_tz(ns: i64, tz: Tz) -> (i64, i64, i64, i64, i64, i64) {
 /// instant's UTC offset (`±HH:MM[:SS]`) when `tz` is aware — the text form that
 /// identifies the instant on its own (a DST-repeated wall clock stays two distinct
 /// rows), as pandas writes an aware index to CSV. A naive `tz` has no suffix.
-pub fn format_ns_offset(ns: i64, tz: Tz) -> String {
+pub fn format_ns_offset(ns: i64, tz: &Tz) -> String {
     let wall = format_ns_tz(ns, tz);
     if ns == NAT || !tz.is_aware() {
         return wall;
@@ -498,60 +449,8 @@ pub fn format_ns_offset(ns: i64, tz: Tz) -> String {
 /// offset at the instant (second precision when it has seconds) and `%Z` its zone
 /// name — both empty for a naive `tz`, like pandas. An invalid or unformattable
 /// format is a `Value` error, never a panic.
-pub fn strftime(ns: i64, tz: Tz, fmt: &str) -> Result<String> {
-    use chrono::format::{Fixed, Item, StrftimeItems};
-    use std::fmt::Write;
-    // Defensive NaT guard (the civil_parts contract): currently unreachable from the
-    // binding because `volas.Timestamp` cannot be constructed as NaT.
-    if ns == NAT {
-        return Ok("NaT".to_string()); // missing instant -> NaT // LCOV_EXCL_LINE
-    }
-    let invalid = || VolasError::Value(format!("invalid strftime format {fmt:?}"));
-    let off = tz.offset_secs_at(ns);
-    let aware = |text: String| if tz.is_aware() { text } else { String::new() };
-    let compact = aware(crate::tz::format_offset(off, ""));
-    let colon = aware(crate::tz::format_offset(off, ":"));
-    let (sign, a) = (if off < 0 { '-' } else { '+' }, off.unsigned_abs());
-    let hms = aware(format!("{sign}{:02}:{:02}:{:02}", a / 3600, a % 3600 / 60, a % 60));
-    let hours = aware(format!("{sign}{:02}", a / 3600));
-    let zone = aware(tz.zone_name_at(ns));
-    let python_fmt = python_fraction(fmt);
-    let items: Vec<Item> = StrftimeItems::new(&python_fmt)
-        .map(|item| match item {
-            Item::Fixed(Fixed::TimezoneName) => Item::Literal(&zone),
-            Item::Fixed(Fixed::TimezoneOffset | Fixed::TimezoneOffsetZ) => Item::Literal(&compact),
-            Item::Fixed(Fixed::TimezoneOffsetColon | Fixed::TimezoneOffsetColonZ) => Item::Literal(&colon),
-            Item::Fixed(Fixed::TimezoneOffsetDoubleColon) => Item::Literal(&hms),
-            Item::Fixed(Fixed::TimezoneOffsetTripleColon) => Item::Literal(&hours),
-            other => other,
-        })
-        .collect();
-    if items.iter().any(|it| matches!(it, Item::Error)) {
-        return Err(invalid());
-    }
-    let offset = chrono::FixedOffset::east_opt(off).ok_or_else(invalid)?; // not under a day
-    let dt = DateTime::from_timestamp_nanos(ns).with_timezone(&offset);
-    let mut out = String::new();
-    write!(out, "{}", dt.format_with_items(items.iter())).map_err(|_| invalid())?;
-    Ok(out)
-}
-
-/// `fmt` with Python's `%f` (6-digit microseconds) spelled as chrono's `%6f`
-/// (chrono's own `%f` prints 9 nanosecond digits); `%%` stays a literal percent.
-fn python_fraction(fmt: &str) -> String {
-    let mut out = String::with_capacity(fmt.len() + 4);
-    let mut chars = fmt.chars();
-    while let Some(c) = chars.next() {
-        out.push(c);
-        if c == '%' {
-            match chars.next() {
-                Some('f') => out.push_str("6f"),
-                Some(next) => out.push(next),
-                None => {}
-            }
-        }
-    }
-    out
+pub fn strftime(ns: i64, tz: &Tz, fmt: &str) -> Result<String> {
+    format::strftime(ns, tz, fmt)
 }
 
 /// Parse `s` with an explicit `strptime`-style `fmt` to **UTC** epoch ns, honoring
@@ -560,33 +459,10 @@ fn python_fraction(fmt: &str) -> String {
 /// ([`parse_ns`]); without one the wall-clock is read as UTC. Time fields the format
 /// omits default to zero (`strptime` semantics: a date-only format is midnight, an
 /// hour-only one is on the hour). `%Z` (a zone *name*) is rejected rather than
-/// silently skipped — chrono cannot resolve one. A `Value` error when `s` does not
+/// silently skipped — an abbreviation does not identify a zone. A `Value` error when `s` does not
 /// match `fmt`.
 pub fn parse_ns_format(s: &str, fmt: &str) -> Result<i64> {
-    use chrono::format::{parse, Fixed, Item, Parsed, StrftimeItems};
-    let items: Vec<Item> = StrftimeItems::new(fmt).collect();
-    if items.iter().any(|it| matches!(it, Item::Fixed(Fixed::TimezoneName))) {
-        return Err(VolasError::Value(format!(
-            "format \"{fmt}\": %Z (a time-zone name) is not supported — use a numeric \
-             offset (%z / %:z), or parse without format= and localize"
-        )));
-    }
-    let mismatch = || VolasError::Value(format!("\"{s}\" does not match format \"{fmt}\""));
-    let mut p = Parsed::new();
-    parse(&mut p, s, items.iter()).map_err(|_| mismatch())?;
-    if p.timestamp().is_none() {
-        let has_hour = p.hour_div_12().is_some() || p.hour_mod_12().is_some();
-        if !has_hour {
-            p.set_hour(0).map_err(|_| mismatch())?;
-        }
-        if p.minute().is_none() {
-            p.set_minute(0).map_err(|_| mismatch())?;
-        }
-    }
-    let offset = p.offset().unwrap_or(0);
-    let local = p.to_naive_datetime_with_offset(offset).map_err(|_| mismatch())?;
-    fixed_wall_instant(&local, offset)
-        .map_err(|_| VolasError::Overflow(format!("\"{s}\" is outside the datetime64[ns] range")))
+    parse::parse_ns_format(s, fmt)
 }
 
 #[cfg(test)]
@@ -626,12 +502,12 @@ mod tests {
         let tz = Tz::parse("+08:00").unwrap();
         // a naive local string is shifted to UTC by the frame tz.
         assert_eq!(
-            format_ns(parse_ns_in_tz("2020-01-01 08:00:00", tz).unwrap()),
+            format_ns(parse_ns_in_tz("2020-01-01 08:00:00", &tz).unwrap()),
             "2020-01-01 00:00:00"
         );
         // but an offset-aware string ignores the frame tz (already absolute).
         assert_eq!(
-            format_ns(parse_ns_in_tz("2020-01-01T00:00:00Z", tz).unwrap()),
+            format_ns(parse_ns_in_tz("2020-01-01T00:00:00Z", &tz).unwrap()),
             "2020-01-01 00:00:00"
         );
     }
@@ -693,13 +569,15 @@ mod tests {
     fn civil_parts_and_format_ns_tz() {
         assert_eq!(civil_parts(0), (1970, 1, 1, 0, 0, 0));
         // format_ns_tz: the UTC fast path matches format_ns; a named zone shifts.
-        assert_eq!(format_ns_tz(0, crate::tz::Tz::Utc), format_ns(0));
+        assert_eq!(format_ns_tz(0, &crate::tz::Tz::Utc), format_ns(0));
         let ny = crate::tz::Tz::parse("America/New_York").unwrap();
-        assert!(format_ns_tz(0, ny).starts_with("1969")); // UTC epoch is 1969 in NY
+        assert!(format_ns_tz(0, &ny).starts_with("1969")); // UTC epoch is 1969 in NY
     }
 }
 
-mod civil;
+pub mod civil;
+mod format;
+mod parse;
 pub use civil::Civil;
 
 #[cfg(test)]
@@ -723,3 +601,6 @@ mod offset_suffix_tests {
         assert_eq!(offset_suffix_secs("2021-01-01 09:00:00"), None);
     }
 }
+
+#[cfg(test)]
+mod tests_format;

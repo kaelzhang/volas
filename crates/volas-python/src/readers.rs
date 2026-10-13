@@ -61,6 +61,7 @@ use crate::{norm_idx, pyerr, PyDataFrame};
 ))]
 #[allow(clippy::too_many_arguments)]
 pub fn read_csv(
+    py: Python<'_>,
     path: std::path::PathBuf,
     sep: Option<String>,
     delimiter: Option<String>,
@@ -122,7 +123,7 @@ pub fn read_csv(
             ));
         }),
     };
-    let tzv = tz.as_deref().map(Tz::parse).transpose().map_err(pyerr)?;
+    let tzv = tz.as_deref().map(|name| crate::timezone::parse(py, name)).transpose()?;
     if index_name.is_none() && (tzv.is_some() || date_unit.is_some()) {
         return Err(PyValueError::new_err(
             "tz / date_unit require index_col (the column to use as the datetime index)",
@@ -140,7 +141,7 @@ pub fn read_csv(
     if let Some(name) = index_name.as_ref().filter(|_| tzv.is_some() || date_unit.is_some()) {
         let parse = match &date_unit {
             Some(unit) => DateParse::Epoch(unit.clone()),
-            None => DateParse::Text(tzv.unwrap_or_default()),
+            None => DateParse::Text(tzv.clone().unwrap_or_default()),
         };
         dates.retain(|(n, _)| n != name);
         dates.push((name.clone(), parse));

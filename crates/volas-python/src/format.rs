@@ -69,7 +69,7 @@ pub(crate) fn index_label_csv(index: &Index, i: usize) -> String {
     match index.kind() {
         IndexKind::Range { start, .. } => (start + i as i64).to_string(),
         IndexKind::Int64(v) => v[i].to_string(),
-        IndexKind::Datetime(v, tz) => datetime::format_ns_offset(v[i], *tz),
+        IndexKind::Datetime(v, tz) => datetime::format_ns_offset(v[i], tz),
         IndexKind::Str(v) => v[i].clone(),
     }
 }
@@ -183,13 +183,13 @@ fn displayed_rows(n: usize, truncate: Option<usize>) -> (Vec<usize>, bool) {
 
 /// Whether a UTC-ns instant falls exactly on midnight in `tz` (so a datetime
 /// index of pure dates renders date-only, like pandas).
-fn is_midnight(ns: i64, tz: Tz) -> bool {
+fn is_midnight(ns: i64, tz: &Tz) -> bool {
     let (_, _, _, h, mi, s) = datetime::civil_parts_tz(ns, tz);
     h == 0 && mi == 0 && s == 0 && ns.rem_euclid(1_000_000_000) == 0
 }
 
 /// Format a UTC-ns instant as a `YYYY-MM-DD` date in `tz`.
-fn fmt_date(ns: i64, tz: Tz) -> String {
+fn fmt_date(ns: i64, tz: &Tz) -> String {
     let (y, mo, d, _, _, _) = datetime::civil_parts_tz(ns, tz);
     format!("{y:04}-{mo:02}-{d:02}")
 }
@@ -202,13 +202,13 @@ fn index_cells(index: &Index, rows: &[usize]) -> Vec<String> {
         IndexKind::Int64(v) => rows.iter().map(|&i| v[i].to_string()).collect(),
         IndexKind::Str(v) => rows.iter().map(|&i| v[i].clone()).collect(),
         IndexKind::Datetime(v, tz) => {
-            let all_midnight = rows.iter().all(|&i| is_midnight(v[i], *tz));
+            let all_midnight = rows.iter().all(|&i| is_midnight(v[i], tz));
             rows.iter()
                 .map(|&i| {
                     if all_midnight {
-                        fmt_date(v[i], *tz)
+                        fmt_date(v[i], tz)
                     } else {
-                        datetime::format_ns_tz(v[i], *tz)
+                        datetime::format_ns_tz(v[i], tz)
                     }
                 })
                 .collect()
@@ -318,13 +318,13 @@ fn data_cells(
             let all_midnight = rows
                 .iter()
                 .filter(|&&i| v[i] != i64::MIN)
-                .all(|&i| is_midnight(v[i], Tz::Utc));
+                .all(|&i| is_midnight(v[i], &Tz::Utc));
             rows.iter()
                 .map(|&i| {
                     if v[i] == i64::MIN {
                         na_rep.to_string()
                     } else if all_midnight {
-                        fmt_date(v[i], Tz::Utc)
+                        fmt_date(v[i], &Tz::Utc)
                     } else {
                         datetime::format_ns(v[i])
                     }

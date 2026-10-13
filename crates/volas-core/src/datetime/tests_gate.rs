@@ -79,10 +79,10 @@ fn parse_is_exact_at_the_range_edges() {
     assert!(overflow(parse_ns("1677-09-21T00:12:43.145224192Z")));
     assert!(overflow(parse_ns("2262-04-11 23:47:16.854775808")));
     let minus8 = Tz::parse("-08:00").unwrap();
-    assert!(overflow(parse_ns_in_tz("2262-04-11 23:00", minus8)));
+    assert!(overflow(parse_ns_in_tz("2262-04-11 23:00", &minus8)));
     // a wall clock past the range whose instant is inside it
     let plus8 = Tz::parse("+08:00").unwrap();
-    assert_eq!(parse_ns_in_tz("2262-04-12 07:47:16.854775807", plus8).unwrap(), MAX);
+    assert_eq!(parse_ns_in_tz("2262-04-12 07:47:16.854775807", &plus8).unwrap(), MAX);
     let fmt = "%Y-%m-%d %H:%M%z";
     assert!(parse_ns_format("2262-04-12 07:00+0800", fmt).is_ok());
     assert!(overflow(parse_ns_format("2262-04-11 23:00-0800", fmt)));

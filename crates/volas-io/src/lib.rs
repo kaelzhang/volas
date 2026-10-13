@@ -107,7 +107,7 @@ fn date_column(cells: &StrBuffer, parse: &DateParse, na: &HashSet<String>) -> Re
                 return Ok(datetime::NAT);
             }
             match parse {
-                DateParse::Text(tz) => datetime::parse_ns_in_tz(t, *tz),
+                DateParse::Text(tz) => datetime::parse_ns_in_tz(t, tz),
                 DateParse::Epoch(unit) => datetime::epoch_text_to_ns(t, unit),
             }
         })

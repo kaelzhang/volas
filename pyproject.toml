@@ -30,7 +30,8 @@ keywords = [
 ]
 requires-python = '>=3.11'
 dependencies = [
-  "numpy>=2.0.0"
+  "numpy>=2.0.0",
+  "tzdata"
 ]
 classifiers = [
     'Programming Language :: Python',

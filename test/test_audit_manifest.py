@@ -180,6 +180,7 @@ CLASSIFICATION: dict[str, dict[str, str]] = {
 
 TOPLEVEL = {
     "read_csv": "T8", "to_datetime": "T8",
+    "tz_database": "T13",
     "directive_stringify": "T11", "directive_lookback": "T11",
     "__version__": "ignore:package metadata",
     "NA": "ignore:singleton instance — NAType audited as a class",

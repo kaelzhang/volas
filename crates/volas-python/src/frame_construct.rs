@@ -187,8 +187,8 @@ impl PyDataFrame {
     /// Reinterpret the index wall-clock as `tz` (pandas `tz_localize`): the
     /// displayed wall-clock is unchanged, each instant is recomputed. Use when
     /// data was ingested without a tz. Returns a new frame.
-    pub(crate) fn tz_localize(&self, tz: &str) -> PyResult<PyDataFrame> {
-        let tzv = Tz::parse(tz).map_err(pyerr)?;
+    pub(crate) fn tz_localize(&self, py: Python<'_>, tz: &str) -> PyResult<PyDataFrame> {
+        let tzv = crate::timezone::parse(py, tz)?;
         Ok(PyDataFrame::plain(
             self.read()?.tz_localize(tzv).map_err(pyerr)?,
         ))
@@ -199,13 +199,13 @@ impl PyDataFrame {
     /// Tag the index's zone directly (interop-internal): `from_pandas` imports a
     /// tz-aware pandas index whose instants are ALREADY true UTC, so the zone is
     /// attached without the naive-guard that protects user-facing `tz_convert`.
-    pub(crate) fn _set_index_tz(&self, tz: &str) -> PyResult<PyDataFrame> {
-        let tzv = Tz::parse(tz).map_err(pyerr)?;
+    pub(crate) fn _set_index_tz(&self, py: Python<'_>, tz: &str) -> PyResult<PyDataFrame> {
+        let tzv = crate::timezone::parse(py, tz)?;
         Ok(PyDataFrame::plain(self.read()?.set_index_tz(tzv).map_err(pyerr)?))
     }
 
-    pub(crate) fn tz_convert(&self, tz: &str) -> PyResult<PyDataFrame> {
-        let tzv = Tz::parse(tz).map_err(pyerr)?;
+    pub(crate) fn tz_convert(&self, py: Python<'_>, tz: &str) -> PyResult<PyDataFrame> {
+        let tzv = crate::timezone::parse(py, tz)?;
         Ok(PyDataFrame::plain(
             self.read()?.tz_convert(tzv).map_err(pyerr)?,
         ))

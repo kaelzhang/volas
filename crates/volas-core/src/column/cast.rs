@@ -27,7 +27,7 @@ impl Column {
                         out.push(datetime::NAT);
                         continue;
                     }
-                    out.push(datetime::parse_ns_in_tz(s, tz)?);
+                    out.push(datetime::parse_ns_in_tz(s, &tz)?);
                 }
                 Ok(Column::datetime(out))
             }
