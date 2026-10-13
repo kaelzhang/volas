@@ -69,9 +69,10 @@ def test_the_command_or_the_renamed_column_resolve_the_ambiguity():
                           equal_nan=True)
 
 
-def test_a_column_named_like_a_command_a_cached_directive_uses_cannot_be_added():
+@pytest.mark.parametrize('spelling', ['change', 'CHANGE', 'ChAnGe'])
+def test_a_column_named_like_a_command_a_cached_directive_uses_cannot_be_added(spelling):
     df = frame(change=False)
-    df['close * change']
+    df[f'close * {spelling}']
     before = state(df)
     with pytest.raises(ValueError) as err:
         df['change'] = CHANGE
@@ -144,3 +145,45 @@ def test_several_cached_directives_are_named_together():
 def test_a_command_with_a_required_series_is_not_a_bare_command():
     df = volas.DataFrame({'close': CLOSE, 'repeat': CHANGE})
     assert np.array_equal(df.exec('close + repeat'), CLOSE + CHANGE)
+
+
+@pytest.mark.parametrize('spelling', ['change', 'CHANGE', 'ChAnGe'])
+def test_bind_ambiguity_keeps_column_case_and_canonical_command_in_the_error(spelling):
+    df = volas.DataFrame({'close': CLOSE, spelling: CHANGE})
+    directive = f'close * {spelling}'
+    expected = (
+        f"ambiguous name '{spelling}' in '{directive}': it is both a column of this DataFrame "
+        f"and the built-in command 'change'. Write '{spelling}:' to use the command, or rename "
+        f"the column — df.rename(columns={{'{spelling}': '{spelling}_pct'}}) — to use the data."
+    )
+    before = state(df)
+    for read in (lambda: df[directive], lambda: df.exec(directive)):
+        with pytest.raises(volas.DirectiveValueError) as err:
+            read()
+        assert str(err.value) == expected
+        assert state(df) == before
+    # Column lookup is case-sensitive; the other spelling resolves to the command.
+    other = 'CHANGE' if spelling == 'change' else 'change'
+    assert np.array_equal(df.exec(f'close * {other}'),
+                          frame(change=False).exec('close * change'), equal_nan=True)
+
+
+@pytest.mark.parametrize('spelling', ['change', 'CHANGE', 'ChAnGe'])
+def test_added_column_names_remain_case_sensitive(spelling):
+    df = frame(change=False)
+    df[f'close * {spelling}']
+    df['CHANGE'] = CHANGE
+    assert np.array_equal(df['CHANGE'].to_numpy(), CHANGE)
+    assert np.array_equal(df['close*change'].to_numpy(),
+                          frame(change=False).exec('close * change'), equal_nan=True)
+
+
+@pytest.mark.parametrize('spelling', ['CHANGE', 'ChAnGe'])
+def test_declared_bare_commands_use_canonical_identity_for_added_columns(spelling):
+    df = volas.DataFrame({'close': CLOSE, 'volume': VOLUME},
+                         window=5, max_lookback=[f'close * {spelling}'])
+    before = state(df)
+    with pytest.raises(ValueError) as err:
+        df['change'] = CHANGE[-5:]
+    assert str(err.value) == CANNOT_ADD
+    assert state(df) == before

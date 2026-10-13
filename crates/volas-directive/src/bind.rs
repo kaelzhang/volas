@@ -217,9 +217,9 @@ fn bind_frame_node(node: &BoundNode, is_column: &impl Fn(&str) -> bool, directiv
     })
 }
 
-/// Whether the frame-bound `node` reads the built-in command spelled exactly `name`
-/// through a bare name — so a data column added under that name would have changed
-/// what it reads.
+/// Whether the frame-bound `node` uses a built-in command through a bare name
+/// whose canonical command name is `name`. Command spelling does not affect its
+/// identity; the prospective data column's `name` stays case-sensitive.
 pub fn uses_bare_command(node: &Ast, name: &str) -> bool {
     uses_bare_node(node.node(), name)
 }
@@ -228,7 +228,7 @@ fn uses_bare_node(node: &BoundNode, name: &str) -> bool {
     match node {
         Node::Name(_) | Node::Scalar(_) => false,
         Node::Command(c) => {
-            c.args.bare.as_deref() == Some(name) || c.series.iter().any(|s| uses_bare_node(s, name))
+            (c.args.bare.is_some() && c.name == name) || c.series.iter().any(|s| uses_bare_node(s, name))
         }
         Node::Unary { operand, .. } => uses_bare_node(operand, name),
         Node::Binary { left, right, .. } => uses_bare_node(left, name) || uses_bare_node(right, name),

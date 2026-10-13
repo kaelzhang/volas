@@ -149,7 +149,9 @@ DirectiveValueError: ambiguous name 'change' in 'close * change': it is both a c
 
 `close * change:` runs the command; renaming the column reads the data. For the same
 reason, once a cached directive reads a command through its bare name, a data column of
-that name cannot be added (it would change what the cached directive refreshes):
+its canonical command name cannot be added, regardless of the bare spelling:
+`close * CHANGE` and `close * ChAnGe` both prevent adding `change`. Column names
+remain case-sensitive, so a distinct column named `CHANGE` may still be added:
 
 ```text
 ValueError: cannot add column 'change': the cached directive 'close*change' uses the built-in command 'change' under that name. Rename the new column, or drop the cached directive first — df.drop(['close*change'], axis=1).
@@ -159,7 +161,7 @@ A plain column read, `df['change']`, is not a directive and returns the column. 
 command form of a name a data column holds, `df['change:']`, returns the command's
 values without caching them (the data column keeps the name). A directive spelled so
 that it names a cached column is bound against the frame all the same: once a data
-column `obv` exists, `df['close - obv']` is ambiguous even when `close - OBV` was cached
+column `obv` exists, `df['close - obv']` is ambiguous even when `close - OBV:` was cached
 before it.
 
 ### Cached column names

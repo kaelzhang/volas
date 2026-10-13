@@ -176,7 +176,7 @@ mod tests {
         let columns = |n: &str| n == "Close";
         let bound = crate::bind::bind_frame(&parse("Close - OBV").unwrap(), &columns, "").unwrap();
         assert_eq!(stringify(&bound), "Close-obv");
-        assert!(crate::bind::uses_bare_command(&bound, "OBV") && !crate::bind::uses_bare_command(&bound, "obv"));
+        assert!(crate::bind::uses_bare_command(&bound, "obv") && !crate::bind::uses_bare_command(&bound, "OBV"));
     }
 
     #[test]
