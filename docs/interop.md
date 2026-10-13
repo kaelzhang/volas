@@ -20,6 +20,23 @@ how a missing value crosses into pandas — see
 [`df.to_pandas`](dataframe-api.md#dfto_pandasdtype_backendnumpy---pandasdataframe) for the per-value
 breakdown.
 
+`from_pandas` keeps index labels and their name, including non-default
+`RangeIndex` labels and frames containing only an index. Column labels become
+strings; labels that collide after stringification (such as `1` and `'1'`) raise
+`ValueError`. Signed int32 extension columns, including `int32[pyarrow]`, keep
+int32 width. The `numpy_nullable` backend exports text as pandas `string` with
+`pd.NA` for missing values.
+
+NumPy input may have any stride: contiguous arrays are read directly, while
+strided arrays are copied in logical order into volas's contiguous storage.
+
+CSV escapes every field, including index labels, index names and column headers.
+The supported printf float formats `%f`, `%e`, `%g` (and their `.precision` forms)
+apply to CSV and `to_string`; `%g` counts significant digits and uses scientific
+notation when its rounded exponent is below −4 or at least the precision.
+`to_string(max_rows=..., min_rows=...)` clamps `min_rows` to `max_rows`; a zero
+`max_rows` means no explicit truncation.
+
 ### Datetime columns are UTC instants
 
 A datetime **column** stores absolute instants (UTC epoch-nanoseconds) and no zone of
@@ -67,7 +84,7 @@ pa.table(df)                       # DataFrame -> pyarrow.Table (one RecordBatch
 df['close'].to_arrow()             # convenience for pa.array(...)
 
 Series.from_arrow(pa_array, name='close')   # Arrow array  -> Series (borrowed where dtypes match)
-DataFrame.from_arrow(pa_table)              # Arrow table  -> DataFrame
+DataFrame.from_arrow(pa_table)              # Arrow table  -> DataFrame (row count kept even with no columns)
 
 # DLPack — NumPy / PyTorch / JAX borrow a dense numeric (or bool) column.
 np.from_dlpack(df['close'])        # zero-copy ndarray view

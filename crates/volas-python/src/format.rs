@@ -92,21 +92,49 @@ pub(crate) fn parse_float_format(fmt: &str) -> Option<(Option<usize>, char)> {
 
 /// Apply a parsed [`parse_float_format`] spec to `x`.
 fn fmt_f64_with(prec: Option<usize>, kind: char, x: f64) -> String {
-    match kind {
-        'e' => match prec {
-            Some(p) => format!("{x:.p$e}"),
-            None => format!("{x:e}"),
-        },
-        'g' => match prec {
-            Some(p) => format!("{x:.p$}"),
-            None => format!("{x:?}"),
-        },
-        // 'f' — the only remaining kind `parse_float_format` admits.
-        _ => match prec {
-            Some(p) => format!("{x:.p$}"),
-            None => format!("{x:.6}"),
-        },
+    if !x.is_finite() {
+        return x.to_string();
     }
+    let p = prec.unwrap_or(6);
+    match kind {
+        'e' => scientific(x, p),
+        'g' => {
+            // printf chooses notation using the exponent AFTER rounding to p
+            // significant digits (e.g. 999.9 at p=3 becomes 1e+03).
+            let p = p.max(1);
+            let rounded = format!("{x:.digits$e}", digits = p - 1);
+            let (mantissa, exponent) = rounded.split_once('e').expect("scientific form");
+            let exponent: i32 = exponent.parse().expect("decimal exponent");
+            if exponent < -4 || exponent >= p as i32 {
+                format!("{}e{exponent:+03}", trim_fraction(mantissa))
+            } else {
+                let decimals = (p as i64 - 1 - i64::from(exponent)).max(0) as usize;
+                trim_fraction(&format!("{x:.decimals$}")).to_string()
+            }
+        }
+        _ => format!("{x:.p$}"),
+    }
+}
+
+/// printf exponents have a sign and at least two digits.
+fn scientific(x: f64, precision: usize) -> String {
+    let raw = format!("{x:.precision$e}");
+    let (mantissa, exponent) = raw.split_once('e').expect("scientific form");
+    let exponent: i32 = exponent.parse().expect("decimal exponent");
+    format!("{mantissa}e{exponent:+03}")
+}
+
+fn trim_fraction(s: &str) -> &str {
+    if s.contains('.') { s.trim_end_matches('0').trim_end_matches('.') } else { s }
+}
+
+/// pandas clamps min_rows to max_rows; 0 / None mean no explicit limit.
+/// A one-row budget displays the head only (pandas retains max_rows head rows).
+pub(crate) fn row_truncation(n: usize, max_rows: Option<usize>, min_rows: Option<usize>) -> Option<(usize, usize)> {
+    let max = max_rows.filter(|&m| m > 0 && n > m)?;
+    let budget = min_rows.filter(|&m| m > 0).unwrap_or(max).min(max);
+    let half = budget / 2;
+    Some(if half == 0 { (max, 0) } else { (half, half) })
 }
 
 // ===========================================================================
@@ -137,9 +165,9 @@ pub(crate) struct DisplayOpts<'a> {
     pub float_format: Option<(Option<usize>, char)>,
     /// When to print the dimensions footer.
     pub dimensions: Dimensions,
-    /// `Some(k)` → show the first `k` and last `k` rows with an ellipsis row in
+    /// `Some((head, tail))` → show head and tail rows with an ellipsis row in
     /// between; `None` → no truncation.
-    pub truncate: Option<usize>,
+    pub truncate: Option<(usize, usize)>,
 }
 
 /// Left-justify `s` to `w` columns (padding on the right).
@@ -167,14 +195,17 @@ fn py_center(s: &str, w: usize) -> String {
     format!("{}{s}{}", " ".repeat(left), " ".repeat(marg - left))
 }
 
-/// The displayed row positions and whether truncation occurred. When truncated,
-/// the result is the first `k` followed by the last `k` positions.
-fn displayed_rows(n: usize, truncate: Option<usize>) -> (Vec<usize>, bool) {
+/// The displayed row positions and whether truncation occurred. Head and tail
+/// positions are disjoint; a head-only selection puts the ellipsis at the end.
+fn displayed_rows(n: usize, truncate: Option<(usize, usize)>) -> (Vec<usize>, bool) {
     match truncate {
-        // Callers only pass `Some(k)` with `1 <= k` and `2 * k < n`.
-        Some(k) => {
-            let mut rows: Vec<usize> = (0..k).collect();
-            rows.extend((n - k)..n);
+        Some((head, tail)) => {
+            // Keep the selection valid even if an internal caller supplies an
+            // oversized budget: head and tail never overlap.
+            let head = head.min(n);
+            let tail = tail.min(n - head);
+            let mut rows: Vec<usize> = (0..head).collect();
+            rows.extend((n - tail)..n);
             (rows, true)
         }
         None => ((0..n).collect(), false),
@@ -265,7 +296,7 @@ fn data_cells(
                             Some((prec, kind)) => fmt_f64_with(prec, kind, x),
                             None => format!("{x:.d$}"),
                         };
-                        lead_num(x < 0.0, s)
+                        lead_num(x.is_sign_negative(), s)
                     }
                 })
                 .collect()
@@ -283,7 +314,7 @@ fn data_cells(
                             Some((prec, kind)) => fmt_f64_with(prec, kind, x),
                             None => format!("{x:.d$}"),
                         };
-                        lead_num(x < 0.0, s)
+                        lead_num(x.is_sign_negative(), s)
                     }
                 })
                 .collect()
@@ -386,7 +417,7 @@ pub(crate) fn render_frame(df: &DataFrame, col_pos: &[usize], opts: &DisplayOpts
         .map(|cells| cells.iter().map(|s| s.chars().count()).max().unwrap_or(0))
         .collect();
     if truncated {
-        let k = rows.len() / 2;
+        let k = opts.truncate.unwrap().0.min(rows.len());
         // pandas uses "..." for a wide column/index, ".." for a narrow one.
         let iw = idx.iter().map(|s| s.chars().count()).max().unwrap_or(0);
         idx.insert(k, if iw > 3 { "..." } else { ".." }.to_string());
@@ -489,7 +520,7 @@ pub(crate) fn render_series(
     s: &Series,
     na_rep: &str,
     ff: Option<(Option<usize>, char)>,
-    truncate: Option<usize>,
+    truncate: Option<(usize, usize)>,
     footer: bool,
 ) -> String {
     let n = s.len();
@@ -504,7 +535,7 @@ pub(crate) fn render_series(
     let mut labels = index_cells(&s.index, &rows);
     let mut values = data_cells(&s.data, &rows, na_rep, ff);
     if truncated {
-        let k = rows.len() / 2;
+        let k = truncate.unwrap().0.min(rows.len());
         let vw = values.iter().map(|s| s.chars().count()).max().unwrap_or(0);
         labels.insert(k, String::new());
         // pandas center-justifies the Series ellipsis within the value width.
@@ -594,7 +625,7 @@ pub(crate) fn render_frame_html(df: &DataFrame) -> String {
     let n = df.height();
     let cols: Vec<usize> = (0..df.width()).collect();
     // Truncation in HTML mirrors the text repr (max_rows = 60, min_rows = 10).
-    let truncate = if n > 60 { Some(5) } else { None };
+    let truncate = if n > 60 { Some((5, 5)) } else { None };
     let (rows, truncated) = displayed_rows(n, truncate);
 
     let mut idx = index_cells(df.index(), &rows);
@@ -609,7 +640,7 @@ pub(crate) fn render_frame_html(df: &DataFrame) -> String {
         })
         .collect();
     if truncated {
-        let k = rows.len() / 2;
+        let k = truncate.unwrap().0.min(rows.len());
         idx.insert(k, "...".to_string());
         for col in &mut body {
             col.insert(k, "...".to_string());

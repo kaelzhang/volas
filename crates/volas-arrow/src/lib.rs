@@ -34,7 +34,7 @@ pub use ffi::{
     column_from_c_capsules, column_from_c_data, column_to_c_data, column_to_c_schema,
 };
 pub use import::column_from_arrow;
-pub use stream::{columns_from_c_stream, columns_to_c_stream};
+pub use stream::{columns_from_c_stream, columns_to_c_stream, frame_from_c_stream, frame_to_c_stream};
 // Re-exported so the Python layer wraps these in PyCapsules without depending on
 // arrow-rs directly — the bridge keeps arrow-rs entirely within this crate.
 pub use arrow_array::ffi::{FFI_ArrowArray, FFI_ArrowSchema};

@@ -2,6 +2,7 @@
 float_format."""
 
 import numpy as np
+import pandas as pd
 import pytest
 
 import volas
@@ -54,14 +55,16 @@ def test_to_csv_na_rep_for_nan():
     [
         ("%.2f", "a\n1.00\n2.56\n"),
         ("%f", "a\n1.000000\n2.555000\n"),
-        ("%.3e", "a\n1.000e0\n2.555e0\n"),
-        ("%e", "a\n1e0\n2.555e0\n"),
-        ("%.2g", "a\n1.00\n2.56\n"),
-        ("%g", "a\n1.0\n2.555\n"),
+        ("%.3e", "a\n1.000e+00\n2.555e+00\n"),
+        ("%e", "a\n1.000000e+00\n2.555000e+00\n"),
+        ("%.2g", "a\n1\n2.6\n"),
+        ("%g", "a\n1\n2.555\n"),
     ],
 )
 def test_to_csv_float_format(fmt, expected):
-    assert _df([1.0, 2.555]).to_csv(index=False, float_format=fmt) == expected
+    actual = _df([1.0, 2.555]).to_csv(index=False, float_format=fmt)
+    assert actual == expected
+    assert actual == pd.DataFrame({'a': [1.0, 2.555]}).to_csv(index=False, float_format=fmt)
 
 
 @pytest.mark.parametrize("bad", ["%.2x", "%2f", "%.xf", "%"])

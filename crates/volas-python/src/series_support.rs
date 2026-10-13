@@ -222,7 +222,7 @@ pub(crate) fn bool_mask_key(key: &Bound<'_, PyAny>) -> PyResult<Option<Vec<bool>
         });
     }
     if let Ok(arr) = key.extract::<PyReadonlyArray1<bool>>() {
-        return Ok(Some(arr.as_slice()?.to_vec()));
+        return Ok(Some(crate::coerce::numpy_values(&arr).into_owned()));
     }
     match key.extract::<Vec<bool>>() {
         Ok(m) if !m.is_empty() => Ok(Some(m)),

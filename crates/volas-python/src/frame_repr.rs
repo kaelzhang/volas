@@ -21,7 +21,7 @@ impl PyDataFrame {
     pub(crate) fn __repr__(&self) -> PyResult<String> {
         let view = self.read()?;
         let df = view.as_ref();
-        let truncate = if df.height() > 60 { Some(5) } else { None };
+        let truncate = if df.height() > 60 { Some((5, 5)) } else { None };
         let opts = DisplayOpts {
             header: true,
             index: true,
@@ -69,10 +69,7 @@ impl PyDataFrame {
                 .collect::<PyResult<_>>()?,
             None => (0..df.width()).collect(),
         };
-        let truncate = match max_rows {
-            Some(m) if df.height() > m => Some((min_rows.unwrap_or(m) / 2).max(1)),
-            _ => None,
-        };
+        let truncate = crate::format::row_truncation(df.height(), max_rows, min_rows);
         let opts = DisplayOpts {
             header,
             index,
