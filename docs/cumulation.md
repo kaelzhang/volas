@@ -68,6 +68,13 @@ Now we get a 5-minute kline:
 2020-01-01 00:15:00  330.0  335.2  322.0  323.0  82452902.0
 ```
 
+An empty DatetimeIndex input returns an empty time-frame-aware result with the
+same data columns, dtypes, index name and timezone; it can receive finer bars later.
+Cumulating to the source's own time frame re-aggregates its **current data rows**
+with the requested cumulators, drops cached directives, and uses those cumulators
+for later appends. It does not recover the original fine-bar history of already
+aggregated rows. Unknown columns or aggregator names raise on every target.
+
 `cumulate` defaults to OHLCV semantics — `open`=first, `high`=max, `low`=min,
 `close`=last, `volume`=sum — and **any other column falls back to `last`**. Pass
 `cumulators=` to override a column's aggregator; the common case is a non-OHLCV

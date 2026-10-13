@@ -38,10 +38,21 @@ impl Cumulator {
 
     /// Construct and ingest an initial batch, reserving its closed output for
     /// consuming materialization and the first live append. Validation and deferred
-    /// open-period errors are the same as `new` followed by `append`.
+    /// open-period errors for non-empty inputs are the same as `new` followed by
+    /// `append`. An empty datetime batch keeps its schema without an open period.
     pub fn from_frame(fine: &DataFrame, tf: TimeFrame, spec: AggSpec) -> Result<Self> {
         let mut cumulator = Self::new(tf, spec);
-        cumulator.append_inner(fine, true)?;
+        if fine.height() == 0 {
+            // A one-shot empty result still owns its schema and datetime grid. Live
+            // append keeps its non-empty contract; no open period exists to fold yet.
+            cumulator.spec.check(fine)?;
+            if !matches!(fine.index().kind(), IndexKind::Datetime(..)) {
+                return Err(VolasError::Value("cumulation target must have a DatetimeIndex".into()));
+            }
+            cumulator.closed = Some(fine.slice_data(0, 0));
+        } else {
+            cumulator.append_inner(fine, true)?;
+        }
         Ok(cumulator)
     }
 
@@ -72,7 +83,17 @@ impl Cumulator {
                 raw.append(fine)?;
                 Cow::Owned(raw)
             }
-            None => Cow::Borrowed(fine),
+            None => match &self.closed {
+                // An empty seed has no open bars, but owns the schema and grid.
+                // Normal frame admission converts the incoming zone and dtypes
+                // before period boundaries are computed.
+                Some(empty) => {
+                    let mut raw = empty.clone();
+                    raw.append(fine)?;
+                    Cow::Owned(raw)
+                }
+                None => Cow::Borrowed(fine),
+            },
         };
 
         let (ts, tz): (&[i64], &Tz) = match raw.index().kind() {
@@ -176,7 +197,7 @@ impl Cumulator {
                 out.append(&open)?;
                 Ok(out)
             }
-            (Some(closed), None) => Ok(closed.clone()), // LCOV_EXCL_LINE
+            (Some(closed), None) => Ok(closed.clone()),
             (None, Some(open)) => Ok(open),
             (None, None) => DataFrame::new(Vec::new(), Vec::new(), None),
         }
@@ -360,6 +381,53 @@ mod tests {
         assert!(empty.1.is_none() && empty.2.is_none());
         let closed_only = Cumulator { closed: Some(fine.clone()), ..Cumulator::new(TimeFrame::Min1, AggSpec::ohlcv()) };
         assert!(closed_only.into_frame().unwrap().equals(&fine));
+    }
+
+    #[test]
+    fn empty_batch_keeps_its_schema_and_grid_without_an_open_period() {
+        let empty = DataFrame::new(vec!["volume".into()], vec![Column::i64(vec![])],
+            Some(Index::datetime(vec![], Tz::Utc).with_name(Some("time".into())))).unwrap();
+        let mut cum = Cumulator::from_frame(&empty, TimeFrame::Min5, AggSpec::ohlcv()).unwrap();
+        assert!(cum.frame().unwrap().equals(&empty));
+        assert!(cum.last().unwrap().is_none());
+        assert!(cum.open_period().is_none());
+        assert!(cum.period_aggregate().is_none());
+        assert!(cum.append(&empty).is_err());
+        let next = DataFrame::new(vec!["volume".into()], vec![Column::i64(vec![2])],
+            Some(Index::datetime(vec![0], Tz::Utc).with_name(Some("time".into())))).unwrap();
+        cum.append(&next).unwrap();
+        assert!(cum.period_aggregate().unwrap().current().equals(&next));
+        // The public snapshot accessor and consuming output expose the same revised
+        // forming value, without adding a re-sent timestamp to the period's sum.
+        let revised = DataFrame::new(vec!["volume".into()], vec![Column::i64(vec![3])],
+            Some(Index::datetime(vec![0], Tz::Utc).with_name(Some("time".into())))).unwrap();
+        cum.append(&revised).unwrap();
+        assert!(cum.period_aggregate().unwrap().current().equals(&revised));
+        assert!(cum.into_frame().unwrap().equals(&revised));
+        assert!(cumulate(&empty, TimeFrame::Min5, &AggSpec::ohlcv()).unwrap().equals(&empty));
+        let plain = DataFrame::new(vec!["volume".into()], vec![Column::i64(vec![])], None).unwrap();
+        assert!(Cumulator::from_frame(&plain, TimeFrame::Min5, AggSpec::ohlcv()).is_err());
+        let text = DataFrame::new(vec!["volume".into()], vec![Column::str(vec![])],
+            Some(Index::datetime(vec![], Tz::Utc))).unwrap();
+        assert!(Cumulator::from_frame(&text, TimeFrame::Min5, AggSpec::ohlcv()).is_err());
+    }
+
+    #[test]
+    fn an_empty_cumulator_uses_its_seed_timezone_for_the_first_bucket() {
+        let empty = DataFrame::new(vec!["volume".into()], vec![Column::i64(vec![])],
+            Some(Index::datetime(vec![], Tz::Utc))).unwrap();
+        let mut cum = Cumulator::from_frame(&empty, TimeFrame::Hour1, AggSpec::ohlcv()).unwrap();
+        let next = DataFrame::new(vec!["volume".into()], vec![Column::i64(vec![2])],
+            Some(Index::datetime(vec![600_000_000_000], Tz::fixed(1800).unwrap()))).unwrap();
+        cum.append(&next).unwrap();
+        let out = cum.into_frame().unwrap();
+        match out.index().kind() {
+            IndexKind::Datetime(stamps, tz) => {
+                assert_eq!(stamps, &[0]);
+                assert_eq!(tz, &Tz::Utc);
+            }
+            _ => panic!("expected datetime index"), // LCOV_EXCL_LINE
+        }
     }
 
     fn frame(
