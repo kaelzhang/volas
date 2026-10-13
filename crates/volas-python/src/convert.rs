@@ -316,7 +316,7 @@ pub(crate) fn column_to_numpy_with<'py>(
             Some(dt) => astype_checked(py, col, dt),
         };
     };
-    if col.null_count() == 0 {
+    if !col.has_missing() {
         // `na_value` is irrelevant with no missing cell — a plain typed export.
         let arr = column_to_numpy(py, col)?;
         return match dtype {
@@ -388,7 +388,7 @@ fn column_values_native<'py>(py: Python<'py>, col: &Column) -> PyResult<Bound<'p
 /// any other target of a bool column holding NA has no form for it.
 pub(crate) fn astype_checked<'py>(py: Python<'py>, col: &Column, dtype: &str) -> PyResult<Bound<'py, PyAny>> {
     let target = ExportTarget::of(py, dtype)?;
-    if col.null_count() > 0 && target.has_no_na() {
+    if col.has_missing() && target.has_no_na() {
         return Err(no_na_target_err("a column", dtype));
     }
     match col {

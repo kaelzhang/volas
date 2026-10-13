@@ -129,6 +129,12 @@ pub enum CmpOp {
 }
 
 impl CmpOp {
+    /// IEEE comparison of an optional order: only `!=` holds for a missing side.
+    #[inline]
+    fn matches_optional(self, o: Option<Ordering>) -> bool {
+        o.map_or(self == CmpOp::Ne, |o| self.matches(o))
+    }
+
     /// Whether `ordering` (the result of comparing two **present** values)
     /// satisfies this op.
     pub fn matches(self, o: Ordering) -> bool {
@@ -238,6 +244,19 @@ impl Column {
             | Column::I32(_, val)
             | Column::Str(_, val) => val.null_count(),
             Column::Datetime(v) => v.iter().filter(|&&x| x == i64::MIN).count(),
+        }
+    }
+
+    /// Whether a cell is missing, using the buffer's NaN fact for floats and
+    /// the cached null count for nullable columns. Unlike `has_nan`, present
+    /// strings are values here, not NaNs from a numeric conversion.
+    pub fn has_missing(&self) -> bool {
+        match self {
+            Column::F64(v) => v.has_nan(),
+            Column::F32(v) => v.has_nan(),
+            Column::Bool(_, val) | Column::I64(_, val) | Column::I32(_, val)
+            | Column::Str(_, val) => val.has_nulls(),
+            Column::Datetime(v) => v.contains(&i64::MIN),
         }
     }
 

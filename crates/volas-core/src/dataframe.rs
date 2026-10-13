@@ -416,8 +416,8 @@ impl DataFrame {
     }
 
     /// Flatten to a row-major (C-order) 2-D `f64` buffer for NumPy export,
-    /// returning `(data, height, width)`. Each column is materialized through the
-    /// validity-aware `to_f64_vec`, so a missing cell (int/bool NA, datetime NaT,
+    /// returning `(data, height, width)`. Float64 inputs are borrowed; other
+    /// dtypes use the validity-aware conversion, so a missing cell (int/bool NA, datetime NaT,
     /// str) exports as `NaN` — not the raw placeholder — matching the 1-D
     /// `Series` export and `pandas` `Int64.to_numpy()`.
     pub fn to_row_major_f64(&self) -> (Vec<f64>, usize, usize) {
@@ -425,7 +425,10 @@ impl DataFrame {
         let w = self.columns.len();
         let mut out = vec![0.0f64; h * w];
         for (j, c) in self.columns.iter().enumerate() {
-            let col = c.to_f64_vec();
+            let col = match c {
+                Column::F64(v) => std::borrow::Cow::Borrowed(v.as_slice()),
+                _ => std::borrow::Cow::Owned(c.to_f64_vec()),
+            };
             for i in 0..h {
                 out[i * w + j] = col[i];
             }
@@ -484,4 +487,3 @@ mod tests_cells;
 mod tests_history;
 #[cfg(test)]
 mod tests_derive;
-

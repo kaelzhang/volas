@@ -343,8 +343,8 @@ impl<T: Float> Buffer<T> {
 
     /// Overwrite the value at `i` (copy-on-write), keeping the NaN fact where one
     /// write decides it: a NaN written means some NaN; a number written over a
-    /// NaN-free buffer keeps it NaN-free; a number written over a buffer holding a NaN
-    /// may have removed the last one, so the fact is forgotten.
+    /// NaN-free buffer keeps it NaN-free; overwriting an old NaN may remove the
+    /// last one, so only that case forgets a known NaN.
     pub fn set(&mut self, i: usize, value: T) {
         self.scatter(&[i], |_| value);
     }
@@ -355,20 +355,26 @@ impl<T: Float> Buffer<T> {
     /// [`set`](Self::set) does for one — judged by the values the written positions
     /// hold afterwards, never by a value a later repeat replaced: a written position
     /// left NaN means some NaN; numbers left over a NaN-free buffer keep it NaN-free;
-    /// numbers left over a buffer holding a NaN may have removed the last one, so the
-    /// fact is forgotten.
+    /// a known NaN is kept unless the writes cover an old NaN and might remove
+    /// the last one.
     pub fn scatter(&mut self, positions: &[usize], value: impl Fn(usize) -> T) {
         self.own();
         let before = self.nan_state();
         let w = self.make_mut();
+        // Inspect the old cells before any write: a repeated position may hold a
+        // temporary NaN which a later write removes, without touching an old NaN.
+        let covered_nan = before == SOME_NAN
+            && positions.iter().any(|&p| w[p].is_nan_value());
         for (k, &p) in positions.iter().enumerate() {
             w[p] = value(k);
         }
         let left_nan = positions.iter().any(|&p| w[p].is_nan_value());
-        self.set_nan_state(match (before, left_nan) {
-            (_, true) => SOME_NAN,
-            (NO_NAN, false) => NO_NAN,
-            _ => UNKNOWN,
+        self.set_nan_state(if left_nan {
+            SOME_NAN
+        } else if covered_nan {
+            UNKNOWN
+        } else {
+            before
         });
     }
 }
@@ -639,7 +645,7 @@ mod tests {
         let mut f = borrowed(vec![1.0, NAN]); // foreign bytes are copied in first
         f.scatter(&[0], |_| 5.0);
         assert!(!f.is_borrowed());
-        assert_eq!(f.known_has_nan(), None);
+        assert_eq!(f.known_has_nan(), Some(true));
         assert!(f.has_nan());
     }
 

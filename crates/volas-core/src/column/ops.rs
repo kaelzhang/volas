@@ -172,16 +172,17 @@ impl Column {
     /// (e.g. `str` vs a number) is a [`VolasError::DType`]; unequal lengths are a
     /// [`VolasError::Shape`].
     pub fn compare(&self, other: &Column, op: CmpOp) -> Result<Column> {
-        let order = self.order_rows(other)?;
-        Ok(Column::bool(
-            order
-                .iter()
-                .map(|o| match o {
-                    Some(o) => op.matches(*o),
-                    None => op == CmpOp::Ne, // IEEE: only `!=` holds against a missing side
-                })
-                .collect(),
-        ))
+        match (self, other) {
+            (Column::F64(a), Column::F64(b)) => {
+                self.require_same_len(other)?;
+                Ok(Column::bool(compare_floats(a, b, op)))
+            }
+            (Column::F32(a), Column::F32(b)) => {
+                self.require_same_len(other)?;
+                Ok(Column::bool(compare_floats(a, b, op)))
+            }
+            _ => self.map_order_rows(other, |o| op.matches_optional(o)).map(Column::bool),
+        }
     }
 
     /// The exact order of `self[i]` against `other[i]` for every row, `None` where
@@ -194,33 +195,39 @@ impl Column {
     /// truth (contract #27). Two incompatible kinds are a [`VolasError::DType`];
     /// unequal lengths a [`VolasError::Shape`].
     pub fn order_rows(&self, other: &Column) -> Result<Vec<Option<Ordering>>> {
+        self.map_order_rows(other, |o| o)
+    }
+
+    /// Dispatch the comparison once and write its final representation directly.
+    /// Both IEEE masks and nullable directive orders use this comparison owner.
+    fn map_order_rows<T>(&self, other: &Column, map: impl Fn(Option<Ordering>) -> T) -> Result<Vec<T>> {
         let n = self.require_same_len(other)?;
         let numeric_like = |c: &Column| c.dtype().is_numeric() || matches!(c, Column::Bool(..));
-        let rows = |key: &dyn Fn(usize) -> Option<Ordering>| (0..n).map(key).collect();
         Ok(match (self, other) {
-            (Column::Str(a, av), Column::Str(b, bv)) => rows(&|i| {
+            (Column::F64(a), Column::F64(b)) => mapped_orders(n, &map, |i| a[i].partial_cmp(&b[i])),
+            (Column::F32(a), Column::F32(b)) => mapped_orders(n, &map, |i| a[i].partial_cmp(&b[i])),
+            (Column::Str(a, av), Column::Str(b, bv)) => mapped_orders(n, &map, |i| {
                 // SAFETY: `i < n` and `require_same_len` proved both columns have length `n`.
                 (av.is_valid(i) && bv.is_valid(i))
                     .then(|| unsafe { a.get_unchecked(i).cmp(b.get_unchecked(i)) })
             }),
             (Column::Datetime(a), Column::Datetime(b)) => {
-                rows(&|i| (a[i] != i64::MIN && b[i] != i64::MIN).then(|| a[i].cmp(&b[i])))
+                mapped_orders(n, &map, |i| (a[i] != i64::MIN && b[i] != i64::MIN).then(|| a[i].cmp(&b[i])))
             }
             (Column::Bool(a, av), Column::Bool(b, bv)) => {
-                rows(&|i| (av.is_valid(i) && bv.is_valid(i)).then(|| a[i].cmp(&b[i])))
+                mapped_orders(n, &map, |i| (av.is_valid(i) && bv.is_valid(i)).then(|| a[i].cmp(&b[i])))
             }
             (a, b) if numeric_like(a) && numeric_like(b) => match (a.is_float_like(), b.is_float_like()) {
                 (true, true) => {
-                    let (x, y) = (a.to_f64_vec(), b.to_f64_vec());
-                    rows(&|i| x[i].partial_cmp(&y[i]))
+                    mapped_orders(n, &map, |i| a.get_f64(i).partial_cmp(&b.get_f64(i)))
                 }
-                (false, false) => rows(&|i| {
+                (false, false) => mapped_orders(n, &map, |i| {
                     (a.is_valid(i) && b.is_valid(i)).then(|| a.get_i64(i).cmp(&b.get_i64(i)))
                 }),
                 (false, true) => {
-                    rows(&|i| a.is_valid(i).then(|| cmp_i64_f64(a.get_i64(i), b.get_f64(i))).flatten())
+                    mapped_orders(n, &map, |i| a.is_valid(i).then(|| cmp_i64_f64(a.get_i64(i), b.get_f64(i))).flatten())
                 }
-                (true, false) => rows(&|i| {
+                (true, false) => mapped_orders(n, &map, |i| {
                     b.is_valid(i)
                         .then(|| cmp_i64_f64(b.get_i64(i), a.get_f64(i)).map(Ordering::reverse))
                         .flatten()
@@ -274,7 +281,7 @@ impl Column {
     /// datetime. Any missing cell makes it false (pandas).
     pub fn is_monotonic(&self, increasing: bool) -> bool {
         let n = self.len();
-        if self.null_count() > 0 {
+        if self.has_missing() {
             return false;
         }
         if n < 2 {
@@ -387,5 +394,32 @@ impl Column {
             }
             other => Scalar::F64(stats::extreme(&other.to_f64_vec(), want_max).unwrap_or(f64::NAN)),
         }
+    }
+}
+
+
+/// Keep both closures statically dispatched so homogeneous comparisons can
+/// vectorize, without an indirect call per cell or an intermediate order vector.
+#[inline]
+fn mapped_orders<T>(
+    n: usize,
+    map: &impl Fn(Option<Ordering>) -> T,
+    key: impl Fn(usize) -> Option<Ordering>,
+) -> Vec<T> {
+    (0..n).map(key).map(map).collect()
+}
+
+/// Native IEEE predicates for homogeneous floats. Select the operator once and
+/// write the bools directly, without computing a three-way order per value.
+/// The caller has checked the slice lengths.
+fn compare_floats<T: PartialOrd>(a: &[T], b: &[T], op: CmpOp) -> Vec<bool> {
+    let pairs = || a.iter().zip(b);
+    match op {
+        CmpOp::Eq => pairs().map(|(x, y)| x == y).collect(),
+        CmpOp::Ne => pairs().map(|(x, y)| x != y).collect(),
+        CmpOp::Lt => pairs().map(|(x, y)| x < y).collect(),
+        CmpOp::Le => pairs().map(|(x, y)| x <= y).collect(),
+        CmpOp::Gt => pairs().map(|(x, y)| x > y).collect(),
+        CmpOp::Ge => pairs().map(|(x, y)| x >= y).collect(),
     }
 }

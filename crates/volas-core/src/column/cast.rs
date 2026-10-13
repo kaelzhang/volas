@@ -229,7 +229,6 @@ impl Column {
             )));
         }
         let n = self.len();
-        let valid = Validity::from_valid_iter(n, (0..n).map(|i| self.is_valid(i)));
         let inexact = |x: &dyn std::fmt::Display| {
             VolasError::DType(format!("{x} is not exactly representable as {to}"))
         };
@@ -244,26 +243,49 @@ impl Column {
             })
         };
         Ok(match to {
-            DType::F64 => Column::f64(
-                (0..n)
-                    .map(|i| match cell(i) {
-                        None => Ok(f64::NAN),
-                        Some(Ok(x)) => i64_to_f64_exact(x).ok_or_else(|| inexact(&x)),
-                        Some(Err(x)) => Ok(x),
-                    })
-                    .collect::<Result<_>>()?,
-            ),
-            DType::F32 => Column::f32(
-                (0..n)
-                    .map(|i| match cell(i) {
-                        None => Ok(f32::NAN),
-                        Some(Ok(x)) => i64_to_f32_exact(x).ok_or_else(|| inexact(&x)),
-                        Some(Err(x)) => f64_to_f32_in_range(x).ok_or_else(|| out_of_range(&x)),
-                    })
-                    .collect::<Result<_>>()?,
-            ),
+            DType::F64 => Column::f64(match self {
+                // Float targets carry NaN in-band: no validity bitmap. Preserve
+                // the conversion's canonical missing NaN, including NaN payloads.
+                Column::F32(v) => v.iter().map(|&x| if x.is_nan() { f64::NAN } else { x as f64 }).collect(),
+                _ => {
+                    let mut out = Vec::with_capacity(n);
+                    for i in 0..n {
+                        out.push(if self.is_valid(i) {
+                            let x = self.get_i64(i);
+                            i64_to_f64_exact(x).ok_or_else(|| inexact(&x))?
+                        } else {
+                            f64::NAN
+                        });
+                    }
+                    out
+                }
+            }),
+            DType::F32 => {
+                let mut out = Vec::with_capacity(n);
+                match self {
+                    Column::F64(v) => {
+                        for &x in v.iter() {
+                            out.push(if x.is_nan() { f32::NAN } else {
+                                f64_to_f32_in_range(x).ok_or_else(|| out_of_range(&x))?
+                            });
+                        }
+                    }
+                    _ => {
+                        for i in 0..n {
+                            out.push(if self.is_valid(i) {
+                                let x = self.get_i64(i);
+                                i64_to_f32_exact(x).ok_or_else(|| inexact(&x))?
+                            } else {
+                                f32::NAN
+                            });
+                        }
+                    }
+                }
+                Column::f32(out)
+            }
             _ => {
                 // I64 / I32 (the remaining numeric targets)
+                let valid = Validity::from_valid_iter(n, (0..n).map(|i| self.is_valid(i)));
                 let ints = (0..n)
                     .map(|i| match cell(i) {
                         None => Ok(0), // placeholder under the carried validity
