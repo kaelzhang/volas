@@ -245,8 +245,14 @@ _RECURSIVE = frozenset({
     'natr', 'plus_dm', 'minus_dm', 'plus_di', 'minus_di', 'dx', 'adx', 'adxr', 'sar',
     'sarext', 'ht_dcperiod', 'ht_dcphase', 'ht_phasor', 'ht_sine', 'ht_trendline',
     'ht_trendmode', 'mama'})
-_MATYPE_SLOTS = {'ma': 1, 'apo': 2, 'ppo': 2, 'mavp': 2, 'stochf': 2, 'macdext': 1, 'stoch': 2}
-_ARGS = re.compile(r'\b([a-z_]+)(?:\.[a-z_]+)?:([^@\s()]*)')
+# Keyed by line where the MA type is one line's alone (`stochf.d`; `stochf.k` reads none).
+_MATYPE_SLOTS = {'ma': 1, 'apo': 2, 'ppo': 2, 'mavp': 2, 'stochf.d': 2, 'macdext': 1, 'stoch': 2}
+_ARGS = re.compile(r'\b([a-z_]+)(\.[a-z_]+)?:([^@\s()]*)')
+
+
+def _line(table, head, sub):
+    """``table``'s entry for the line ``head`` + ``sub`` (its own, else its command's)."""
+    return table.get(head + sub, table.get(head))
 
 
 def recursive(text: str) -> bool:
@@ -254,8 +260,8 @@ def recursive(text: str) -> bool:
     argument given to a command that takes one."""
     names = {m.split('.')[0] for m in re.findall(r'[a-z_][a-z_0-9.]*', text.lower())}
     return bool(names & _RECURSIVE) or any(
-        head in _MATYPE_SLOTS and len(args.split(',')) > _MATYPE_SLOTS[head]
-        for head, args in _ARGS.findall(text.lower()))
+        _line(_MATYPE_SLOTS, head, sub) is not None and len(args.split(',')) > _line(_MATYPE_SLOTS, head, sub)
+        for head, sub, args in _ARGS.findall(text.lower()))
 
 
 # The MA-type argument slots of each command taking them, and the codes selecting a
@@ -264,8 +270,8 @@ def recursive(text: str) -> bool:
 # spec's defaults (spec::is_recursive): an MA type selecting a recursive average makes a
 # recursion, except at period 1 (every type is the identity there).
 _AVERAGES = {'ma': ((0, 1),), 'apo': ((0, 2), (1, 2)), 'ppo': ((0, 2), (1, 2)), 'mavp': ((1, 2),),
-             'stochf': ((1, 2),), 'macdext': ((0, 1), (2, 3), (4, 5)), 'stoch': ((1, 2), (3, 4))}
-_AVERAGE_DEFAULTS = {'apo': ('12', '26', '0'), 'ppo': ('12', '26', '0'), 'stochf': ('5', '3', '0'),
+             'stochf.d': ((1, 2),), 'macdext': ((0, 1), (2, 3), (4, 5)), 'stoch': ((1, 2), (3, 4))}
+_AVERAGE_DEFAULTS = {'apo': ('12', '26', '0'), 'ppo': ('12', '26', '0'), 'stochf.d': ('5', '3', '0'),
                      'stoch': ('5', '3', '0', '3', '0'), 'macdext': ('12', '0', '26', '0', '9', '0')}
 _RECURSIVE_MATYPES = {'1', '3', '4', '6', '7', '8'}
 
@@ -277,16 +283,16 @@ def recursion(text: str) -> bool:
     names = {m.split('.')[0] for m in re.findall(r'[a-z_][a-z_0-9.]*', text.lower())}
     if names & _RECURSIVE:
         return True
-    for head, args in _ARGS.findall(text.lower()):
+    for head, sub, args in _ARGS.findall(text.lower()):
         given = [a.strip() for a in args.split(',')]
-        defaults = _AVERAGE_DEFAULTS.get(head, ())
+        defaults = _line(_AVERAGE_DEFAULTS, head, sub) or ()
 
         def arg(i):
             if i < len(given) and given[i]:
                 return given[i]
             return defaults[i] if i < len(defaults) else '0'
 
-        if any(arg(m) in _RECURSIVE_MATYPES and arg(p) != '1' for p, m in _AVERAGES.get(head, ())):
+        if any(arg(m) in _RECURSIVE_MATYPES and arg(p) != '1' for p, m in _line(_AVERAGES, head, sub) or ()):
             return True
     return False
 
