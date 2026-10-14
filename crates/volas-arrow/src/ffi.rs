@@ -24,16 +24,17 @@ pub fn column_to_c_schema(col: &Column) -> Result<FFI_ArrowSchema, ArrowError> {
 }
 
 /// A column from an Arrow C-Data pair: consumes `array`, reads `schema`. The data
-/// buffer is copied into an owned snapshot.
+/// buffer is borrowed where layouts match, under the crate's immutability contract.
 ///
 /// # Safety
 /// `array` / `schema` must be a valid, not-yet-released Arrow C-Data pair (the
-/// contract the exporting producer guarantees).
+/// contract the exporting producer guarantees). The producer and every alias must
+/// never write borrowed memory while imported columns or views survive.
 pub unsafe fn column_from_c_data(
     array: FFI_ArrowArray,
     schema: &FFI_ArrowSchema,
 ) -> Result<Column, ArrowError> {
-    column_from_c_data_with_copy(array, schema, true)
+    column_from_c_data_with_copy(array, schema, crate::DEFAULT_IMPORT_COPY)
 }
 
 /// Import a C-Data pair with an explicit ownership policy.
@@ -101,12 +102,13 @@ fn string_offsets_in_range<O: OffsetSizeTrait>(data: &ArrayData) -> Result<(), A
 ///
 /// # Safety
 /// `array` / `schema` must be the live capsule payloads of a valid C-Data pair
-/// (named `"arrow_array"` / `"arrow_schema"`), not yet consumed.
+/// (named `"arrow_array"` / `"arrow_schema"`), not yet consumed. The producer and every
+/// alias must never write borrowed memory while imported columns or views survive.
 pub unsafe fn column_from_c_capsules(
     array: *mut c_void,
     schema: *const c_void,
 ) -> Result<Column, ArrowError> {
-    column_from_c_capsules_with_copy(array, schema, true)
+    column_from_c_capsules_with_copy(array, schema, crate::DEFAULT_IMPORT_COPY)
 }
 
 /// Consume live capsule payloads with an explicit ownership policy.
