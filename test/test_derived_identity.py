@@ -28,6 +28,38 @@ def test_equivalent_physical_owners_rejected_at_construction(reverse):
         DataFrame(dict(pairs[::-1] if reverse else pairs))
 
 
+@pytest.mark.parametrize('width', [0, 1, 8, 9, 40])
+@pytest.mark.parametrize('arrow', [False, True])
+def test_schema_identity_small_and_large_schemas(width, arrow):
+    import pyarrow as pa
+
+    columns = {f'column_{i}': [1., 2.] for i in range(width)}
+    build = (lambda c: DataFrame.from_arrow(pa.table(c))) if arrow else DataFrame
+    f = build(columns)
+    assert f.columns == list(columns)
+    assert f.shape == (2 if width else 0, width)
+    # Ordinary case-sensitive names, invalid directives and Unicode retain their
+    # exact identities alongside a normalized bare command.
+    # Put an owned canonical identity before the spill boundary too.
+    columns = {'OBV': [11., 12.], **columns}
+    columns.update({'Close': [3., 4.], 'close': [5., 6.], '数据': [7., 8.], 'bad:': [9., 10.]})
+    f = build(columns)
+    np.testing.assert_array_equal(f['obv'].to_numpy(), [11., 12.])
+    np.testing.assert_array_equal(f['Close'].to_numpy(), [3., 4.])
+    columns['obv'] = [13., 14.]
+    with pytest.raises(ValueError, match="'OBV' and 'obv'.*identity 'obv'"):
+        build(columns)
+
+
+@pytest.mark.parametrize('label', ['close', 'OBV', 'ema:2'])
+def test_arrow_identity_validation_keeps_core_duplicate_label_guard(label):
+    import pyarrow as pa
+
+    values = pa.array([1., 2.])
+    with pytest.raises(ValueError, match='duplicate column name'):
+        DataFrame.from_arrow(pa.table([values, values], names=[label, label]))
+
+
 @pytest.mark.parametrize('operation', ['add', 'rename'])
 def test_equivalent_physical_owners_rejected_atomically(operation):
     f = DataFrame({'ema:2': [10., 20., 30.], 'x': [1., 2., 3.]})

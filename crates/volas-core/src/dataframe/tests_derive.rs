@@ -428,6 +428,8 @@ fn a_projection_keeps_the_rows_and_the_listed_columns_as_data() {
     assert!(p.column("ema").unwrap().equals(tail.column("ema").unwrap()));
     assert!(p.computed_columns().is_empty() && p.lead.is_none());
     assert!(tail.select(&["nope".to_string()]).is_err());
+    let twice = tail.select(&["close".to_string(), "close".to_string()]).unwrap_err();
+    assert!(twice.to_string().contains("duplicate column name \"close\""));
 }
 
 #[test]

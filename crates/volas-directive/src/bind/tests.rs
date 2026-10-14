@@ -267,3 +267,12 @@ fn canonical_data_names_match_full_parse_and_render() {
         }
     }
 }
+
+#[test]
+fn unchanged_data_identity_borrows_schema_label() {
+    for name in ["open", "high", "low", "close", "volume", "obv", "Close", "RSI", "cdl"] {
+        let canonical = canonical_data_name(name).unwrap();
+        assert_eq!(canonical, name);
+        assert_eq!(canonical.as_ptr(), name.as_ptr(), "allocated unchanged identity: {name}");
+    }
+}
