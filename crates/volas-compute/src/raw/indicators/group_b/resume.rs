@@ -11,7 +11,7 @@ use crate::raw::kernels::{self, SMA_STATE};
 /// The `p`-bar rate of change of `close` at `i` (NaN before `p` bars exist).
 #[inline]
 pub(super) fn roc_at(close: &[f64], p: usize, i: usize) -> f64 {
-    if i >= p { (close[i] / close[i - p] - 1.0) * 100.0 } else { f64::NAN }
+    if i >= p { missing::term(&[close[i], close[i - p]], (close[i] / close[i - p] - 1.0) * 100.0) } else { f64::NAN }
 }
 
 /// The 4-bar symmetric weighted average of `x` at `i`, weights `[1, 2, 2, 1] / 6`
@@ -31,7 +31,8 @@ pub(super) fn dkx_mid(open: &[f64], high: &[f64], low: &[f64], close: &[f64], i:
 /// ([`super::super::volume::range_flow`]), so a bar without range carries no flow.
 #[inline]
 pub(super) fn wvad_term(open: &[f64], high: &[f64], low: &[f64], close: &[f64], volume: &[f64], i: usize) -> f64 {
-    super::super::volume::range_flow(close[i] - open[i], high[i], low[i], volume[i])
+    missing::term(&[open[i], high[i], low[i], close[i], volume[i]],
+        super::super::volume::range_flow(close[i] - open[i], high[i], low[i], volume[i]))
 }
 
 /// VR's per-bar `(up, down, flat)` volumes at `i` (NaN at the first bar). They read the

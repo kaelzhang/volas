@@ -91,8 +91,8 @@ pub fn sma_pass<S: crate::pass::StateSink>(data: &[f64], period: usize, origin: 
     }
     states.restart();
     // Careful path — window-local (see [`crate::guard`]): the running sum holds only
-    // finite rows; a window holding a non-finite row takes its own mean directly
-    // (NaN for a NaN, ±inf for an infinity), so a bad row never outlives its window.
+    // finite rows; a window holding a non-finite input is missing, so a bad row
+    // never outlives its window.
     let mut slide = Slide::<1>::at(origin);
     // Keep the value-only iterator free of the capturing closure environment.
     if !S::CAPTURE {
@@ -121,11 +121,11 @@ pub(crate) fn sma_row(
 ) -> f64 {
     match slide.row(Order::AddDrop, period, i, |j| {
         let x = term(j);
-        ([x], x.is_finite())
+        ([x], !crate::missing::is_missing(x))
     }) {
         Window::Partial => f64::NAN,
         Window::Sums([sum]) => sum.mean(period as f64),
-        Window::Bad => (i + 1 - period..=i).map(&term).sum::<f64>() / period as f64,
+        Window::Bad => f64::NAN,
     }
 }
 

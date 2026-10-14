@@ -303,7 +303,7 @@ impl Adosc {
 /// of AD ([`money_flow_volume`]), so a bar without range yields `0.0` as there. No
 /// window — a pointwise transform.
 pub fn iii(high: &[f64], low: &[f64], close: &[f64], volume: &[f64]) -> Vec<f64> {
-    (0..close.len()).map(|i| money_flow_volume(high[i], low[i], close[i], volume[i])).collect()
+    (0..close.len()).map(|i| missing::term(&[high[i], low[i], close[i], volume[i]], money_flow_volume(high[i], low[i], close[i], volume[i]))).collect()
 }
 
 

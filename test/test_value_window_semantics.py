@@ -93,21 +93,21 @@ def test_ewm_infinities_are_missing_and_state_recovers(method, adjust, ignore_na
     np.testing.assert_allclose(np.asarray(actual.to_list(), dtype=float), expected.to_numpy(), rtol=1e-15, equal_nan=True)
 
 
-@pytest.mark.parametrize('kind,method,expected,pandas_expected', [
-    ('rolling', 'max', [1., np.inf, np.inf, 3., 5.], [1., 1., 3., 3., 5.]),
-    ('rolling', 'median', [1., np.inf, np.inf, np.nan, np.nan], [1., 1., 3., 3., 5.]),
-    ('rolling', 'rank', [1., 2., 1., 1., 2.], [1., np.nan, 1., np.nan, 1.]),
-    ('expanding', 'max', [1., np.inf, np.inf, np.inf, np.inf], [1., 1., 3., 3., 5.]),
-    ('expanding', 'median', [1., np.inf, 3., 2., 3.], [1., 1., 2., 2., 3.]),
-    ('expanding', 'rank', [1., 2., 2., 1., 4.], [1., np.nan, 2., np.nan, 3.]),
+@pytest.mark.parametrize('kind,method,expected', [
+    ('rolling', 'max', [1., 1., 3., 3., 5.]),
+    ('rolling', 'median', [1., 1., 3., 3., 5.]),
+    ('rolling', 'rank', [1., np.nan, 1., np.nan, 1.]),
+    ('expanding', 'max', [1., 1., 3., 3., 5.]),
+    ('expanding', 'median', [1., 1., 2., 2., 3.]),
+    ('expanding', 'rank', [1., np.nan, 2., np.nan, 3.]),
 ])
-def test_window_infinity_value_policy(kind, method, expected, pandas_expected):
+def test_window_infinities_are_missing_like_pandas(kind, method, expected):
     values = [1., np.inf, 3., -np.inf, 5.]
     vs, ps = series(values), pd.Series(values)
     vw = vs.rolling(2, min_periods=1) if kind == 'rolling' else vs.expanding(1)
     pw = ps.rolling(2, min_periods=1) if kind == 'rolling' else ps.expanding(1)
     bits_equal(getattr(vw, method)().to_list(), expected)
-    bits_equal(getattr(pw, method)().tolist(), pandas_expected)
+    bits_equal(getattr(pw, method)().tolist(), expected)
 
 
 def test_frame_replace_leaves_unmatched_dtypes_unchanged():

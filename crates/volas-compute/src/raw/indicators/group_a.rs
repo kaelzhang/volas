@@ -710,7 +710,8 @@ fn emv_term(high: &[f64], low: &[f64], volume: &[f64], i: usize) -> f64 {
         return f64::NAN;
     }
     let mid = |k: usize| (high[k] + low[k]) / 2.0;
-    (mid(i) - mid(i - 1)) / ((volume[i] / SCALE) / (high[i] - low[i]))
+    missing::term(&[high[i], low[i], high[i - 1], low[i - 1], volume[i]],
+        (mid(i) - mid(i - 1)) / ((volume[i] / SCALE) / (high[i] - low[i])))
 }
 
 /// [`emv`]'s state after the rows: its SMA's.
@@ -742,7 +743,7 @@ const KST_LEGS: [(usize, usize); 4] = [(10, 10), (15, 10), (20, 10), (30, 15)];
 /// The `p`-bar rate of change of `close` at `i`, as [`kst`] averages it.
 #[inline]
 fn kst_roc(close: &[f64], p: usize, i: usize) -> f64 {
-    if i >= p { (close[i] / close[i - p] - 1.0) * 100.0 } else { f64::NAN }
+    if i >= p { missing::term(&[close[i], close[i - p]], (close[i] / close[i - p] - 1.0) * 100.0) } else { f64::NAN }
 }
 
 /// [`kst`]'s state after the rows of `close`: its four SMAs'.

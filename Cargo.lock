@@ -808,6 +808,9 @@ dependencies = [
 [[package]]
 name = "volas-compute"
 version = "3.0.4"
+dependencies = [
+ "volas-core",
+]
 
 [[package]]
 name = "volas-core"

@@ -198,7 +198,11 @@ impl WinSpec {
     /// `first` / `last` preserve the source dtype: gather the edge positions.
     pub(crate) fn edge(&self, s: &Series, last: bool) -> PyResult<PySeries> {
         let n = s.len();
-        let mut valid: Vec<bool> = (0..n).map(|i| s.data.is_valid(i)).collect();
+        let mut valid: Vec<bool> = match &s.data {
+            volas_core::Column::F64(v) => v.iter().map(|&x| !volas_core::missing::is_missing(x)).collect(),
+            volas_core::Column::F32(v) => v.iter().map(|&x| !volas_core::missing::is_missing(x as f64)).collect(),
+            _ => (0..n).map(|i| s.data.is_valid(i)).collect(),
+        };
         // the same pad-and-relabel trick as `run` (padding is never valid, so it
         // is never selected as an edge position).
         w::validate_window(self.window, self.min_periods).map_err(window_err)?;

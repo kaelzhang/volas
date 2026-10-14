@@ -77,19 +77,19 @@ fn stoch_fastk_small_window(
         // If any input contains NaN, decline to the generic rolling kernel so the
         // existing NaN semantics stay centralized there.
         let low_today = unsafe { *low_ptr.add(today) };
-        if low_today.is_nan() {
+        if missing::is_missing(low_today) {
             return None;
         }
         if lowest_idx == usize::MAX || lowest_idx < trailing {
             lowest_idx = trailing;
             lowest = unsafe { *low_ptr.add(trailing) };
-            if lowest.is_nan() {
+            if missing::is_missing(lowest) {
                 return None;
             }
             let mut idx = trailing + 1;
             while idx <= today {
                 let value = unsafe { *low_ptr.add(idx) };
-                if value.is_nan() {
+                if missing::is_missing(value) {
                     return None;
                 }
                 if value < lowest {
@@ -104,19 +104,19 @@ fn stoch_fastk_small_window(
         }
 
         let high_today = unsafe { *high_ptr.add(today) };
-        if high_today.is_nan() {
+        if missing::is_missing(high_today) {
             return None;
         }
         if highest_idx == usize::MAX || highest_idx < trailing {
             highest_idx = trailing;
             highest = unsafe { *high_ptr.add(trailing) };
-            if highest.is_nan() {
+            if missing::is_missing(highest) {
                 return None;
             }
             let mut idx = trailing + 1;
             while idx <= today {
                 let value = unsafe { *high_ptr.add(idx) };
-                if value.is_nan() {
+                if missing::is_missing(value) {
                     return None;
                 }
                 if value > highest {
@@ -131,7 +131,7 @@ fn stoch_fastk_small_window(
         }
 
         let c = unsafe { *close_ptr.add(today) };
-        if c.is_nan() {
+        if missing::is_missing(c) {
             return None;
         }
         unsafe {
@@ -190,19 +190,19 @@ fn stoch_d_sma_fused<const STAGES: usize>(
 
     while today < n {
         let low_today = unsafe { *low_ptr.add(today) };
-        if low_today.is_nan() {
+        if missing::is_missing(low_today) {
             return None;
         }
         if lowest_idx == usize::MAX || lowest_idx < trailing {
             lowest_idx = trailing;
             lowest = unsafe { *low_ptr.add(trailing) };
-            if lowest.is_nan() {
+            if missing::is_missing(lowest) {
                 return None;
             }
             let mut idx = trailing + 1;
             while idx <= today {
                 let value = unsafe { *low_ptr.add(idx) };
-                if value.is_nan() {
+                if missing::is_missing(value) {
                     return None;
                 }
                 if value < lowest {
@@ -217,19 +217,19 @@ fn stoch_d_sma_fused<const STAGES: usize>(
         }
 
         let high_today = unsafe { *high_ptr.add(today) };
-        if high_today.is_nan() {
+        if missing::is_missing(high_today) {
             return None;
         }
         if highest_idx == usize::MAX || highest_idx < trailing {
             highest_idx = trailing;
             highest = unsafe { *high_ptr.add(trailing) };
-            if highest.is_nan() {
+            if missing::is_missing(highest) {
                 return None;
             }
             let mut idx = trailing + 1;
             while idx <= today {
                 let value = unsafe { *high_ptr.add(idx) };
-                if value.is_nan() {
+                if missing::is_missing(value) {
                     return None;
                 }
                 if value > highest {
@@ -244,7 +244,7 @@ fn stoch_d_sma_fused<const STAGES: usize>(
         }
 
         let c = unsafe { *close_ptr.add(today) };
-        if c.is_nan() {
+        if missing::is_missing(c) {
             return None;
         }
         let fastk = fastk(c, highest, lowest);
@@ -282,7 +282,7 @@ fn stoch_fastk_same_series_small_window(data: &[f64], period: usize) -> Option<V
     let mut lowest = 0.0;
     while today < n {
         let x = data[today];
-        if x.is_nan() {
+        if missing::is_missing(x) {
             return None;
         }
         if lowest_idx == usize::MAX
@@ -294,11 +294,11 @@ fn stoch_fastk_same_series_small_window(data: &[f64], period: usize) -> Option<V
             lowest = data[trailing];
             highest_idx = trailing;
             highest = lowest;
-            if lowest.is_nan() {
+            if missing::is_missing(lowest) {
                 return None;
             }
             for (off, &value) in data[(trailing + 1)..=today].iter().enumerate() {
-                if value.is_nan() {
+                if missing::is_missing(value) {
                     return None;
                 }
                 let idx = trailing + 1 + off;
@@ -349,7 +349,7 @@ pub fn stochrsi_from_rsi(rsi: &[f64], fastk_period: usize) -> Vec<f64> {
     // lands at the first fully-finite RSI window — exactly the rows the old explicit
     // mask kept — and the result is bit-identical (min/max over a finite window is
     // order-independent and exact), so the separate masking pass is no longer needed.
-    let start = rsi.iter().position(|x| !x.is_nan()).unwrap_or(n);
+    let start = rsi.iter().position(|&x| !missing::is_missing(x)).unwrap_or(n);
     let tail = &rsi[start..];
     if tail.len() >= fastk_period {
         // This StochRSI-specific call passes the same RSI buffer as high/low/close.
@@ -372,7 +372,7 @@ pub fn stochrsi_from_rsi(rsi: &[f64], fastk_period: usize) -> Vec<f64> {
 pub fn stochrsi_d_default_sma(close: &[f64], _origin: usize) -> Option<Vec<f64>> {
     let rsi = rsi(close, 14);
     let n = rsi.len();
-    let start = rsi.iter().position(|x| !x.is_nan()).unwrap_or(n);
+    let start = rsi.iter().position(|&x| !missing::is_missing(x)).unwrap_or(n);
     let tail = &rsi[start..];
     if tail.len() < 7 {
         return Some(vec![f64::NAN; n]);
@@ -395,7 +395,7 @@ pub fn stochrsi_d_default_sma(close: &[f64], _origin: usize) -> Option<Vec<f64>>
 
     while today < tail.len() {
         let x = unsafe { *src.add(today) };
-        if x.is_nan() {
+        if missing::is_missing(x) {
             return None;
         }
         if lowest_idx == usize::MAX
@@ -407,13 +407,13 @@ pub fn stochrsi_d_default_sma(close: &[f64], _origin: usize) -> Option<Vec<f64>>
             lowest = unsafe { *src.add(trailing) };
             highest_idx = trailing;
             highest = lowest;
-            if lowest.is_nan() {
+            if missing::is_missing(lowest) {
                 return None; // LCOV_EXCL_LINE
             }
             let mut idx = trailing + 1;
             while idx <= today {
                 let value = unsafe { *src.add(idx) };
-                if value.is_nan() {
+                if missing::is_missing(value) {
                     return None; // LCOV_EXCL_LINE
                 }
                 if value <= lowest {

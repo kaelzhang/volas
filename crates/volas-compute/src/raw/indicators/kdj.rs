@@ -18,9 +18,10 @@ fn kdj_rsv(high: &[f64], low: &[f64], close: &[f64], period_rsv: usize) -> Vec<f
     let (mut hh, mut ll) = (f64::NEG_INFINITY, f64::INFINITY);
     for i in 0..n {
         rsv[i] = if i + 1 < period_rsv {
-            // a partial window: the bars `[0, i]` (once one is missing, it stays missing)
-            hh = if missing::any_of(&[hh, high[i]]) { f64::NAN } else { hh.max(high[i]) };
-            ll = if missing::any_of(&[ll, low[i]]) { f64::NAN } else { ll.min(low[i]) };
+            // A partial window: NaN marks a previously missing input; ±inf are
+            // extrema identities until a real input replaces them.
+            hh = if hh.is_nan() || missing::is_missing(high[i]) { f64::NAN } else { hh.max(high[i]) };
+            ll = if ll.is_nan() || missing::is_missing(low[i]) { f64::NAN } else { ll.min(low[i]) };
             rsv_value(close[i], canonical_zero(hh), canonical_zero(ll))
         } else {
             rsv_value(close[i], hhv[i], llv[i])
@@ -255,5 +256,32 @@ mod tests {
         assert!(kdj_resume(&high, &low, &close, p, pk, pd, KdjLine::K, 40, &[], &mut Vec::new()).is_none()); // empty state
         assert!(kdj_resume(&high, &low, &close, p, pk, pd, KdjLine::D, 40, &[1.0], &mut Vec::new()).is_none());
         // `.d` needs [%K, %D]
+    }
+}
+
+#[cfg(test)]
+mod sentinel_tests {
+    use super::*;
+
+    #[test]
+    fn partial_extrema_identities_are_not_missing_inputs() {
+        let high = [3.0, 4.0, 5.0, 6.0];
+        let low = [1.0, 2.0, 3.0, 4.0];
+        let close = [2.0, 3.0, 4.0, 5.0];
+        let got = kdj_rsv(&high, &low, &close, 3);
+        assert_eq!(got[0], 50.0);
+        assert_eq!(got[1], (3.0 - 1.0) / (4.0 - 1.0) * 100.0);
+        for bad in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            let mut h = high;
+            h[0] = bad;
+            let got = kdj_rsv(&h, &low, &close, 3);
+            assert!(got[..3].iter().all(|v| v.is_nan()));
+            assert_eq!(got[3], 75.0);
+            let mut l = low;
+            l[0] = bad;
+            let got = kdj_rsv(&high, &l, &close, 3);
+            assert!(got[..3].iter().all(|v| v.is_nan()));
+            assert_eq!(got[3], 75.0);
+        }
     }
 }

@@ -358,6 +358,24 @@ impl Column {
         }
     }
 
+    /// Whether an input column contains a missing computation value (including ±inf).
+    pub fn has_nonfinite(&self) -> bool {
+        match self {
+            Column::F64(v) => v.has_nonfinite(),
+            Column::F32(v) => v.has_nonfinite(),
+            _ => self.has_nan(),
+        }
+    }
+
+    /// The all-finite computation fact, if already known without scanning.
+    pub fn known_has_nonfinite(&self) -> Option<bool> {
+        match self {
+            Column::F64(v) => v.known_has_nonfinite(),
+            Column::F32(v) => v.known_has_nonfinite(),
+            _ => self.known_has_nan(),
+        }
+    }
+
     /// Materialize the values as `f64` (`bool` -> 0.0/1.0, `i64` / `datetime` ->
     /// as f64, `str` -> NaN). Used to feed indicator kernels, which operate on
     /// `f64`.

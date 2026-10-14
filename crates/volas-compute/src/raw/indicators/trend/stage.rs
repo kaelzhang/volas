@@ -13,7 +13,6 @@ use super::ma::{wma_initial, wma_row, WMA_STATE};
 pub struct MaStage {
     period: usize,
     kind: MaKind,
-    complete: bool,
 }
 
 impl MaStage {
@@ -22,21 +21,20 @@ impl MaStage {
     /// an unknown type. Recursive stages carry their kernel and complete input tail.
     pub fn new(period: usize, matype: usize) -> Option<Self> {
         let kind = MaKind::new(period, matype)?;
-        Some(Self { period, kind, complete: true })
+        Some(Self { period, kind })
     }
 
-    /// An EMA stage with the raw kernel's leading-NaN skip and propagation thereafter.
-    pub fn ema(period: usize) -> Self { Self { period, kind: MaKind::Recursive(RecursiveKind::Ema), complete: false } }
+    /// An EMA stage with the shared complete-input rule.
+    pub fn ema(period: usize) -> Self { Self { period, kind: MaKind::Recursive(RecursiveKind::Ema) } }
 
     /// The batch kernel publishes the exact states used by `step`, including
     /// partially seeded recursive stages.
     pub fn pass<S: crate::pass::StateSink>(&self, data: &[f64], origin: usize, states: &mut S) -> Option<Vec<f64>> {
-        if !S::CAPTURE && !self.complete { return Some(self.kind.compute(data, self.period, origin)); }
         Some(match self.kind {
             MaKind::Finite(FiniteKind::Sma) => kernels::sma_pass(data, self.period, origin, states),
             MaKind::Finite(FiniteKind::Wma) => super::wma_pass(data, self.period, origin, states),
             MaKind::Finite(FiniteKind::Trima) => super::trima_pass(data, self.period, origin, states),
-            MaKind::Recursive(kind) => return kind.pass(data, self.period, self.complete, states),
+            MaKind::Recursive(kind) => return kind.pass(data, self.period, states),
         })
     }
 
@@ -75,7 +73,7 @@ impl MaStage {
             MaKind::Finite(FiniteKind::Sma) => kernels::sma_step(self.period, row, term, state, next),
             MaKind::Finite(FiniteKind::Wma) => wma_row(self.period, row, &term, state, next),
             MaKind::Finite(FiniteKind::Trima) => super::trima_row(self.period, row, &term, state, next),
-            MaKind::Recursive(kind) => kind.step(self.period, self.complete, term(row), state, next),
+            MaKind::Recursive(kind) => kind.step(self.period, term(row), state, next),
         }
     }
 
@@ -144,9 +142,9 @@ impl RecursiveKind {
     // [complete count (saturated), kernel..., complete tail + newest scratch].
     // The seed uses exactly the same rows and kernels as generic_ma. NaN stage
     // inputs are skipped, matching ma_typed's complete-row evaluation.
-    fn step(self, p: usize, complete: bool, x: f64, state: &[f64], next: &mut [f64]) -> Option<f64> {
+    fn step(self, p: usize, x: f64, state: &[f64], next: &mut [f64]) -> Option<f64> {
         next.copy_from_slice(state);
-        if x.is_nan() && (complete || state[0] < self.seed_len(p) as f64) { return Some(f64::NAN); }
+        if crate::missing::is_missing(x) { return Some(f64::NAN); }
         let seed = self.seed_len(p);
         let seen = state[0] as usize;
         let k = self.kernel_len();
@@ -182,21 +180,21 @@ impl RecursiveKind {
 }
 
 impl RecursiveKind {
-    fn pass(self, data: &[f64], p: usize, complete: bool, states: &mut impl crate::pass::StateSink) -> Option<Vec<f64>> {
+    fn pass<S: crate::pass::StateSink>(self, data: &[f64], p: usize, states: &mut S) -> Option<Vec<f64>> {
         use crate::pass::States;
         use crate::missing::{CompleteRows, Input};
-        let rows = if complete { CompleteRows::of(&[Input::new(data)]) } else {
-            let start = data.iter().position(|v| !v.is_nan()).unwrap_or(data.len());
-            if data[start..data.len().min(start + self.seed_len(p))].iter().all(|v| !v.is_nan()) {
-                CompleteRows::After(start)
-            } else {
-                let mut seen = 0;
-                CompleteRows::Kept((start..data.len()).filter(|&i| {
-                    if seen < self.seed_len(p) && data[i].is_nan() { false }
-                    else { seen += 1; true }
-                }).collect())
+        let rows = CompleteRows::of(&[Input::new(data)]);
+        if !S::CAPTURE {
+            // A value-only pass needs no terminal-state publications. Preserve the
+            // raw kernel's NaN warm-up prefix without a second output allocation;
+            // a prefix containing infinity still goes through the shared row map.
+            if let CompleteRows::After(start) = &rows {
+                if data[..*start].iter().all(|v| v.is_nan()) {
+                    return Some(self.compute(data, p, 0));
+                }
             }
-        };
+            return Some(rows.scatter(data.len(), self.compute(&rows.gather(data), p, 0)));
+        }
         let input = rows.gather(data);
         let input = &*input;
         let mut marks: Vec<_> = states.marks().iter().copied().map(|end| rows.before(end)).collect();
@@ -226,7 +224,7 @@ impl RecursiveKind {
                 let mut state = vec![0.0; self.state_len(p)];
                 let mut next = state.clone();
                 for &x in &input[..count] {
-                    self.step(p, complete, x, &state, &mut next)?;
+                    self.step(p, x, &state, &mut next)?;
                     std::mem::swap(&mut state, &mut next);
                 }
                 state
@@ -234,5 +232,43 @@ impl RecursiveKind {
             states.record(end - 1, data.len(), |out| out.extend_from_slice(&state));
         }
         Some(rows.scatter(data.len(), result))
+    }
+}
+
+#[cfg(test)]
+mod nonfinite_tests {
+    use super::*;
+
+    #[test]
+    fn stage_inputs_treat_infinity_as_nan_in_batch_and_step() {
+        for stage in [MaStage::new(3, 1).unwrap(), MaStage::ema(3)] {
+            for bad in [f64::INFINITY, f64::NEG_INFINITY] {
+                for lane in [0, 1, 6] {
+                    let mut inf = vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0];
+                    let mut nan = inf.clone();
+                    inf[lane] = bad;
+                    nan[lane] = f64::NAN;
+                    let mut passes = Vec::new();
+                    for data in [&inf, &nan] {
+                        let batch = stage.pass(data, 0, &mut ()).unwrap();
+                        let mut state = stage.initial(0);
+                        let mut next = state.clone();
+                        let mut values = Vec::new();
+                        for row in 0..data.len() {
+                            values.push(stage.step(row, |i| data[i], &state, &mut next).unwrap());
+                            std::mem::swap(&mut state, &mut next);
+                        }
+                        passes.push((batch, values));
+                    }
+                    for (a, b) in passes[0].0.iter().zip(&passes[0].1)
+                        .chain(passes[1].0.iter().zip(&passes[1].1))
+                        .chain(passes[0].0.iter().zip(&passes[1].0))
+                        .chain(passes[0].1.iter().zip(&passes[1].1)) {
+                        assert!(a.to_bits() == b.to_bits() || a.is_nan() && b.is_nan(),
+                            "lane={lane}, bad={bad}: {a} vs {b}");
+                    }
+                }
+            }
+        }
     }
 }

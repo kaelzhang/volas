@@ -207,13 +207,6 @@ fn wma_with<G: RowGuard>(data: &[f64], period: usize, states: &mut impl crate::p
     let mut out = vec![f64::NAN; n];
     let denom = wma_weight_sum(period);
     let pf = period as f64;
-    let window = |end: usize| {
-        data[end + 1 - period..=end]
-            .iter()
-            .enumerate()
-            .fold(0.0, |acc, (j, &x)| acc + x * (j + 1) as f64)
-            / denom
-    };
     let mut guard = G::default();
     let mut finite = true;
     // Re-sum at an anchor or when a sum went inexact. The fast pass stops once a
@@ -222,7 +215,7 @@ fn wma_with<G: RowGuard>(data: &[f64], period: usize, states: &mut impl crate::p
     let mut reanchor = |guard: &G, sum: &mut Csum, wsum: &mut Csum, end: usize| {
         finite &= sum.value().is_finite() && wsum.value().is_finite();
         if finite || !guard.counts(false) {
-            (*sum, *wsum) = wma_sums(data[end + 1 - period..=end].iter().copied(), |x| guard.counts(x.is_finite()));
+            (*sum, *wsum) = wma_sums(data[end + 1 - period..=end].iter().copied(), |x| guard.counts(!crate::missing::is_missing(x)));
         }
     };
     let exact = |a: &Csum, b: &Csum| a.is_exact() && b.is_exact();
@@ -231,7 +224,7 @@ fn wma_with<G: RowGuard>(data: &[f64], period: usize, states: &mut impl crate::p
     let mut wsum = Csum::default(); // weighted sum: newest bar * period ... oldest * 1
     #[allow(clippy::needless_range_loop)] // numeric kernel: index-loop kept for hot-path codegen stability
     for j in 0..period {
-        if guard.enter(data[j].is_finite()) {
+        if guard.enter(!crate::missing::is_missing(data[j])) {
             wma_seed(&mut sum, &mut wsum, j, data[j]);
         }
         if !exact(&sum, &wsum) && j + 1 == period {
@@ -239,18 +232,18 @@ fn wma_with<G: RowGuard>(data: &[f64], period: usize, states: &mut impl crate::p
         }
     }
     states.record(start + period - 1, len, |out| Slide::append_components(out, [sum, wsum], guard.bad(), period));
-    out[period - 1] = if guard.clean() { wsum.mean(denom) } else { window(period - 1) };
+    out[period - 1] = if guard.clean() { wsum.mean(denom) } else { f64::NAN };
     // Slide: dropping the oldest (weight 1) raises every retained weight by one.
     for i in period..n {
         let entering = data[i];
         let leaving = data[i - period];
-        let came_in = guard.enter(entering.is_finite());
-        let went_out = guard.leave(leaving.is_finite());
+        let came_in = guard.enter(!crate::missing::is_missing(entering));
+        let went_out = guard.leave(!crate::missing::is_missing(leaving));
         wma_slide(&mut sum, &mut wsum, pf, came_in.then_some(entering), went_out.then_some(leaving));
         if !exact(&sum, &wsum) {
             reanchor(&guard, &mut sum, &mut wsum, i);
         }
-        out[i] = if guard.clean() { wsum.mean(denom) } else { window(i) };
+        out[i] = if guard.clean() { wsum.mean(denom) } else { f64::NAN };
         states.record(start + i, len, |out| Slide::append_components(out, [sum, wsum], guard.bad(), period));
     }
     (out, finite && sum.value().is_finite() && wsum.value().is_finite())
@@ -391,6 +384,7 @@ pub fn alma(close: &[f64], period: usize, offset: f64, sigma: f64) -> Vec<f64> {
         }
         out[i] = acc;
     }
+    missing::blank_windows(&mut out, close, period);
     out
 }
 
@@ -408,9 +402,9 @@ pub fn hma_pass<S: crate::pass::StateSink>(close: &[f64], period: usize, origin:
         return vec![f64::NAN; n];
     }
     // period 1 is degenerate (half = 0 → `wma(close, 0)` is all-NaN); like the rest of
-    // the MA family at period 1, return the source unchanged.
+    // the MA family at period 1, keep finite inputs and publish missing otherwise.
     if period == 1 {
-        return close.to_vec();
+        return close.iter().map(|&v| missing::term(&[v], v)).collect();
     }
     let half = period / 2;
     let sq = (period as f64).sqrt().round() as usize;
@@ -434,6 +428,7 @@ pub fn swma(close: &[f64]) -> Vec<f64> {
             + close[i - 1] * 2.0 / 6.0
             + close[i] / 6.0;
     }
+    missing::blank_windows(&mut out, close, 4);
     out
 }
 
@@ -494,31 +489,25 @@ pub(crate) fn wma_row(period: usize, row: usize, term: &impl Fn(usize) -> f64, s
     }
     let denom = wma_weight_sum(period);
     let pf = period as f64;
-    let window = || {
-        (row + 1 - period..=row)
-            .enumerate()
-            .fold(0.0, |acc, (j, k)| acc + term(k) * (j + 1) as f64)
-            / denom
-    };
     let value = if seen < period {
         // seed the first full window directly
-        if x.is_finite() {
+        if !crate::missing::is_missing(x) {
             wma_seed(&mut sum, &mut wsum, seen, x);
         } else {
             bad += 1;
         }
         if seen + 1 == period {
             if !(sum.is_exact() && wsum.is_exact()) {
-                (sum, wsum) = wma_sums((row + 1 - period..=row).map(term), f64::is_finite);
+                (sum, wsum) = wma_sums((row + 1 - period..=row).map(term), |v| !crate::missing::is_missing(v));
             }
-            if bad == 0 { wsum.mean(denom) } else { window() }
+            if bad == 0 { wsum.mean(denom) } else { f64::NAN }
         } else {
             f64::NAN
         }
     } else {
         let leaving = term(row - period);
-        let came_in = x.is_finite();
-        let went_out = leaving.is_finite();
+        let came_in = !crate::missing::is_missing(x);
+        let went_out = !crate::missing::is_missing(leaving);
         if !came_in {
             bad += 1;
         }
@@ -527,9 +516,9 @@ pub(crate) fn wma_row(period: usize, row: usize, term: &impl Fn(usize) -> f64, s
         }
         wma_slide(&mut sum, &mut wsum, pf, came_in.then_some(x), went_out.then_some(leaving));
         if !(sum.is_exact() && wsum.is_exact()) {
-            (sum, wsum) = wma_sums((row + 1 - period..=row).map(term), f64::is_finite);
+            (sum, wsum) = wma_sums((row + 1 - period..=row).map(term), |v| !crate::missing::is_missing(v));
         }
-        if bad == 0 { wsum.mean(denom) } else { window() }
+        if bad == 0 { wsum.mean(denom) } else { f64::NAN }
     };
     sum.write_state(&mut next[..2]);
     wsum.write_state(&mut next[2..4]);

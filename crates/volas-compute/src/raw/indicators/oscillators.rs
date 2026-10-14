@@ -23,7 +23,7 @@ pub fn hhv(data: &[f64], period: usize) -> Vec<f64> {
     // TA-Lib `MAX` is tuned around a track-and-rescan loop for small default periods.
     // For `hhv:10`, pre-scan once for NaN and then keep that C-shaped tracker across
     // all lengths; NaN-bearing data falls back to `rolling_max`'s precise semantics.
-    if period == 10 && period <= data.len() && !data.iter().any(|x| x.is_nan()) {
+    if period == 10 && period <= data.len() && !missing::any_missing(data) {
         return hhv10_no_nan(data);
     }
     kernels::rolling_max(data, period)
@@ -485,11 +485,11 @@ fn cog_row(close: &[f64], period: usize, i: usize, st: &mut [f64; COG_STATE]) ->
     let (bad, seen, valid) = (st[4], st[5], st[6]);
     let (mut bad, seen) = (bad as usize, seen as usize);
     let pf = period as f64;
-    if !close[i].is_finite() {
+    if crate::missing::is_missing(close[i]) {
         bad += 1;
     }
     let full = seen + 1 >= period;
-    if full && seen + 1 > period && !close[i - period].is_finite() {
+    if full && seen + 1 > period && crate::missing::is_missing(close[i - period]) {
         bad -= 1;
     }
     let mut valid = valid != 0.0;
@@ -601,7 +601,7 @@ pub fn rci(close: &[f64], period: usize) -> Vec<f64> {
         // A missing value makes the rank order undefined — disqualify the window (NaN
         // out), matching the other window indicators; never let the sort fallback turn
         // a NaN window into a confident signal.
-        if w.iter().any(|x| x.is_nan()) {
+        if missing::any_missing(w) {
             continue;
         }
         // average ranks of the window values (ascending)
@@ -662,6 +662,7 @@ pub fn pivot(source: &[f64], left: usize, right: usize, high: bool) -> Vec<f64> 
             out[i] = cand;
         }
     }
+    missing::blank_windows(&mut out, source, win + 1);
     out
 }
 
@@ -675,6 +676,24 @@ mod tests {
     /// correlation — it disqualifies the window (NaN out), like the other window
     /// indicators (`dev` / `mode` / `pivot`). The sort fallback used to turn
     /// `[1, NaN, 3]` into a perfect `100.0` signal.
+    #[test]
+    fn pivot_windows_treat_infinity_as_nan() {
+        for high in [false, true] {
+            for bad in [f64::INFINITY, f64::NEG_INFINITY] {
+                for lane in 0..5 {
+                    let mut inf = [1.0, 3.0, 2.0, 4.0, 1.0];
+                    let mut nan = inf;
+                    inf[lane] = bad;
+                    nan[lane] = f64::NAN;
+                    for (a, b) in pivot(&inf, 1, 1, high).iter().zip(pivot(&nan, 1, 1, high)) {
+                        assert!(a.to_bits() == b.to_bits() || a.is_nan() && b.is_nan(),
+                            "high={high}, lane={lane}, bad={bad}: {a} vs {b}");
+                    }
+                }
+            }
+        }
+    }
+
     #[test]
     fn rci_nan_in_window_disqualifies() {
         let out = rci(&[1.0, f64::NAN, 3.0, 4.0, 5.0], 3);

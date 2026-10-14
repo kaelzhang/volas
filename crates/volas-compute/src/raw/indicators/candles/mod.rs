@@ -416,7 +416,7 @@ fn each_bar(
         }
     });
     for x in [o, h, l, c] {
-        missing::blank_windows_where(&mut out, x, lookback + 1, |v| !v.is_finite());
+        missing::blank_windows(&mut out, x, lookback + 1);
     }
     out
 }

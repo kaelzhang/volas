@@ -33,8 +33,8 @@ no standard at all. `df[d]` and `directive_lookback` reject a directive that omi
 required argument; `directive_stringify` accepts it, because it only names the
 indicator. A trailing colon with nothing after it (`obv:`) means no arguments.
 
-**Input data.** How an indicator treats a missing (NaN) or infinite input, and how its
-sliding sums stay exact over any history, is one set of rules for every indicator — see
+**Input data.** NaN and both infinity signs are missing indicator inputs. Missing-value
+handling and exact sliding sums follow one set of rules for every indicator — see
 [Missing values and exact window sums](docs/indicator-inputs.md).
 
 ## Volas-exclusive indicators

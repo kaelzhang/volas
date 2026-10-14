@@ -38,7 +38,7 @@ fn sum_with<G: RowGuard>(data: &[f64], period: usize, origin: usize, states: &mu
     let mut finite = true;
     let mut total = Csum::default();
     for &x in &data[..period - 1] {
-        if guard.enter(x.is_finite()) {
+        if guard.enter(!crate::missing::is_missing(x)) {
             total.add(x);
         }
     }
@@ -46,7 +46,7 @@ fn sum_with<G: RowGuard>(data: &[f64], period: usize, origin: usize, states: &mu
     #[allow(clippy::explicit_counter_loop)] // numeric kernel: explicit counter kept for hot-path codegen stability
     for i in (period - 1)..n {
         let x = data[i];
-        if guard.enter(x.is_finite()) {
+        if guard.enter(!crate::missing::is_missing(x)) {
             total.add(x);
         }
         if !total.is_exact() {
@@ -55,16 +55,16 @@ fn sum_with<G: RowGuard>(data: &[f64], period: usize, origin: usize, states: &mu
             finite &= total.value().is_finite();
             if finite || !guard.counts(false) {
                 let window = data[i + 1 - period..=i].iter().copied();
-                total = Csum::of(window.filter(|x| guard.counts(x.is_finite())));
+                total = Csum::of(window.filter(|&x| guard.counts(!crate::missing::is_missing(x))));
             }
         }
         out[i] = if guard.clean() {
             total.value()
         } else {
-            data[i + 1 - period..=i].iter().sum()
+            f64::NAN
         };
         let old = data[trailing];
-        if guard.leave(old.is_finite()) {
+        if guard.leave(!crate::missing::is_missing(old)) {
             total.sub(old);
         }
         states.record(i, n, |out| crate::guard::Slide::append_components(out, [total], guard.bad(), origin + i + 1));
@@ -379,11 +379,11 @@ pub(crate) fn sum_row(
     let mut slide = Slide::<1>::from_state(state)?;
     let value = match slide.row(Order::AddReadDrop, period, row, |j| {
         let x = term(j);
-        ([x], x.is_finite())
+        ([x], !crate::missing::is_missing(x))
     }) {
         Window::Partial => f64::NAN,
         Window::Sums([total]) => total.value(),
-        Window::Bad => (row + 1 - period..=row).map(&term).sum(),
+        Window::Bad => f64::NAN,
     };
     slide.write_state(next);
     Some(value)

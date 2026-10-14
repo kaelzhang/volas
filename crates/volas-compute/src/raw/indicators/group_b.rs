@@ -4,6 +4,7 @@
 //! accumulators publish their continuation states from the batch pass; recursive
 //! members carry a `*_final_state` / `*_resume` pair like Group A.
 
+use crate::missing;
 use crate::raw::kernels;
 
 mod resume;
@@ -234,13 +235,14 @@ pub fn cdp(high: &[f64], low: &[f64], close: &[f64], line: CdpLine) -> Vec<f64> 
             }
             let (h, l, c) = (high[i - 1], low[i - 1], close[i - 1]);
             let cdp = (h + l + 2.0 * c) / 4.0;
-            match line {
+            let value = match line {
                 CdpLine::Cdp => cdp,
                 CdpLine::Ah => cdp + (h - l),
                 CdpLine::Nh => 2.0 * cdp - l,
                 CdpLine::Nl => 2.0 * cdp - h,
                 CdpLine::Al => cdp - (h - l),
-            }
+            };
+            missing::term(&[h, l, c], value)
         })
         .collect()
 }
@@ -401,7 +403,7 @@ pub fn pivot_points(high: &[f64], low: &[f64], close: &[f64], line: PivotLine) -
             }
             let (h, l, c) = (high[i - 1], low[i - 1], close[i - 1]);
             let pp = (h + l + c) / 3.0;
-            match line {
+            let value = match line {
                 PivotLine::Pp => pp,
                 PivotLine::R1 => 2.0 * pp - l,
                 PivotLine::S1 => 2.0 * pp - h,
@@ -409,7 +411,8 @@ pub fn pivot_points(high: &[f64], low: &[f64], close: &[f64], line: PivotLine) -
                 PivotLine::S2 => pp - (h - l),
                 PivotLine::R3 => h + 2.0 * (pp - l),
                 PivotLine::S3 => l - 2.0 * (h - pp),
-            }
+            };
+            missing::term(&[h, l, c], value)
         })
         .collect()
 }
@@ -434,7 +437,7 @@ pub fn mike(high: &[f64], low: &[f64], close: &[f64], n: usize, line: MikeLine) 
     let ll = super::llv(low, n);
     (0..len)
         .map(|i| {
-            let typ = (high[i] + low[i] + close[i]) / 3.0;
+            let typ = missing::term(&[high[i], low[i], close[i]], (high[i] + low[i] + close[i]) / 3.0);
             let (hi, lo) = (hh[i], ll[i]);
             match line {
                 MikeLine::WeakR => typ + (typ - lo),
@@ -605,7 +608,7 @@ pub fn ichimoku(
             shift_forward(&raw, kijun)
         }
         IchimokuLine::SenkouB => shift_forward(&midpoint(senkou_b), kijun),
-        IchimokuLine::Chikou => close.to_vec(),
+        IchimokuLine::Chikou => close.iter().map(|&v| missing::term(&[v], v)).collect(),
     }
 }
 

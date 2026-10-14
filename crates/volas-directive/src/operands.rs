@@ -2,7 +2,7 @@
 //! converted once and remembered.
 //!
 //! A command's arm reads each input through [`Operands`]. The first read of a slot
-//! resolves it — a frame column (with its remembered NaN fact) or an evaluated `@`
+//! resolves it — a frame column (with its remembered all-finite fact) or an evaluated `@`
 //! operand — converts it to `f64` once (a float64 frame column is borrowed, never
 //! copied), and records it, so the record is exactly the columns the command read: the
 //! missing-row rule (`crate::complete`) decides from it, and reruns the arm over the
@@ -44,11 +44,11 @@ const SLOTS: usize = 8;
 pub(crate) struct Read<'a> {
     /// The values (borrowed from a float64 frame column).
     values: Cow<'a, [f64]>,
-    /// The frame column read whole, which remembers its NaN fact.
+    /// The frame column read whole, which remembers its all-finite fact.
     column: Option<&'a Column>,
-    /// Whether the values hold a NaN, when known without a scan: a window of a frame
+    /// Whether the values hold a missing input, when known without a scan: a window of a frame
     /// column known to hold none holds none.
-    known_nan: Option<bool>,
+    known_missing: Option<bool>,
 }
 
 impl Read<'_> {
@@ -57,17 +57,17 @@ impl Read<'_> {
         &self.values
     }
 
-    /// Whether the values hold a NaN — remembered for a frame column read whole.
-    pub(crate) fn has_nan(&self) -> bool {
+    /// Whether the values hold a missing input — remembered for a frame column read whole.
+    pub(crate) fn has_nonfinite(&self) -> bool {
         match self.column {
-            Some(c) => c.has_nan(),
-            None => self.known_nan.unwrap_or_else(|| self.values.iter().any(|v| v.is_nan())),
+            Some(c) => c.has_nonfinite(),
+            None => self.known_missing.unwrap_or_else(|| volas_compute::missing::any_missing(&self.values)),
         }
     }
 
-    /// Whether the values hold a NaN, if known without a scan.
-    pub(crate) fn known_has_nan(&self) -> Option<bool> {
-        self.column.map_or(self.known_nan, Column::known_has_nan)
+    /// Whether the values hold a missing input, if known without a scan.
+    pub(crate) fn known_has_nonfinite(&self) -> Option<bool> {
+        self.column.map_or(self.known_missing, Column::known_has_nonfinite)
     }
 }
 
@@ -104,14 +104,14 @@ pub(crate) struct Operands<'a> {
     /// Rows to read instead of the frame: each slot's complete rows (the rerun).
     over: bool,
     borrowed: Option<[Option<&'a [f64]>; SLOTS]>,
-    /// Stop at a frame column known to hold a NaN (the arm's result would be thrown
+    /// Stop at a frame column known to hold a missing input (the arm's result would be thrown
     /// away; the record is what matters).
     stop_on_missing: bool,
     /// Hand every input over empty: complete the record without computing.
     probing: Cell<bool>,
-    /// Every input read so far is a frame column known to hold no NaN.
+    /// Every input read so far is a frame column known to hold no missing input.
     clean: Cell<bool>,
-    /// An input read was a frame column known to hold a NaN.
+    /// An input read was a frame column known to hold a missing input.
     missing: Cell<bool>,
     /// A read failed: the record lacks that input.
     failed: Cell<bool>,
@@ -157,7 +157,7 @@ impl<'a> Operands<'a> {
     }
 
     /// As [`rows`](Self::rows) over the rows `[0, end)`, stopping the arm at the first
-    /// frame column known to hold a NaN (see [`missing`](Self::missing)).
+    /// frame column known to hold a missing input (see [`missing`](Self::missing)).
     pub(crate) fn stopping(df: &'a DataFrame, series: &'a [BoundNode], end: usize) -> Self {
         Operands {
             stop_on_missing: true,
@@ -177,7 +177,7 @@ impl<'a> Operands<'a> {
             over: true, ..Operands::window(df, series, start) };
         for (slot, values) in views.into_iter().enumerate() {
             if let Some(values) = values {
-                ops.reads[slot] = OnceCell::from(Read { values, column: None, known_nan: None });
+                ops.reads[slot] = OnceCell::from(Read { values, column: None, known_missing: None });
             }
         }
         ops
@@ -250,7 +250,7 @@ impl<'a> Operands<'a> {
             Some(node) => {
                 let col = execute_node(self.operand_frame(), node)?;
                 require_f64_input(&col)?;
-                Ok(Read { values: Cow::Owned(col.to_f64_vec()), column: None, known_nan: None })
+                Ok(Read { values: Cow::Owned(col.to_f64_vec()), column: None, known_missing: None })
             }
             None => self.column_read(slot, default),
         }
@@ -263,8 +263,8 @@ impl<'a> Operands<'a> {
         self.fit(slot, col.len(), self.df.height())?;
         let values = convert(col, self.start, self.end)?;
         Ok(match self.whole() {
-            true => Read { values, column: Some(col), known_nan: None },
-            false => Read { values, column: None, known_nan: col.known_has_nan().filter(|has| !has) },
+            true => Read { values, column: Some(col), known_missing: None },
+            false => Read { values, column: None, known_missing: col.known_has_nonfinite().filter(|has| !has) },
         })
     }
 
@@ -273,7 +273,7 @@ impl<'a> Operands<'a> {
         if self.probing.get() {
             return Ok(Cow::Borrowed(&[]));
         }
-        match read.known_has_nan() {
+        match read.known_has_nonfinite() {
             Some(false) => {}
             Some(true) if self.stop_on_missing => {
                 self.missing.set(true);
@@ -313,19 +313,19 @@ impl<'a> Operands<'a> {
                         Some(t) => f64::from(u8::from(t)),
                         None => f64::NAN,
                     });
-                    Ok(Read { values: Cow::Owned(truths.collect()), column: None, known_nan: None })
+                    Ok(Read { values: Cow::Owned(truths.collect()), column: None, known_missing: None })
                 })?;
                 self.hand_out(read)?
         };
-        Ok(values.iter().map(|v| (!v.is_nan()).then_some(*v != 0.0)).collect())
+        Ok(values.iter().map(|&v| (!volas_compute::missing::is_missing(v)).then_some(v != 0.0)).collect())
     }
 
-    /// Whether every input read is a frame column known to hold no NaN.
+    /// Whether every input read is a frame column known to hold no missing input.
     pub(crate) fn clean(&self) -> bool {
         self.clean.get()
     }
 
-    /// Whether the arm stopped at a frame column known to hold a NaN.
+    /// Whether the arm stopped at a frame column known to hold a missing input.
     pub(crate) fn missing(&self) -> bool {
         self.missing.get()
     }

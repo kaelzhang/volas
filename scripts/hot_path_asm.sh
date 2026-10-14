@@ -22,6 +22,7 @@
 #   make hot-asm-update           # refresh the baseline
 #
 # INVENTORY (the single source of truth for "what is a hot path"): <crate>|<fn>|<gate>|<why>
+#   gate = `loop32` -> whole SIMD scan loop instructions per 32 input rows.
 #   gate = `max` -> instruction-count must not increase;  `-` -> dump only (e.g. the
 #   indicator `dispatch` switch legitimately grows as commands are added).
 set -euo pipefail
@@ -38,6 +39,8 @@ volas-core|fold_forming_row|max|per-bar: tf-fold combines the forming row in pla
 volas-core|combine_at|max|per-bar: the fold cell-combine (per column, per bar)
 volas-compute|rolling_max|max|kernel: van-Herk rolling max (window extrema)
 volas-compute|rolling_min|max|kernel: van-Herk rolling min
+volas-core|any_missing|loop32|input: f64 SIMD non-finite scan (instructions per 32 rows)
+volas-core|any_missing_f32|loop32|input: f32 SIMD non-finite scan (instructions per 32 rows)
 volas-directive|execute|-|per-eval: directive AST evaluation
 volas-directive|dispatch|-|per-eval: indicator command switch (grows with the command set)
 '
@@ -45,31 +48,45 @@ volas-directive|dispatch|-|per-eval: indicator command switch (grows with the co
 # --- emit release asm once per distinct crate (bash-3.2 portable; no assoc arrays) ---
 emit_asm() {
   local crates
-  crates="$(printf '%s\n' "$INVENTORY" | awk -F'|' 'NF>=4{print $1}' | sort -u)"
+  crates="$(printf '%s\n' "$INVENTORY" | awk -F'|' -v mode="$MODE" 'NF>=4 && (mode=="dump" || $3=="max" || $3=="loop32"){print $1}' | sort -u)"
   for crate in $crates; do
     echo ">> emitting release asm for $crate ..." >&2
     cargo rustc --release -q -p "$crate" -- \
-      --emit asm -C "llvm-args=-x86-asm-syntax=intel" >/dev/null 2>&1 || true
+      --emit asm -C "llvm-args=-x86-asm-syntax=intel"
   done
 }
 asm_of() { ls -t "target/release/deps/${1//-/_}"-*.s 2>/dev/null | head -1; }
 
 # Instruction count of `fn`'s first symbol in `crate`'s asm; also writes its body to
 # target/hot-asm/<fn>.s when $1 == keep.
-count_fn() { # $1 keep|nokeep  $2 crate  $3 fn
+count_fn() { # $1 keep|nokeep  $2 crate  $3 fn  $4 max|loop32|-
   local asm body
   asm="$(asm_of "$2")"
-  [ -z "$asm" ] && { echo 0; return; }
+  [ -z "$asm" ] && { if [ "${4:-max}" = loop32 ]; then echo 999999; else echo 0; fi; return; }
   body="$(awk -v pat="$3" '
     $0 ~ ("[_A-Za-z].*" pat "1[0-9]h[0-9a-f]+E:$") && !f { f = 1 }
     f { print }
     f && /\.cfi_endproc/ { exit }
   ' "$asm")"
   if [ "$1" = keep ]; then mkdir -p "$OUT"; printf '%s\n' "$body" > "$OUT/$3.s"; fi
-  printf '%s\n' "$body" | grep -cE '^[[:space:]]+[a-z]' || true
+  if [ "${4:-max}" = loop32 ]; then
+    # Count the whole back-edge loop, including its length test. Fail closed if
+    # code generation no longer has the reviewed aarch64 absolute-compare loop.
+    printf '%s\n' "$body" | awk -v comparisons="$([ "$3" = any_missing_f32 ] && echo 8 || echo 16)" '
+      /^[[:alnum:]_]+:$/ { label=$1; sub(/:$/, "", label); n=0; simd=0 }
+      /^[[:space:]]+[a-z]/ {
+        n++
+        if ($1 ~ /^facgt/) simd++
+        if ($1 == "cbnz" && $NF == label && simd == comparisons) { print n; found=1; exit }
+      }
+      END { if (!found) print 999999 }
+    '
+  else
+    printf '%s\n' "$body" | grep -cE '^[[:space:]]+[a-z]' || true
+  fi
 }
 
-baseline_count() { sed -n "s/^$1 max \\([0-9]*\\).*/\\1/p" "$BASELINE" 2>/dev/null | head -1; }
+baseline_count() { sed -n "s/^$1 ${2:-max} \\([0-9]*\\).*/\\1/p" "$BASELINE" 2>/dev/null | head -1; }
 
 # --- update: write the baseline (gated functions only) ---
 if [ "$MODE" = update ]; then
@@ -78,9 +95,9 @@ if [ "$MODE" = update ]; then
     echo "# Instruction-level baseline for the broad hot-path functions (arch: $ARCH)."
     echo "# <fn> max <count>: the function's release-asm instruction count must not"
     echo "# increase. Counted from rustc --emit asm. Refresh only after a reviewed change."
-    printf '%s\n' "$INVENTORY" | awk -F'|' 'NF>=4 && $3=="max"' | while IFS='|' read -r crate fn gate why; do
-      n="$(count_fn nokeep "$crate" "$fn")"
-      echo "$fn max ${n:-0}"
+    printf '%s\n' "$INVENTORY" | awk -F'|' 'NF>=4 && ($3=="max" || $3=="loop32")' | while IFS='|' read -r crate fn gate why; do
+      n="$(count_fn nokeep "$crate" "$fn" "$gate")"
+      echo "$fn $gate ${n:-0}"
     done
   } > "$BASELINE"
   echo "hot-asm: baseline written ($ARCH)"
@@ -99,9 +116,9 @@ if [ "$MODE" = check ]; then
   mkdir -p "$OUT"; rm -f "$OUT/.hot_fail"   # the per-regression flag is written here under set -e
   fail=0
   printf '%-20s %8s %8s %8s  %s\n' FUNCTION CURRENT BASELINE DELTA VERDICT
-  printf '%s\n' "$INVENTORY" | awk -F'|' 'NF>=4 && $3=="max"' | while IFS='|' read -r crate fn gate why; do
-    cur="$(count_fn nokeep "$crate" "$fn")"; cur="${cur:-0}"
-    base="$(baseline_count "$fn")"; base="${base:-0}"
+  printf '%s\n' "$INVENTORY" | awk -F'|' 'NF>=4 && ($3=="max" || $3=="loop32")' | while IFS='|' read -r crate fn gate why; do
+    cur="$(count_fn nokeep "$crate" "$fn" "$gate")"; cur="${cur:-0}"
+    base="$(baseline_count "$fn" "$gate")"; base="${base:-0}"
     verdict=ok
     [ "$cur" -gt "$base" ] && { verdict=REGRESSED; echo REGRESSED > "$OUT/.hot_fail"; }
     printf '%-20s %8s %8s %+8d  %s\n' "$fn" "$cur" "$base" "$((cur - base))" "$verdict"
@@ -122,10 +139,10 @@ rm -rf "$OUT"; mkdir -p "$OUT"
 printf '%-20s %-15s %8s %9s  %s\n' FUNCTION CRATE INSTRS VS-BASE HOT-PATH
 printf '%s\n' "$INVENTORY" | awk -F'|' 'NF>=4' | while IFS='|' read -r crate fn gate why; do
   [ -n "$FN_FILTER" ] && [[ "$fn" != *"$FN_FILTER"* ]] && continue
-  n="$(count_fn keep "$crate" "$fn")"; n="${n:-0}"
+  n="$(count_fn keep "$crate" "$fn" "$gate")"; n="${n:-0}"
   delta="-"
-  if [ "$gate" = max ]; then
-    base="$(baseline_count "$fn")"
+  if [ "$gate" != - ]; then
+    base="$(baseline_count "$fn" "$gate")"
     [ -n "$base" ] && delta="$(printf '%+d' "$((n - base))")"
   fi
   printf '%-20s %-15s %8s %9s  %s\n' "$fn" "$crate" "$n" "$delta" "$why"

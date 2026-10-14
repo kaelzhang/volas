@@ -11,7 +11,7 @@ pub(super) fn recursive_pass(df: &volas_core::DataFrame, cmd: &BoundCommand, mar
     super::initial_state::state_of(&ops, cmd.name, cmd.sub, cmd.args);
     if ops.failed() { return None; }
     let reads: Vec<_> = ops.reads().collect();
-    let inputs: Vec<_> = reads.iter().map(|(_, r)| Input::known(r.view(), r.has_nan())).collect();
+    let inputs: Vec<_> = reads.iter().map(|(_, r)| Input::known(r.view(), r.has_nonfinite())).collect();
     let rows = CompleteRows::of(&inputs);
     let mut views: Vec<Option<Cow<'_, [f64]>>> = vec![None; 8];
     for (slot, r) in &reads { views[*slot] = Some(rows.gather(r.view())); }
@@ -22,7 +22,7 @@ pub(super) fn recursive_pass(df: &volas_core::DataFrame, cmd: &BoundCommand, mar
     let pass = compute(&complete, cmd, &counts)?;
     let encoder = super::state::FrameEncoder::new(&ops, cmd, true, Some(&rows)).with_kernel(&pass.after);
     let n = df.height();
-    let before_kernel = if reads.iter().any(|(_, r)| r.view()[n - 1].is_nan()) { &pass.after } else { &pass.before };
+    let before_kernel = if reads.iter().any(|(_, r)| volas_compute::missing::is_missing(r.view()[n - 1])) { &pass.after } else { &pass.before };
     let after = encoder.capture(n, &pass.after)?;
     let before = encoder.capture(n - 1, before_kernel)?;
     let mut points = super::state::FramedPoints::with_capacity(marks.len(), after.len());

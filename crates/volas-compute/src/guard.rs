@@ -7,9 +7,8 @@
 //!
 //! The careful form keeps the running sums over **finite rows only** and counts the
 //! non-finite rows the current window holds. A clean window reads the sums. A window
-//! holding a bad row evaluates the kernel's formula directly on its own rows, so it
-//! takes the IEEE value of exactly that window — a NaN gives NaN, an infinity gives
-//! whatever the formula gives (`±inf` for a sum or mean, NaN for a variance).
+//! holding a bad row emits NaN. Once the row leaves, the clean window reads only
+//! its finite running sums and recovers exactly.
 //!
 //! A kernel writes its loop **once**, generic over [`RowGuard`], and runs it twice at
 //! most: first with [`Unguarded`] — every guard call is a constant, so it compiles to
@@ -117,7 +116,7 @@ pub(crate) enum Window<const K: usize> {
     Partial,
     /// Full and clean: its sums are the running ones.
     Sums([Csum; K]),
-    /// Full and holding a non-finite row: the kernel evaluates it on its own rows.
+    /// Full and holding a non-finite row: the kernel emits NaN.
     Bad,
 }
 
@@ -324,7 +323,7 @@ pub(crate) fn holds_window(row: usize, seen: usize, period: usize) -> bool {
 /// `term`'s values with the default finiteness test: every term finite.
 #[inline]
 pub(crate) fn all_finite<const K: usize>(t: [f64; K]) -> ([f64; K], bool) {
-    (t, t.iter().all(|v| v.is_finite()))
+    (t, !crate::missing::any_of(&t))
 }
 
 /// The careful path of a kernel built on trailing sums of `K` per-row terms (row 0 at
@@ -351,16 +350,16 @@ pub(crate) fn window_sums_pass<const K: usize>(
     }
 }
 
-/// The sums of `term` over `rows`, in row order — a window's own value.
+/// Sum a window in row order, returning missing if any term is missing.
 pub(crate) fn own_sums<const K: usize>(
     rows: std::ops::RangeInclusive<usize>,
     term: impl Fn(usize) -> [f64; K],
 ) -> [f64; K] {
     let mut own = [0.0; K];
     for j in rows {
-        for (o, v) in own.iter_mut().zip(term(j)) {
-            *o += v;
-        }
+        let values = term(j);
+        if crate::missing::any_of(&values) { return [f64::NAN; K]; }
+        for (o, v) in own.iter_mut().zip(values) { *o += v; }
     }
     own
 }
@@ -397,6 +396,15 @@ mod tests {
     use super::*;
 
     #[test]
+    fn own_window_sums_distinguish_missing_inputs_from_generated_overflow() {
+        assert_eq!(own_sums(0..=1, |_| [f64::MAX]), [f64::INFINITY]);
+        assert_eq!(own_sums(0..=1, |j| [j as f64 + 1.0]), [3.0]);
+        for bad in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            assert!(own_sums(0..=1, |j| [if j == 0 { 1.0 } else { bad }])[0].is_nan());
+        }
+    }
+
+    #[test]
     fn unguarded_trusts_every_row() {
         let mut g = Unguarded;
         assert!(g.enter(false) && g.leave(false) && g.clean() && g.counts(false));
@@ -424,8 +432,8 @@ mod tests {
     fn window_sums_confine_a_bad_term_to_its_windows() {
         let got = sums(&[1.0, 2.0, f64::INFINITY, 4.0, 5.0], 2);
         assert_eq!(got[0], (1, 3.0));
-        assert_eq!(got[1], (2, f64::INFINITY));
-        assert_eq!(got[2], (3, f64::INFINITY));
+        assert!(got[1].1.is_nan());
+        assert!(got[2].1.is_nan());
         assert_eq!(got[3], (4, 9.0));
         let got = sums(&[1.0, f64::NAN, 3.0, 4.0], 2);
         assert!(got[0].1.is_nan() && got[1].1.is_nan());

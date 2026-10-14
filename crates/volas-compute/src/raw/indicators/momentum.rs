@@ -223,16 +223,15 @@ fn willr_value(highest: f64, lowest: f64, close: f64) -> f64 {
 /// Balance of Power: `(close − open)/(high − low)` (TA-Lib BOP). A bar with no
 /// range (`high − low < ε`) yields 0. Lookback 0.
 pub fn bop(open: &[f64], high: &[f64], low: &[f64], close: &[f64]) -> Vec<f64> {
-    (0..close.len())
-        .map(|i| {
-            let range = high[i] - low[i];
-            if range < 1e-14 {
-                0.0
-            } else {
-                (close[i] - open[i]) / range
-            }
-        })
-        .collect()
+    (0..close.len()).map(|i| bop_value(open[i], high[i], low[i], close[i])).collect()
+}
+
+/// Balance of power of one bar, shared by batch and scalar evaluation.
+#[inline]
+pub fn bop_value(open: f64, high: f64, low: f64, close: f64) -> f64 {
+    let range = high - low;
+    let value = if range < 1e-14 { 0.0 } else { (close - open) / range };
+    missing::term(&[open, high, low, close], value)
 }
 
 /// Intraday Momentum Index (TA-Lib IMI): `100·upSum/(upSum+downSum)` over `period`,

@@ -102,7 +102,7 @@ impl<'a> Node<'a> {
         // tail after the batch kernel has already computed the whole batch. A
         // zero-reach recursion therefore reads no rows here.
         let rows = (from..end).rev()
-            .filter(|&row| !recursive || ops.reads().all(|(_, r)| !r.view()[row].is_nan()))
+            .filter(|&row| !recursive || ops.reads().all(|(_, r)| !volas_compute::missing::is_missing(r.view()[row])))
             .take(self.reach);
         let mut kept = 0;
         for row in rows {
@@ -130,7 +130,7 @@ impl<'a> Node<'a> {
     }
     fn in_place(&self, ops: &Operands, from: usize, end: usize, recursive: bool) -> bool {
         from >= self.count && (self.count == self.reach || from == self.count) && (!recursive || ops.reads().all(|(_, r)| {
-            r.known_has_nan() == Some(false) || r.view()[from.saturating_sub(self.reach)..end].iter().all(|v| !v.is_nan())
+            r.known_has_nonfinite() == Some(false) || !volas_compute::missing::any_missing(&r.view()[from.saturating_sub(self.reach)..end])
         }))
     }
 }
@@ -172,7 +172,7 @@ impl<'a> FrameEncoder<'a> {
         let mut slots = 0;
         for (slot, read) in ops.reads() { reads[slots] = read.view(); slots += 1; mask |= 1 << slot; }
         let rows = recursive.then(|| rows.map_or_else(|| {
-            let inputs: Vec<_> = ops.reads().map(|(_, r)| volas_compute::missing::Input::known(r.view(), r.has_nan())).collect();
+            let inputs: Vec<_> = ops.reads().map(|(_, r)| volas_compute::missing::Input::known(r.view(), r.has_nonfinite())).collect();
             Cow::Owned(volas_compute::missing::CompleteRows::of(&inputs))
         }, Cow::Borrowed));
         let reach = if recursive { cmd.reach() } else { cmd.reach().max(cmd.spec.lookback_of(cmd.args)) };
@@ -254,7 +254,7 @@ impl<'a> FrameEncoder<'a> {
 /// the operand window, even after an arbitrarily long run of missing rows.
 fn gathered<'a>(df: &'a DataFrame, cmd: &'a BoundCommand, ops: &Operands, prev: &Node, from: usize) -> Option<(Operands<'a>, Vec<usize>)> {
     let recursive = cmd.spec.history(cmd.args) == crate::spec::History::Recursive;
-    let rows: Vec<usize> = (from..ops.len()).filter(|&i| !recursive || ops.reads().all(|(_, r)| !r.view()[i].is_nan())).collect();
+    let rows: Vec<usize> = (from..ops.len()).filter(|&i| !recursive || ops.reads().all(|(_, r)| !volas_compute::missing::is_missing(r.view()[i]))).collect();
     let mut views = vec![None; 8];
     for (slot, r) in ops.reads() {
         let mut values = prev.tail(slot)?.to_vec();
@@ -344,7 +344,7 @@ pub(super) fn planned_step(
         let default = cmd.spec.series.get(slot)?;
         buf[..count].copy_from_slice(prev.tail(slot)?);
         buf[count] = read(slot, default, row)?;
-        missing |= buf[count].is_nan();
+        missing |= volas_compute::missing::is_missing(buf[count]);
         k += 1;
     }
     if recursive && missing { scratch.fill(0.0); return Some(f64::NAN); }
@@ -405,7 +405,7 @@ mod framing_tests {
             let node = Node::read(&words).unwrap();
             assert_eq!(node.kernel, kernel);
             let tail = node.tail(0).unwrap();
-            assert!(tail[0].is_nan());
+            assert!(volas_compute::missing::is_missing(tail[0]));
             assert_eq!(tail[1], 3.0);
             assert!(words[words.len() - node.stride..].iter().all(|&v| v == 0.0));
         }

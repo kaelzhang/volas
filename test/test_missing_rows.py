@@ -5,7 +5,7 @@ SAR families, and a TA-Lib MA-type argument that selects a recursive average) is
 outputs NaN, and the recursion continues from the last complete row as if the row
 were not there. So the output equals the command run on the series with those rows
 deleted, NaN re-inserted at the deleted positions — bit-exact, since both run the
-same kernel over the same rows. An infinity is a value, not a missing row.
+same kernel over the same rows. Both infinity signs are missing rows like NaN.
 
 Every incremental path (the plain append resume, the tf forming row, the period
 rollover) must agree with a from-scratch full recompute, row for row.
@@ -172,16 +172,20 @@ def test_recursion_continues_from_the_last_complete_row():
     assert np.isfinite(got[9:]).all()
 
 
-def test_an_infinity_is_a_value_not_a_missing_row():
+@pytest.mark.parametrize('bad', [np.inf, -np.inf])
+def test_an_infinity_is_missing_and_recursion_continues(bad):
     close = np.arange(10.0, 30.0)
-    close[8] = np.inf
+    close[8] = bad
     got = np.asarray(DataFrame({"close": close}).exec("ema:3", dtype='float64'), float)
-    assert got[8] == np.inf
-    # it is kept, not skipped: an RSI over it is NaN from there on, on every path
+    close[8] = np.nan
+    assert_exact(got, DataFrame({'close': close}).exec('ema:3'))
+    assert np.isnan(got[8]) and np.isfinite(got[9:]).all()
     close = BASE["close"].copy()
-    close[100] = np.inf
+    close[100] = bad
     got = np.asarray(DataFrame({"close": close}).exec("stochrsi.d", dtype='float64'), float)
-    assert np.isfinite(got[50:100]).all() and np.isnan(got[101:]).all()
+    close[100] = np.nan
+    assert_exact(got, DataFrame({'close': close}).exec('stochrsi.d'))
+    assert np.isfinite(got[50:100]).all() and np.isnan(got[100]) and np.isfinite(got[101:]).all()
 
 
 def test_an_integer_column_na_is_a_missing_row():

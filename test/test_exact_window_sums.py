@@ -201,14 +201,10 @@ def _multi_magnitude(n, seed):
     return x
 
 
-def _ieee_or_fsum(values):
-    """A window's sum: NaN when it holds a NaN or both infinities, the infinity when it
-    holds one, else the correctly rounded exact sum (`math.fsum`)."""
-    if any(math.isnan(v) for v in values):
+def _missing_or_fsum(values):
+    """NaN for a window holding a non-finite input, otherwise `math.fsum`."""
+    if any(not math.isfinite(v) for v in values):
         return math.nan
-    infs = {v for v in values if math.isinf(v)}
-    if infs:
-        return math.nan if len(infs) == 2 else infs.pop()
     return math.fsum(values)
 
 
@@ -216,7 +212,7 @@ def _ieee_or_fsum(values):
 @pytest.mark.parametrize("w", [1, 2, 3, 5, 8])
 def test_a_window_sum_is_fsum_on_every_path(w, seed):
     x = _multi_magnitude(260, seed)
-    want = np.array([math.nan] * (w - 1) + [_ieee_or_fsum(x[i - w + 1:i + 1]) for i in range(w - 1, len(x))])
+    want = np.array([math.nan] * (w - 1) + [_missing_or_fsum(x[i - w + 1:i + 1]) for i in range(w - 1, len(x))])
     d = f"sum:{w}"
     full = np.asarray(DataFrame({"close": x}).exec(d), dtype=float)
     _bits(full, want, f"{d} full")
@@ -237,8 +233,8 @@ def test_a_window_sum_is_fsum_on_every_path(w, seed):
 
 
 def _present_sum(values):
-    present = [v for v in values if not math.isnan(v)]
-    return _ieee_or_fsum(present) if present else math.nan
+    present = [v for v in values if math.isfinite(v)]
+    return _missing_or_fsum(present) if present else math.nan
 
 
 @pytest.mark.parametrize("seed", [1, 2, 3])
@@ -250,7 +246,7 @@ def test_the_pandas_window_sums_are_fsum(seed):
         _bits(s.rolling(w, min_periods=1).sum(), want, f"rolling({w}).sum")
         got = np.asarray(s.rolling(w, min_periods=1).mean(), dtype=float)
         for i in range(len(x)):
-            win = [v for v in x[max(0, i - w + 1):i + 1] if not math.isnan(v)]
+            win = [v for v in x[max(0, i - w + 1):i + 1] if math.isfinite(v)]
             if win and all(math.isfinite(v) for v in win):
                 exact = float(sum(Fraction(v) for v in win) / len(win))
                 assert abs(got[i] - exact) <= np.spacing(abs(exact)), (w, i)

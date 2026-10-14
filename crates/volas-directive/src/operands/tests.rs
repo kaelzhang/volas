@@ -79,15 +79,15 @@ fn a_window_reads_only_its_rows() {
     assert_eq!(&*ops.f64(1, "n").unwrap(), &[3.0, 4.0]);
     assert_eq!(&*ops.f64(2, "close").unwrap(), &[3.0, 4.0]);
     assert_eq!(&*ops.f64(0, "close").unwrap(), &[6.0, 8.0]);
-    assert!(ops.reads().all(|(_, r)| !r.has_nan()));
+    assert!(ops.reads().all(|(_, r)| !r.has_nonfinite()));
     // a window of a column known to hold a NaN does not know whether it holds one
     let gap = DataFrame::new(vec!["close".into()], vec![Column::f64(vec![f64::NAN, 1.0, 2.0])], None).unwrap();
-    assert!(gap.column("close").unwrap().has_nan());
+    assert!(gap.column("close").unwrap().has_nonfinite());
     let ops = Operands::window(&gap, &[], 1);
     assert_eq!(&*ops.f64(0, "close").unwrap(), &[1.0, 2.0]);
     let (_, read) = ops.reads().next().unwrap();
-    assert_eq!(read.known_has_nan(), None);
-    assert!(!read.has_nan());
+    assert_eq!(read.known_has_nonfinite(), None);
+    assert!(!read.has_nonfinite());
     // an int64 past 2^53 inside the window is rejected; outside it, not read
     let big = DataFrame::new(vec!["v".into()], vec![Column::i64(vec![1 << 60, 1, 2])], None).unwrap();
     assert!(Operands::window(&big, &[], 0).f64(0, "v").is_err());

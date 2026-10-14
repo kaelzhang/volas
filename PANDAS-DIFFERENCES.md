@@ -723,7 +723,9 @@ The window API is pandas-aligned and differential-tested method by method
 
 - **`count()` / `nunique()` return `int64`** with native NA in the warm-up
   region. pandas returns `float64` (NaN-padded) because numpy ints cannot hold
-  a missing value; volas ints can, so a count is an integer.
+  a missing value; volas ints can, so a count is an integer. volas counts only
+  finite inputs; pandas 3.0.3's `count()` also counts infinities because it builds
+  the non-NA mask before preparing window values.
 - **`kurt()` is computed with two-pass central moments.** pandas accumulates
   raw power sums (`Σx … Σx⁴`), which loses ~8 significant digits when a
   window's mean dwarfs its spread (a price series at 42.60 ± 0.1 is enough to
@@ -738,20 +740,7 @@ The window API is pandas-aligned and differential-tested method by method
   last value. Where the centered window is clipped at the end of the data, pandas
   3.0.3 still counts rows that have left the window (it can emit a rank above the
   window's own `count()`); volas ranks within the clipped window.
-- **`sum()` / `mean()` over a window holding an infinity give the infinity.** A
-  window holding `+inf` sums to `+inf` (`-inf` likewise, and both signs to NaN), and
-  the next window without it is exact again. pandas 3.0.3 converts infinities to
-  missing before window aggregation and computes over the remaining finite values.
-- **Rolling / expanding `max`, `min`, `median`, `quantile`, `rank`, `nunique`,
-  `first` and `last` treat infinities as present values.** They participate in
-  ordering, distinct counts and `min_periods`; pandas 3.0.3 excludes them.
-  For `[1, +inf]` with `rolling(2, min_periods=1)`, volas's last `max` and
-  `median` are `+inf` and its last `rank` is 2; pandas returns 1, 1 and NaN.
-  Interpolation follows IEEE arithmetic: a median involving `-inf` may be NaN.
-- **EWM excludes both infinity signs**, like pandas 3.0.3. They are gaps governed
-  by `ignore_na` and do not count toward `min_periods`, so the recursive state
-  remains usable. This applies to `mean`, `sum`, `var`, `std`, `cov` and `corr`.
-  EWM correlation divides by standard deviations separately to avoid overflow
+- **EWM correlation divides by standard deviations separately** to avoid overflow
   or underflow in their product; equal variances use `cov / variance`, preserving
   exact self-correlation where the finite covariance itself is representable.
 
@@ -857,3 +846,10 @@ rule makes `bool()` of a one-element Series holding a missing value raise
 `TypeError` (like `bool(pd.NA)`), and makes `any` / `all` skip missing cells on both
 the Series and the DataFrame; a DataFrame `any` / `all` covers the numeric and bool
 columns only, as `Series.any` raises for a `str` / `datetime` column.
+
+Window computations treat NaN and ±inf as missing inputs. One intentional pandas
+3.0.3 exception is `rolling.count()` / `expanding.count()`: pandas builds a
+`notna()` mask before preparing numeric window values and therefore counts raw
+infinities; volas excludes them. pandas `sem()` inherits that raw-infinity
+count in its `std / sqrt(count)` denominator. Compare `count()` and `sem()`
+against pandas after replacing ±inf with NaN. Element-wise column arithmetic and comparisons keep IEEE behavior.
