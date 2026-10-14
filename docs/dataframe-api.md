@@ -73,7 +73,7 @@ Which gets the 2-period simple moving average on column `"close"`.
 
   The constructor does **not** accept a `pandas.DataFrame` or an Arrow object — bridge
   those with the dedicated [`DataFrame.from_pandas`](#dataframefrom_pandaspdf---dataframe) /
-  [`DataFrame.from_arrow`](#dataframefrom_arrowdata-copytrue---dataframe) instead. To attach a
+  [`DataFrame.from_arrow`](#dataframefrom_arrowdata-copyfalse---dataframe) instead. To attach a
   [`DatetimeIndex`](https://pandas.pydata.org/docs/reference/api/pandas.DatetimeIndex.html),
   parse a column with `to_datetime`, promote it with `set_index`, then tag a zone with
   `tz_localize` / `tz_convert`. See [Timezones](cumulation.md#timezones).
@@ -302,17 +302,17 @@ shares the index's name is kept as a column. See [pandas interop](interop.md#pan
 df = DataFrame.from_pandas(pandas_df)   # pandas.DataFrame -> volas DataFrame
 ```
 
-### DataFrame.from_arrow(data, copy=True) -> DataFrame
+### DataFrame.from_arrow(data, copy=False) -> DataFrame
 
 Builds a `DataFrame` from the Arrow **C-Stream** protocol (`__arrow_c_stream__`):
 `pyarrow.Table` / `RecordBatch` / `RecordBatchReader`, polars `DataFrame`, etc. Imports
-form owned snapshots by default, including multi-chunk sources, with a fresh
+borrow matching buffers by default (`copy=False`), with a fresh
 `RangeIndex`. Producer buffers are validated before reading: a malformed array (buffer sizes, offsets out of
 range or not monotonic, a present string that is not valid UTF-8) raises `ValueError`.
 A null string slot's bytes are unspecified in Arrow and are never read.
 
 - **data** the Arrow source — any object implementing `__arrow_c_stream__`.
-- **copy** keyword-only `bool = True`. `False` borrows matching numeric and dense ns-datetime buffers. The producer and every alias must never write borrowed memory again while any imported object or view survives. Other layouts still copy.
+- **copy** keyword-only `bool = False`. `True` takes an owned snapshot, including multi-chunk sources. `False` borrows matching numeric and dense ns-datetime buffers. Arrow data is immutable. The producer and every alias must never write borrowed memory again while any imported object or view survives. Other layouts still copy.
 
 ```py
 df = DataFrame.from_arrow(pa_table)        # pyarrow.Table     -> DataFrame

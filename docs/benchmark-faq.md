@@ -40,6 +40,13 @@ The geometric-mean ratio limit is 1.10; the individual-item limit is 1.60.
 Items below the 5 µs floor are summed by section **within each pair**, then gated
 using the median paired ratio with the same limits.
 
+The API section includes DataFrame and Series Arrow import / export and DLPack
+import / export at the API fixture length and 1,000,000 rows. Arrow frames carry
+five dense float64 columns. Setup is outside timing; exports use owned dense
+inputs. DLPack import uses the supported `np.from_dlpack` → frame-constructor
+bridge (NumPy imports copy); export measures `np.from_dlpack(series)`. pandas /
+polars comparisons appear where they expose the operation.
+
 The full gate also runs the original complexity and cost-ratio checks on release
 builds. Comparison order alternates across the six pairs, and each original
 strict bound applies to the median normalized cost ratio. `make test` still

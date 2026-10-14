@@ -111,6 +111,8 @@ def parse(data: dict) -> dict:
             category = 'append'
         params = b.get('params') or {}
         indicator = params.get('indicator') or params.get('op') or name
+        if name.startswith('test_api_interop'):
+            indicator = f"{indicator} ({b['extra_info']['length']:,} rows)"
         if category == 'coverage_extended':
             indicator = (indicator, params.get('length'))
         candidate = params.get('candidate', name)

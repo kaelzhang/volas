@@ -259,7 +259,12 @@ class DatetimeAccessor:
 @final
 class Series:
     @staticmethod
-    def from_arrow(data: Any, name: str | None = ..., *, copy: bool = ...) -> Series: ...
+    def from_arrow(data: Any, name: str | None = ..., *, copy: bool = False) -> Series:
+        """Borrow immutable matching Arrow buffers; copy=True takes an owned snapshot.
+
+        The producer and every alias must never write borrowed memory while objects or views survive.
+        """
+        ...
     @property
     def name(self) -> str | None: ...
     @property
@@ -480,7 +485,12 @@ class DataFrame:
     @staticmethod
     def from_pandas(pdf: Any) -> DataFrame: ...
     @staticmethod
-    def from_arrow(data: Any, *, copy: bool = ...) -> DataFrame: ...
+    def from_arrow(data: Any, *, copy: bool = False) -> DataFrame:
+        """Borrow immutable matching Arrow buffers; copy=True takes an owned snapshot.
+
+        The producer and every alias must never write borrowed memory while objects or views survive.
+        """
+        ...
     @property
     def tz(self) -> str | None: ...
     def tz_localize(self, tz: str) -> DataFrame: ...

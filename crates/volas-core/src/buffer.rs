@@ -16,7 +16,7 @@
 //! writes ([`Buffer::append`], [`Buffer::set`]) keep it current in O(1) instead.
 //!
 //! The fact is only ever remembered for bytes volas owns. A zero-copy view of foreign
-//! memory is an explicit opt-in: the producer and every alias must never write it
+//! memory requires immutability: the producer and every alias must never write it
 //! again for the guard lifetime. Borrowed bytes are conservatively scanned on every
 //! query and never remembered; its first write copies it into an
 //! owned buffer, which may then remember. What volas lends out zero-copy (DLPack,

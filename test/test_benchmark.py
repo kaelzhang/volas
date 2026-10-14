@@ -51,6 +51,7 @@ from stock_pandas import StockDataFrame
 from volas import DataFrame as VolasDataFrame
 
 from . import bench_long
+from .bench_interop import OPS as INTEROP_OPS
 from .bench_first_cache import FIRST_CACHE_IDS, FIRST_CACHE_ROUNDS, build as build_first_cache
 from .bench_pandas import PANDAS_CALC
 from .bench_tf_live import TF_LIVE_INDICATORS, TF_LIVE_PHASES, build as build_tf_live
@@ -948,4 +949,21 @@ def test_api(benchmark, indicator, candidate):
     fn = API_REG.get(candidate, {}).get(indicator)
     if fn is None:
         pytest.skip(f'{candidate} has no {indicator}')
+    benchmark(fn)
+
+
+@pytest.fixture(scope='module', params=[N, 1_000_000], ids=['api-length', 'million'])
+def interop_registry(request):
+    from .bench_interop import build
+    return request.param, build(request.param, pl)
+
+
+@pytest.mark.parametrize('candidate', API_CANDIDATES)
+@pytest.mark.parametrize('indicator', INTEROP_OPS)
+def test_api_interop(benchmark, indicator, candidate, interop_registry):
+    length, registry = interop_registry
+    fn = registry.get(candidate, {}).get(indicator)
+    if fn is None:
+        pytest.skip(f'{candidate} has no {indicator}')
+    benchmark.extra_info['length'] = length
     benchmark(fn)

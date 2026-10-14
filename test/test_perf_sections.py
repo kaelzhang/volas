@@ -19,7 +19,7 @@ def verdict(tmp_path, base, head):
 
 
 @pytest.mark.parametrize('section', ['coverage', 'coverage_extended', 'coverage_after_append',
-                                    'first_cache', 'append', 'windowed_stream', 'calc', 'api', 'tf_live'])
+                                    'first_cache', 'append', 'windowed_stream', 'calc', 'api', 'api_interop', 'tf_live'])
 def test_every_volas_section_detects_slowdown(tmp_path, section):
     base = {'benchmarks': [row(section)]}
     head = {'benchmarks': [row(section, 30e-6)]}

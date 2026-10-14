@@ -211,12 +211,11 @@ labels and values and start a new computation series. See
 [derived frames](docs/dataframe-api.md#derived-frames). NumPy bool masks on either
 indexing axis respect positive and negative strides.
 
-Arrow imports take an owned snapshot by default. For immutable producers,
-`DataFrame.from_arrow(table, copy=False)` and `Series.from_arrow(array, copy=False)`
-retain the zero-copy import option: the producer and every alias must never write
-borrowed memory again while imported objects or views survive. Zero-copy exports
-are unchanged. **Breaking change:** producer writes after a default import no longer
-change volas data. See the [interop contract](docs/interop.md#arrow--dlpack-interop-zero-copy).
+Arrow imports borrow matching buffers by default (`copy=False`). Arrow data is
+immutable: the producer and every alias must never write borrowed memory while
+imported objects or views survive. `copy=True` takes an owned snapshot; conversion
+layouts still copy. Direct NumPy imports copy. See the
+[interop contract](docs/interop.md#arrow--dlpack-interop-zero-copy).
 
 ## Built-in Indicators
 

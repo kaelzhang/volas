@@ -299,11 +299,11 @@ impl PyDataFrame {
     }
 
     /// Build a DataFrame from any object exposing the Arrow stream protocol
-    /// (`__arrow_c_stream__`) — a pyarrow `Table`, a polars `DataFrame`, … — an owned snapshot by default.
-    /// `copy=False` borrows matching buffers; the producer and every alias must never write
+    /// (`__arrow_c_stream__`) — a pyarrow `Table`, a polars `DataFrame`, … — matching buffers borrowed by default. Arrow data is immutable.
+    /// `copy=False` borrows matching buffers; `copy=True` takes an owned snapshot; the producer and every alias must never write
     /// borrowed memory again while imported objects or views survive. The result carries a fresh `RangeIndex`.
     #[staticmethod]
-    #[pyo3(signature = (data, *, copy = true))]
+    #[pyo3(signature = (data, *, copy = volas_arrow::DEFAULT_IMPORT_COPY), text_signature = "(data, *, copy=False)")]
     pub(crate) fn from_arrow(data: &Bound<'_, PyAny>, copy: bool) -> PyResult<PyDataFrame> {
         let (names, cols, height) = crate::arrow::frame_from_arrow_obj(data, copy)?;
         let frame = DataFrame::new(names, cols, Some(Index::range(height))).map_err(pyerr)?;

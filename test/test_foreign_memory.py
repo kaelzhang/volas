@@ -1,4 +1,4 @@
-"""Default foreign imports freeze bytes; exports lend read-only views.
+"""Explicit Arrow snapshots freeze bytes; exports lend read-only views.
 
 Explicit immutable borrowing never permits writes through producer aliases.
 """
@@ -31,7 +31,7 @@ def _borrowed_arrow(values):
 @pytest.mark.parametrize("directive", ["ema:5", "rsi:5", "macd", "ht_trendline"])
 def test_an_arrow_source_write_cannot_change_the_import_snapshot(directive):
     source = CLOSE.copy()
-    df = DataFrame.from_arrow(pa.table({"close": _borrowed_arrow(source)}))
+    df = DataFrame.from_arrow(pa.table({"close": _borrowed_arrow(source)}), copy=True)
     clean = np.asarray(df.exec(directive, dtype='float64'), float)  # the frame has now looked at its bytes
     _bit_exact(clean, DataFrame({"close": CLOSE.copy()}).exec(directive))
     source[100] = np.nan  # written behind the frame's back
@@ -42,7 +42,7 @@ def test_an_arrow_source_write_cannot_change_the_import_snapshot(directive):
 
 def test_an_imported_series_keeps_its_snapshot():
     source = CLOSE.copy()
-    s = Series.from_arrow(_borrowed_arrow(source), name="close")
+    s = Series.from_arrow(_borrowed_arrow(source), name="close", copy=True)
     df = DataFrame({"close": s})
     df.exec("ema:5")
     source[50] = np.nan

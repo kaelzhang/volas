@@ -223,11 +223,7 @@ df['ma:2']
     `bool`、`datetime64` 或 `string`）；NumPy **masked array** 中被屏蔽的单元格成为 `volas.NA`；
   - 另一个 volas **`DataFrame`**，此时会被拷贝（如同 `pandas.DataFrame(df)`）。
 
-  构造函数**不接受** `pandas.DataFrame` 或 Arrow 对象——请改用专门的
-  [`DataFrame.from_pandas`](#dataframefrom_pandaspdf---dataframe) /
-  [`DataFrame.from_arrow`](#dataframefrom_arrowdata-copytrue---dataframe) 桥接。如果要附加
-  [`DatetimeIndex`](https://pandas.pydata.org/docs/reference/api/pandas.DatetimeIndex.html)，用 `to_datetime` 解析某一列，用 `set_index` 把它提升为索引，再用 `tz_localize` /
-  `tz_convert` 打上时区标记。参见[时区](#时区)。
+  构造函数**不接受** `pandas.DataFrame` 或 Arrow 对象——请改用专门的 [`DataFrame.from_pandas`](#dataframefrom_pandaspdf---dataframe) / [`DataFrame.from_arrow`](#dataframefrom_arrowdata-copyfalse---dataframe) 桥接。如果要附加 [`DatetimeIndex`](https://pandas.pydata.org/docs/reference/api/pandas.DatetimeIndex.html)，用 `to_datetime` 解析某一列，用 `set_index` 把它提升为索引，再用 `tz_localize` / `tz_convert` 打上时区标记。参见[时区](#时区)。
 - **columns** `Optional[list[str]] = None` 选择并排列要保留的列，等价于
   `df[[...]]` 的投影。名字不存在会抛 `KeyError`；空 list 或重复名字会被拒绝，缺失列绝不会被静默填充。
 - **time_frame** `Optional[str | TimeFrame] = None` 若设置，则把它变成一个在该 bar 间隔上**支持 tf 累积**的 DataFrame：给定的各行是该 frame 下的 bar，每行以所在周期的**起点**为标签，最后一行是**正在形成**的 bar——之后 `append` 进来、落在它所在周期内的更细 bar 会折叠进这一行（这一行不能已经包含那根 bar）。
@@ -336,9 +332,9 @@ for bar in feed:
 df = DataFrame.from_pandas(pandas_df)   # pandas.DataFrame -> volas DataFrame
 ```
 
-### DataFrame.from_arrow(data, copy=True) -> DataFrame
+### DataFrame.from_arrow(data, copy=False) -> DataFrame
 
-**volas 独有的静态方法**——从任何实现 Arrow **C-Stream** 协议（`__arrow_c_stream__`）的对象构造 `DataFrame`：`pyarrow.Table` / `RecordBatch` / `RecordBatchReader`、polars `DataFrame` 等。默认复制为 owned 快照，多 chunk 来源直接写入最终缓冲区，结果带一个全新的 `RangeIndex`。显式 `copy=False` 可借用匹配的数值与密集 ns-datetime 缓冲区；在任何导入对象或视图存活期间，生产方及所有别名都不得再写借用内存。需转换的布局仍会复制。生产方的缓冲区在读取前先校验：格式错误的数组（缓冲区大小不符、offsets 越界或非单调、非空字符串不是合法 UTF-8）抛出 `ValueError`。Arrow 中 null 字符串槽位的字节未作规定，volas 从不读取它们。
+**volas 独有的静态方法**——从任何实现 Arrow **C-Stream** 协议（`__arrow_c_stream__`）的对象构造 `DataFrame`：`pyarrow.Table` / `RecordBatch` / `RecordBatchReader`、polars `DataFrame` 等。默认 `copy=False` 借用匹配的数值与密集 ns-datetime 缓冲区，结果带一个全新的 `RangeIndex`；`copy=True` 创建 owned 快照，多 chunk 来源直接写入最终缓冲区。Arrow 数据不可变；在任何导入对象或视图存活期间，生产方及所有别名都不得再写借用内存。需转换的布局仍会复制。生产方的缓冲区在读取前先校验：格式错误的数组（缓冲区大小不符、offsets 越界或非单调、非空字符串不是合法 UTF-8）抛出 `ValueError`。Arrow 中 null 字符串槽位的字节未作规定，volas 从不读取它们。
 
 - **data** Arrow 来源——任何实现 `__arrow_c_stream__` 的对象。
 
@@ -621,9 +617,9 @@ t.dt.dayofweek             # 周一=0 .. 周日=6
 t.dt.floor('15min')        # 对齐到 15 分钟 bar
 ```
 
-### Series.from_arrow(data, name=None, copy=True) -> Series
+### Series.from_arrow(data, name=None, copy=False) -> Series
 
-**volas 独有的静态方法**——从任何实现 Arrow **C-Data** 数组协议（`__arrow_c_array__`）的对象构造 `Series`：`pyarrow.Array`、polars `Series` 等。默认复制为 owned 快照，结果带一个全新的 `RangeIndex`。显式 `copy=False` 可借用匹配的数值与密集 ns-datetime 缓冲区；在任何导入对象或视图存活期间，生产方及所有别名都不得再写借用内存。需转换的布局仍会复制。格式错误的数组抛出 `ValueError`，与 [`DataFrame.from_arrow`](#dataframefrom_arrowdata-copytrue---dataframe) 相同。
+**volas 独有的静态方法**——从任何实现 Arrow **C-Data** 数组协议（`__arrow_c_array__`）的对象构造 `Series`：`pyarrow.Array`、polars `Series` 等。默认 `copy=False` 借用匹配的数值与密集 ns-datetime 缓冲区，结果带一个全新的 `RangeIndex`；`copy=True` 创建 owned 快照。Arrow 数据不可变；在任何导入对象或视图存活期间，生产方及所有别名都不得再写借用内存。需转换的布局仍会复制。格式错误的数组抛出 `ValueError`，与 [`DataFrame.from_arrow`](#dataframefrom_arrowdata-copyfalse---dataframe) 相同。
 
 - **data** Arrow 来源——任何实现 `__arrow_c_array__` 的对象。
 - **name?** `str | None = None` 结果 `Series` 的名字。
@@ -1237,10 +1233,7 @@ DataFrame.from_arrow(pa_table)              # Arrow table -> DataFrame
 np.from_dlpack(df['close'])        # 零拷贝 ndarray 视图
 ```
 
-高层入口——[`df.to_arrow`](#dfto_arrow---pyarrowtable) /
-[`DataFrame.from_arrow`](#dataframefrom_arrowdata-copytrue---dataframe)、
-[`series.to_arrow`](#seriesto_arrow---pyarrowarray) /
-[`Series.from_arrow`](#seriesfrom_arrowdata-namenone-copytrue---series)——在 Usage 下有说明。它们建立在以下**标准协议方法**之上，Arrow / 数组消费方会自动调用它们（所以你很少需要自己调用）：
+高层入口——[`df.to_arrow`](#dfto_arrow---pyarrowtable) /[`DataFrame.from_arrow`](#dataframefrom_arrowdata-copyfalse---dataframe)、[`series.to_arrow`](#seriesto_arrow---pyarrowarray) /[`Series.from_arrow`](#seriesfrom_arrowdata-namenone-copyfalse---series)——在 Usage 下有说明。它们建立在以下**标准协议方法**之上，Arrow / 数组消费方会自动调用它们（所以你很少需要自己调用）：
 
 - **`Series.__arrow_c_array__`**——Arrow C-Data 数组协议；返回 `(schema, array)`
   PyCapsule 二元组，让 `pa.array(s)` / `pl.Series(s)` 读取一列。
@@ -1251,7 +1244,7 @@ np.from_dlpack(df['close'])        # 零拷贝 ndarray 视图
   `np.from_dlpack(s)` / `torch.from_dlpack(s)` 借用一个稠密的数值 / bool 列。借来的视图是**只读**的（带版本号 DLPack 的标志位），写穿它无法绕过写时复制而改坏帧；无法接收该标志位的 1.0 之前的旧消费方，则改为得到一份独立副本。
   `np.from_dlpack(s, copy=True)` 返回一份独立的**可写**副本。非 CPU 设备或 stream 会被拒绝（`BufferError`）；含缺失值的 int/bool 列（DLPack 无空值掩码）或 str/datetime 列会抛错。
 
-**导入快照契约（破坏性变更）。**Arrow 默认导入现在复制数据；导入完成后的生产方写入不再改变 volas 的原列、缓存、续算状态或检查点。显式 `Series.from_arrow(array, copy=False)`／`DataFrame.from_arrow(table, copy=False)` 保留匹配数值与密集 ns-datetime 的借用能力，但生产方及所有别名在任何导入对象或视图存活期间都不得再写借用内存；导入期间也不得并发写输入。**零拷贝导出不变**：原生数值、ns-datetime 和字符串数据仍共享只读缓冲区。其余重打包有：
+**Arrow 导入契约。**Arrow 数据不可变。`Series.from_arrow(array)`／`DataFrame.from_arrow(table)` 默认 `copy=False`，借用匹配数值与密集 ns-datetime 的缓冲区；生产方及所有别名在任何导入对象或视图存活期间都不得写借用内存。`copy=True` 创建 owned 快照，隔离后续生产方写入对原列、缓存、续算状态或检查点的影响；导入期间不得并发写输入。需转换的布局和多 chunk 列仍可能复制。直接 NumPy 导入保持复制。**零拷贝导出契约**：原生数值、ns-datetime 和字符串数据共享只读缓冲区。其余重打包有：
 
 - **导入时**的每个字符串列（`string` / `large_string`，无论是否切片）——拷贝进 volas 自有缓冲区并在拷贝上校验（offsets 在范围内且单调、每个非空值是合法 UTF-8；null 槽位未作规定的字节被丢弃），因此生产方在导入之后改写自己的缓冲区不会影响 volas 列；
 - **`bool`**——volas 每个值存一个字节，Arrow 存一个*位*；
