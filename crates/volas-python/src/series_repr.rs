@@ -14,7 +14,7 @@ impl PySeries {
     /// `Name: <name>, dtype: <dtype>` footer), truncating to 5 head + 5 tail rows
     /// past 60 (`display.max_rows` / `min_rows`). `str` and `repr` are identical.
     pub(crate) fn __repr__(&self) -> String {
-        let truncate = if self.inner.len() > 60 { Some(5) } else { None };
+        let truncate = if self.inner.len() > 60 { Some((5, 5)) } else { None };
         render_series(&self.inner, NA_REPR, None, truncate, true)
     }
 
@@ -32,10 +32,7 @@ impl PySeries {
         max_rows: Option<usize>,
     ) -> PyResult<String> {
         let ff = parse_ff(float_format)?;
-        let truncate = match max_rows {
-            Some(m) if self.inner.len() > m => Some((m / 2).max(1)),
-            _ => None,
-        };
+        let truncate = crate::format::row_truncation(self.inner.len(), max_rows, None);
         Ok(render_series(&self.inner, na_rep, ff, truncate, false))
     }
 }

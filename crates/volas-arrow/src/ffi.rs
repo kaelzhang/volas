@@ -10,7 +10,7 @@ use arrow_data::ArrayData;
 use arrow_schema::{ArrowError, DataType};
 use volas_core::Column;
 
-use crate::{column_from_arrow, column_to_arrow};
+use crate::{column_from_arrow_with_copy, column_to_arrow};
 
 /// A column as the two owned Arrow C-Data structs (array + schema). The data buffer is
 /// shared (no copy) — the structs carry a release callback that drops the keep-alive.
@@ -24,7 +24,7 @@ pub fn column_to_c_schema(col: &Column) -> Result<FFI_ArrowSchema, ArrowError> {
 }
 
 /// A column from an Arrow C-Data pair: consumes `array`, reads `schema`. The data
-/// buffer is borrowed through (no copy) for the dtypes whose layouts match.
+/// buffer is copied into an owned snapshot.
 ///
 /// # Safety
 /// `array` / `schema` must be a valid, not-yet-released Arrow C-Data pair (the
@@ -33,9 +33,22 @@ pub unsafe fn column_from_c_data(
     array: FFI_ArrowArray,
     schema: &FFI_ArrowSchema,
 ) -> Result<Column, ArrowError> {
+    column_from_c_data_with_copy(array, schema, true)
+}
+
+/// Import a C-Data pair with an explicit ownership policy.
+///
+/// # Safety
+/// The pair must be valid and live. For `copy=false`, the producer and every alias
+/// must never write borrowed memory again while imported columns or views survive.
+pub unsafe fn column_from_c_data_with_copy(
+    array: FFI_ArrowArray,
+    schema: &FFI_ArrowSchema,
+    copy: bool,
+) -> Result<Column, ArrowError> {
     let data = from_ffi(array, schema)?;
     validate_imported(&data)?;
-    column_from_arrow(&make_array(data))
+    column_from_arrow_with_copy(&make_array(data), copy)
 }
 
 /// Check foreign C-Data before any of it is read: arrow-rs imports it unchecked, but a
@@ -93,6 +106,19 @@ pub unsafe fn column_from_c_capsules(
     array: *mut c_void,
     schema: *const c_void,
 ) -> Result<Column, ArrowError> {
+    column_from_c_capsules_with_copy(array, schema, true)
+}
+
+/// Consume live capsule payloads with an explicit ownership policy.
+///
+/// # Safety
+/// Payloads must satisfy `column_from_c_capsules`'s safety condition. For
+/// `copy=false`, all producer aliases must remain immutable for the borrow lifetime.
+pub unsafe fn column_from_c_capsules_with_copy(
+    array: *mut c_void,
+    schema: *const c_void,
+    copy: bool,
+) -> Result<Column, ArrowError> {
     // A capsule pair may already have been consumed (by volas or another library):
     // a released struct's pointers dangle, so check `release` before reading either.
     if array.is_null() || (*(array as *const FFI_ArrowArray)).is_released() {
@@ -100,7 +126,7 @@ pub unsafe fn column_from_c_capsules(
     }
     check_schema(schema)?;
     let array = std::ptr::replace(array as *mut FFI_ArrowArray, FFI_ArrowArray::empty());
-    column_from_c_data(array, &*(schema as *const FFI_ArrowSchema))
+    column_from_c_data_with_copy(array, &*(schema as *const FFI_ArrowSchema), copy)
 }
 
 fn released(what: &str) -> ArrowError {

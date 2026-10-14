@@ -809,10 +809,28 @@ fn clip_bool(v: &[bool], lo: Option<f64>, hi: Option<f64>) -> Vec<bool> {
         .collect()
 }
 
-/// [`binary_kernel`] over float operands: IEEE arithmetic never overflows (it
-/// gives `±inf`), so the checked kernel cannot fail here.
+/// Mixed-dtype arithmetic retains the original checked-kernel path.
 fn float_kernel<T: Numeric>(a: &[T], b: &[T], op: BinOp) -> Vec<T> {
     binary_kernel(a, b, op, &Validity::dense()).expect("float arithmetic never overflows")
+}
+
+/// Dispatch once, then write IEEE arithmetic directly into the final buffer.
+fn float_slice_kernel<T>(a: &[T], b: &[T], op: BinOp) -> Vec<T>
+where
+    T: Copy + std::ops::Add<Output = T> + std::ops::Sub<Output = T> + std::ops::Mul<Output = T>,
+{
+    match op {
+        BinOp::Add => float_output(a, b, |x, y| x + y),
+        BinOp::Sub => float_output(a, b, |x, y| x - y),
+        BinOp::Mul => float_output(a, b, |x, y| x * y),
+    }
+}
+
+/// Statically dispatched arithmetic; no input copies or per-row Result machinery.
+fn float_output<T: Copy, U>(a: &[T], b: &[T], f: impl Fn(T, T) -> U) -> Vec<U> {
+    let mut out = Vec::with_capacity(a.len());
+    out.extend(a.iter().zip(b).map(|(&x, &y)| f(x, y)));
+    out
 }
 
 /// Element-wise `a ∘ b` for `Add` / `Sub` / `Mul` over the positions `valid`
@@ -854,3 +872,5 @@ mod tests_exact;
 mod tests_fold;
 #[cfg(test)]
 mod tests_layout;
+#[cfg(test)]
+mod tests_arithmetic_bits;

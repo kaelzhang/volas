@@ -155,8 +155,10 @@ This also applies to bare command names: with a data column `change`, both
 column to compute the built-in command on that frame.
 
 A cached directive retains the data/command bindings chosen when it was cached.
-Adding a data column whose name would shadow a command used by an existing cached
-directive raises, across aliases and case spellings:
+Adding a data column under any equivalent spelling of a computation it uses raises:
+`close * CHANGE`, `close * ChAnGe` and `close * change:` all prevent adding either
+`change` or `CHANGE`. Drop the cached directive first, then add the data column;
+every equivalent command spelling will read that data on subsequent binding:
 
 ```text
 ValueError: cannot add column 'change': the cached directive 'close*change' uses the built-in command 'change' under that name. Rename the new column, or drop the cached directive first — df.drop(['close*change'], axis=1).

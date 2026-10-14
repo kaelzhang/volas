@@ -3,17 +3,12 @@
 //! arrow-rs lives **only** in this crate — `volas-core` stays dependency-light and
 //! the Python layer composes this bridge with the C-Data interface.
 //!
-//! ## Zero-copy contract
-//! The **data** buffers move without a copy in both directions: a volas
-//! [`Buffer<T>`](volas_core::Buffer) is published to Arrow as a borrowed allocation
-//! (its `Arc` is the keep-alive), and an Arrow buffer is imported as a
-//! [`Buffer::Borrowed`](volas_core::Buffer) whose guard is the source array. These
-//! are repacked (a copy):
-//! - **bool** — volas stores one byte per value, Arrow one *bit*;
-//! - **validity** — the null bitmap (≤ `n/8` bytes, negligible beside the data);
-//! - **imported strings** — copied into volas-owned buffers and validated there: the
-//!   unchecked string readers rely on that invariant, which a producer rewriting a
-//!   borrowed buffer after import could break (export stays zero-copy).
+//! ## Ownership contract
+//! Imports form owned snapshots by default. Explicit `*_with_copy(..., false)`
+//! imports borrow matching numeric / dense ns-datetime data, with the precondition
+//! that the producer and every alias never write borrowed memory again while any
+//! imported column or view survives. Conversion layouts still copy.
+//! Exports share read-only data buffers; bool and validity are repacked.
 
 use std::any::Any;
 use std::panic::RefUnwindSafe;
@@ -24,17 +19,23 @@ use arrow_array::ArrayRef;
 use arrow_buffer::{Buffer as ArrowBuffer, NullBuffer};
 use volas_core::{Buffer, Validity};
 
+mod chunks;
 mod export;
 mod ffi;
 mod import;
+mod rows;
 mod stream;
 
 pub use export::column_to_arrow;
 pub use ffi::{
-    column_from_c_capsules, column_from_c_data, column_to_c_data, column_to_c_schema,
+    column_from_c_capsules, column_from_c_capsules_with_copy, column_from_c_data,
+    column_from_c_data_with_copy, column_to_c_data, column_to_c_schema,
 };
-pub use import::column_from_arrow;
-pub use stream::{columns_from_c_stream, columns_to_c_stream};
+pub use import::{column_from_arrow, column_from_arrow_with_copy};
+pub use stream::{
+    columns_from_c_stream, columns_from_c_stream_with_copy, columns_to_c_stream,
+    frame_from_c_stream, frame_from_c_stream_with_copy, frame_to_c_stream,
+};
 // Re-exported so the Python layer wraps these in PyCapsules without depending on
 // arrow-rs directly — the bridge keeps arrow-rs entirely within this crate.
 pub use arrow_array::ffi::{FFI_ArrowArray, FFI_ArrowSchema};
@@ -82,7 +83,8 @@ fn validity_of(nulls: Option<&NullBuffer>, len: usize) -> Validity {
 fn borrow_primitive<T: volas_core::Element + Send + Sync + 'static>(values: &[T], src: &ArrayRef) -> Buffer<T> {
     let ptr = NonNull::new(values.as_ptr() as *mut T).unwrap_or(NonNull::dangling());
     // SAFETY: `values` points into `src`'s buffer; `Hold(src)` keeps it alive for as
-    // long as the returned `Buffer` (and Arrow guarantees the bytes are immutable).
+    // long as the returned `Buffer`; the caller explicitly accepts the producer
+    // immutability precondition.
     unsafe { Buffer::from_foreign(ptr, values.len(), Arc::new(Hold(src.clone()))) }
 }
 
@@ -112,7 +114,7 @@ mod tests {
         assert_eq!(arr.null_count(), 0);
         assert_eq!(arr.as_primitive::<Float64Type>().values().as_ptr(), src_ptr); // export shares
         let arrow_ptr = arr.as_primitive::<Float64Type>().values().as_ptr();
-        let back = column_from_arrow(&arr).unwrap();
+        let back = column_from_arrow_with_copy(&arr, false).unwrap();
         assert_eq!(back.as_f64().unwrap().as_ptr(), arrow_ptr); // import borrows
         assert_eq!(back.as_f64().unwrap(), &[1.0, 2.0, 3.0]);
     }
@@ -157,7 +159,7 @@ mod tests {
         let exported = column_to_arrow(&dense);
         let arrow_ptr = exported.as_primitive::<Int64Type>().values().as_ptr();
         assert_eq!(dense.as_i64().unwrap().as_ptr(), arrow_ptr);
-        assert_eq!(column_from_arrow(&exported).unwrap().as_i64().unwrap().as_ptr(), arrow_ptr);
+        assert_eq!(column_from_arrow_with_copy(&exported, false).unwrap().as_i64().unwrap().as_ptr(), arrow_ptr);
     }
 
     #[test]
@@ -452,7 +454,7 @@ mod tests {
         // are still shared end to end (no copy was inserted anywhere).
         let src: ArrayRef = Arc::new(Int64Array::from(vec![11, 22, 33]));
         let src_ptr = src.as_primitive::<Int64Type>().values().as_ptr();
-        let borrowed = column_from_arrow(&src).unwrap();
+        let borrowed = column_from_arrow_with_copy(&src, false).unwrap();
         let reexported = column_to_arrow(&borrowed);
         assert_eq!(reexported.as_primitive::<Int64Type>().values().as_ptr(), src_ptr);
     }

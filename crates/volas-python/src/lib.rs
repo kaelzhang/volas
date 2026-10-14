@@ -170,6 +170,7 @@ fn to_datetime(obj: &Bound<'_, PyAny>, unit: &str, format: Option<&str>) -> PyRe
             // An explicit format parses faster and unambiguously (pandas `format=`).
             // A missing (NA) cell maps to NaT, not parsed from its "" placeholder.
             Some(fmt) => {
+                let parser = datetime::Strptime::new(fmt);
                 let ns = v
                     .iter()
                     .enumerate()
@@ -179,7 +180,7 @@ fn to_datetime(obj: &Bound<'_, PyAny>, unit: &str, format: Option<&str>) -> PyRe
                         if !val.is_valid(i) || s.trim().is_empty() {
                             return Ok(i64::MIN);
                         }
-                        datetime::parse_ns_format(s, fmt).map_err(pyerr)
+                        parser.parse(s).map_err(pyerr)
                     })
                     .collect::<PyResult<Vec<i64>>>()?;
                 Column::datetime(ns)

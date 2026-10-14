@@ -22,6 +22,8 @@ import pytest
 import volas
 from test import ht_reference as R
 
+from test.exact import assert_exact
+
 talib = pytest.importorskip('talib')
 
 # The Hilbert family's oracle: TA-Lib itself when the installed build evaluates without
@@ -143,9 +145,9 @@ def test_edge_dataset_matches_talib(directive, dataset):
     data = DATASETS[dataset]
     got = np.asarray(volas.DataFrame(dict(data)).exec(directive), float)
     want = _oracle(directive, data)
-    np.testing.assert_array_equal(np.isnan(got), np.isnan(want), err_msg=f'{directive} on {dataset}: NaN mask')
+    assert_exact(np.isnan(got), np.isnan(want), err_msg=f'{directive} on {dataset}: NaN mask')
     m = ~np.isnan(want)
     if MATRIX[directive][3]:
-        np.testing.assert_array_equal(got[m], want[m], err_msg=f'{directive} on {dataset}')
+        assert_exact(got[m], want[m], err_msg=f'{directive} on {dataset}')
     else:
         np.testing.assert_allclose(got[m], want[m], rtol=1e-9, atol=0, err_msg=f'{directive} on {dataset}')

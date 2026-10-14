@@ -60,22 +60,8 @@ def _tuples(line, count=8):
 #   decides a False before the window is complete, so a value may come before the lookback.
 EVENT = {'pivothigh', 'pivotlow'}
 EARLY = {'kdj.k', 'kdj.d', 'kdj.j', 'increase', 'repeat'}
-# Open defects of another class this sweep surfaces (not lookback metadata):
-OPEN_FORMS = {
-    # a period of 1 is accepted but degenerate: log10(1) = 0 divides CHOP, and a one-bar
-    # standard deviation leaves the squeeze undefined
-    'chop:1': 'period 1 is degenerate (log10(1) = 0)',
-    'ttm_squeeze:1,-5.0,-5.0': 'period 1 is degenerate (one-bar deviation)',
-}
-
-
-def _case(line, form):
-    reason = OPEN_FORMS.get(form)
-    marks = [pytest.mark.xfail(strict=True, reason=reason)] if reason else []
-    return pytest.param(line, form, id=form, marks=marks)
-
-
-CASES = [_case(line, form) for line in executable_lines() if line.args for form in _tuples(line)]
+CASES = [pytest.param(line, form, id=form) for line in executable_lines()
+         if line.args for form in _tuples(line)]
 
 
 @pytest.mark.parametrize('line,form', CASES)

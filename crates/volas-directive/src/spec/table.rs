@@ -212,7 +212,7 @@ pub fn command_spec(name: &str, sub: Option<&str>) -> Option<CommandSpec> {
             .step()
             .lookback(|a| m1(n(a, 0))),
         // chop's TR sum needs one prior close, so it warms up one bar past the window.
-        ("chop", None) => line(const { &[p_req()] }, &["high", "low", "close"]).lookback(|a| n(a, 0)),
+        ("chop", None) => line(const { &[p2_req()] }, &["high", "low", "close"]).lookback(|a| n(a, 0)),
         // kst's slowest term is SMA15 over ROC30: 30 + 15 - 1.
         ("kst", None) => line(&[], &["close"]).accumulating().step().lookback(|_| 44),
         ("emv", None) => line(const { &[p_req()] }, &["high", "low", "volume"]).accumulating().step().lookback(|a| n(a, 0)),
@@ -297,10 +297,10 @@ pub fn command_spec(name: &str, sub: Option<&str>) -> Option<CommandSpec> {
         // ttm_squeeze: period, Bollinger σ-multiplier, Keltner range-multiplier. The
         // momentum's linreg over the n-bar delta (itself gated at n−1) warms up at
         // 2·(n−1); the squeeze flag waits for SMAₙ(TR) (n).
-        ("ttm_squeeze", None) => line(const { &[p(20), mult(2.0), mult(1.5)] }, &["high", "low", "close"])
+        ("ttm_squeeze", None) => line(const { &[p2(20), mult(2.0), mult(1.5)] }, &["high", "low", "close"])
             .accumulating()
             .lookback(|a| 2 * m1(n(a, 0))),
-        ("ttm_squeeze", Some("on")) => line(const { &[p(20), mult(2.0), mult(1.5)] }, &["high", "low", "close"])
+        ("ttm_squeeze", Some("on")) => line(const { &[p2(20), mult(2.0), mult(1.5)] }, &["high", "low", "close"])
             .accumulating()
             .lookback(|a| n(a, 0)),
         // pivot_points: PP plus the R1/R2/R3 / S1/S2/S3 levels, all from the prior bar.

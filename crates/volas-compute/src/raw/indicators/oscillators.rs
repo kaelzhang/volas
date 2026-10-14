@@ -1,7 +1,6 @@
 mod rsi_pair;
 pub(crate) use rsi_pair::rsi_pair_pass;
 
-use super::av;
 use super::stochastic::{stoch_fastk, stochrsi_fastk};
 use crate::accum::{Accumulator, Csum};
 use crate::missing;
@@ -15,9 +14,8 @@ use crate::raw::smoothing;
 /// Lowest of low values.
 pub fn llv(data: &[f64], period: usize) -> Vec<f64> {
     // Move the kernel's owned buffer out (no copy) rather than `to_vec`.
-    kernels::rolling_min(av(data), period)
-        .into_raw_vec_and_offset()
-        .0
+    kernels::rolling_min(data, period)
+
 }
 
 /// Highest of high values.
@@ -28,9 +26,8 @@ pub fn hhv(data: &[f64], period: usize) -> Vec<f64> {
     if period == 10 && period <= data.len() && !data.iter().any(|x| x.is_nan()) {
         return hhv10_no_nan(data);
     }
-    kernels::rolling_max(av(data), period)
-        .into_raw_vec_and_offset()
-        .0
+    kernels::rolling_max(data, period)
+
 }
 
 fn hhv10_no_nan(data: &[f64]) -> Vec<f64> {
@@ -85,8 +82,8 @@ fn hhv10_no_nan(data: &[f64]) -> Vec<f64> {
 /// NaN during the warm-up (no full window yet) and while the window holds a missing
 /// value. Lookback `period-1`.
 pub fn rsv(high: &[f64], low: &[f64], close: &[f64], period: usize) -> Vec<f64> {
-    let llv = kernels::rolling_min(av(low), period);
-    let hhv = kernels::rolling_max(av(high), period);
+    let llv = kernels::rolling_min(low, period);
+    let hhv = kernels::rolling_max(high, period);
     (0..close.len()).map(|i| rsv_value(close[i], hhv[i], llv[i])).collect()
 }
 
@@ -114,7 +111,7 @@ pub fn stochrsi_d_sma(
     origin: usize,
 ) -> Vec<f64> {
     let k = stochrsi_fastk(close, rsi_period, fastk_period);
-    kernels::sma(super::av(&k), fastd_period, origin).into_raw_vec_and_offset().0
+    kernels::sma(&k, fastd_period, origin)
 }
 
 /// StochRSI's single continuation: RSI's Wilder pair, the recent RSI window,
@@ -413,25 +410,31 @@ pub fn cmo_resume_one(
 
 /// Donchian middle channel (`(hhv + llv) / 2`).
 pub fn donchian(high: &[f64], low: &[f64], period: usize) -> Vec<f64> {
-    let hhv = kernels::rolling_max(av(high), period);
-    let llv = kernels::rolling_min(av(low), period);
-    ((&hhv + &llv) / 2.0).to_vec()
+    let hhv = kernels::rolling_max(high, period);
+    let llv = kernels::rolling_min(low, period);
+    let mut out = hhv;
+    for (h, l) in out.iter_mut().zip(llv) { *h = (*h + l) / 2.0; }
+    out
 }
 
 /// Midpoint over `period` of a single series: `(max + min) / 2` (TA-Lib MIDPOINT).
 /// Lookback `period-1`.
 pub fn midpoint(data: &[f64], period: usize) -> Vec<f64> {
-    let hh = kernels::rolling_max(av(data), period);
-    let ll = kernels::rolling_min(av(data), period);
-    ((&hh + &ll) / 2.0).to_vec()
+    let hh = kernels::rolling_max(data, period);
+    let ll = kernels::rolling_min(data, period);
+    let mut out = hh;
+    for (h, l) in out.iter_mut().zip(ll) { *h = (*h + l) / 2.0; }
+    out
 }
 
 /// Midpoint price over `period`: `(max(high) + min(low)) / 2` (TA-Lib MIDPRICE).
 /// Lookback `period-1`. (Same arithmetic as the Donchian middle channel.)
 pub fn midprice(high: &[f64], low: &[f64], period: usize) -> Vec<f64> {
-    let hh = kernels::rolling_max(av(high), period);
-    let ll = kernels::rolling_min(av(low), period);
-    ((&hh + &ll) / 2.0).to_vec()
+    let hh = kernels::rolling_max(high, period);
+    let ll = kernels::rolling_min(low, period);
+    let mut out = hh;
+    for (h, l) in out.iter_mut().zip(ll) { *h = (*h + l) / 2.0; }
+    out
 }
 
 /// Center of Gravity oscillator (TradingView `ta.cog`, John Ehlers):

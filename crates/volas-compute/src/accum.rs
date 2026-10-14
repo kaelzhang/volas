@@ -437,6 +437,9 @@ fn comoment_exact(n: f64, (ah, al): (f64, f64), (bh, bl): (f64, f64), sab: &[Csu
     exact.to_csum().value()
 }
 
+mod partials;
+use partials::Partials;
+
 /// `2⁻⁶⁴`: the step an [`Exact`] expansion scales down by when one of its adds
 /// overflows.
 const RESCALE: f64 = 1.0 / 18_446_744_073_709_551_616.0;
@@ -451,7 +454,7 @@ const RESCALE: f64 = 1.0 / 18_446_744_073_709_551_616.0;
 #[derive(Clone, Debug, Default)]
 pub(crate) struct Exact {
     /// Nonoverlapping words, increasing in magnitude, each scaled by `2^-scale`.
-    partials: Vec<f64>,
+    partials: Partials,
     /// The sum of the non-finite terms (`0` when there are none).
     special: f64,
     /// The scaling exponent, a multiple of 64.
@@ -506,7 +509,7 @@ impl Exact {
             }
             let hi = x + y;
             if !hi.is_finite() {
-                let mut words: Vec<f64> = self.partials[..i].to_vec();
+                let mut words = self.partials[..i].to_vec();
                 words.push(x);
                 words.push(y);
                 words.extend_from_slice(&self.partials[j + 1..]);

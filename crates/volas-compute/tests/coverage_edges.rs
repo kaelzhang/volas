@@ -40,10 +40,10 @@ fn ohlc(n: usize) -> (Vec<f64>, Vec<f64>, Vec<f64>, Vec<f64>) {
 fn rolling_max_min_van_herk_fast_path_matches_separate_kernels() {
     let (_, high, low, _) = ohlc(64);
     let (hh, ll) = kernels::rolling_max_min(&high, &low, 17);
-    let want_h = kernels::rolling_max(ndarray::ArrayView1::from(&high), 17);
-    let want_l = kernels::rolling_min(ndarray::ArrayView1::from(&low), 17);
-    assert_f64_same(&hh, want_h.as_slice().unwrap());
-    assert_f64_same(&ll, want_l.as_slice().unwrap());
+    let want_h = kernels::rolling_max(&high, 17);
+    let want_l = kernels::rolling_min(&low, 17);
+    assert_f64_same(&hh, &want_h);
+    assert_f64_same(&ll, &want_l);
 }
 
 #[test]

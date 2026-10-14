@@ -11,6 +11,8 @@ import pytest
 
 import volas
 
+from test.exact import same_exact
+
 MIN = np.timedelta64(1, 'm')
 T0 = np.datetime64('2024-01-01T00:00', 'ns')
 
@@ -42,7 +44,7 @@ def feed(w, u, xs, ids, d, ohlcv=False):
 
 
 def same(a, b):
-    return np.array_equal(np.asarray(a, float), np.asarray(b, float), equal_nan=True)
+    return same_exact(a, b)
 
 
 def bars(n, seed=0, gaps=0.0):

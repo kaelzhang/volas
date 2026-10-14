@@ -1,8 +1,11 @@
 """Typed comparisons and integer zero survive every continuation owner."""
+
 import numpy as np
 import pytest
 
 import volas
+
+from test.exact import same_exact
 
 N = 20
 
@@ -18,7 +21,7 @@ MODES = ['append', 'batch', 'replace', 'write', 'slice', 'window', 'tf', 'tf_win
 
 
 def _bits_equal(got, want):
-    return ((got.view('uint64') == want.view('uint64')) | (np.isnan(got) & np.isnan(want))).all()
+    return same_exact(got, want)
 
 
 @pytest.mark.parametrize('d,kind,last', CASES)

@@ -8,7 +8,7 @@ use std::sync::Arc;
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use volas_core::{CellWrites, Column, CombineOp, DataFrame, IndexKind};
-use volas_time::{aggregate_period, AggSpec, Cumulator, OpenPeriod, PeriodAggregate, TimeFrame};
+use volas_time::{aggregate_period, AggSpec, OpenPeriod, PeriodAggregate, TimeFrame};
 
 #[allow(unused_imports)]
 use crate::*;
@@ -17,7 +17,7 @@ use crate::*;
 /// constructor arg or `cumulate`): the target frame, the per-column aggregators, and
 /// the fine bars of the still-open (forming) period — `df.iloc[-1]` is that period's
 /// running bar, which `append` keeps updating. Its fields are its own: it is built by
-/// its constructors ([`seeded`](Self::seeded), [`from_cumulator`](Self::from_cumulator),
+/// its constructors ([`seeded`](Self::seeded), [`from_cumulated`](Self::from_cumulated),
 /// [`reseeded`](Self::reseeded), [`projected`](Self::projected)) and changed only by the
 /// fold ([`PyDataFrame::fold_append`]) and the one write entry ([`write`](Self::write)).
 ///
@@ -182,9 +182,8 @@ impl TfState {
     }
 
     /// The tf state of a `cumulate` result: the cumulator's open period carries on.
-    pub(crate) fn from_cumulator(time_frame: TimeFrame, cumulators: AggSpec, cum: &Cumulator) -> TfState {
-        let open = cum.open_period().cloned();
-        TfState { time_frame, cumulators, open, open_key: None, aggregate: cum.period_aggregate().cloned(), fold_plan: None, refold_next: false }
+    pub(crate) fn from_cumulated(time_frame: TimeFrame, cumulators: AggSpec, open: Option<OpenPeriod>, aggregate: Option<PeriodAggregate>) -> TfState {
+        TfState { time_frame, cumulators, open, open_key: None, aggregate, fold_plan: None, refold_next: false }
     }
 
     /// This state's time frame and aggregators over the rows of `frame` (a re-labelled or

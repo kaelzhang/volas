@@ -74,12 +74,13 @@ impl PySeries {
     }
 
     /// Build a Series from any object implementing the Arrow array protocol
-    /// (`__arrow_c_array__`) — a pyarrow `Array`, a polars `Series`, … — zero-copy where
-    /// the dtypes line up. The result carries a fresh `RangeIndex`; `name` labels it.
+    /// (`__arrow_c_array__`) — a pyarrow `Array`, a polars `Series`, … — an owned snapshot by default.
+    /// `copy=False` borrows matching buffers; the producer and every alias must never write
+    /// borrowed memory again while imported objects or views survive. The result carries a fresh `RangeIndex`; `name` labels it.
     #[staticmethod]
-    #[pyo3(signature = (data, name = None))]
-    pub(crate) fn from_arrow(data: &Bound<'_, PyAny>, name: Option<String>) -> PyResult<PySeries> {
-        let col = crate::arrow::column_from_arrow_obj(data)?;
+    #[pyo3(signature = (data, name = None, *, copy = true))]
+    pub(crate) fn from_arrow(data: &Bound<'_, PyAny>, name: Option<String>, copy: bool) -> PyResult<PySeries> {
+        let col = crate::arrow::column_from_arrow_obj(data, copy)?;
         let n = col.len();
         Ok(PySeries { inner: Series::new(name, col, Arc::new(Index::range(n))) })
     }

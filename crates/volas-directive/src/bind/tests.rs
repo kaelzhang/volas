@@ -222,3 +222,48 @@ fn cached_unary_computation_protects_its_expression_and_nested_command() {
     assert!(!uses_command_shadow(&node, "close"));
     assert!(!uses_command_shadow(&node, "1"));
 }
+
+/// A bare command's identity is canonical; a prospective data column keeps its case.
+#[test]
+fn bare_command_collisions_use_canonical_identity() {
+    for spelling in ["accbands", "ACCBANDS", "AcCbAnDs"] {
+        for text in [
+            format!("({spelling})+({spelling}@open)"),
+            format!("-{spelling}"),
+            format!("ma:3@{spelling}"),
+        ] {
+            let bound = bind_frame(&parse(&text).unwrap(), &|n| n == "open", &text).unwrap();
+            assert!(uses_bare_command(&bound, "accbands"), "{text}");
+            assert!(!uses_bare_command(&bound, "ACCBANDS"), "{text}");
+            assert!(!uses_bare_command(&bound, "open"), "{text}");
+        }
+    }
+    let explicit = bind_frame(&parse("ACCBANDS: + 1").unwrap(), &|_| false, "").unwrap();
+    assert!(!uses_bare_command(&explicit, "accbands"));
+}
+
+
+/// Schema-label normalization agrees with the full renderer, including names whose
+/// command requires arguments or a sub-command and therefore cannot run bare.
+#[test]
+fn canonical_data_names_match_full_parse_and_render() {
+    let mut labels: Vec<String> = crate::spec::COMMANDS.iter().flat_map(|name| {
+        let mixed = name.chars().enumerate().map(|(i, c)| {
+            if i % 2 == 0 { c.to_ascii_uppercase() } else { c }
+        }).collect::<String>();
+        [name.to_string(), name.to_ascii_uppercase(), mixed]
+    }).collect();
+    labels.extend([
+        "open", "high", "low", "close", "volume", "Close", "RSI", "KDJ", "cdl", "CDL",
+        "_column", "x1", "nan", "inf", "", " OBV ", "OBV:", "ma:05", "atr:014@high,low,close",
+        "close + OBV", "1", "001", "ma:0", "bad:", "close +", "数据",
+    ].into_iter().map(str::to_string));
+    for label in labels {
+        let expected = crate::parse(&label).map(|node| crate::stringify::stringify_node(node.node()));
+        match (canonical_data_name(&label), expected) {
+            (Ok(actual), Ok(expected)) => assert_eq!(actual, expected, "{label}"),
+            (Err(actual), Err(expected)) => assert_eq!(actual.to_string(), expected.to_string(), "{label}"),
+            (actual, expected) => panic!("{label}: {actual:?} != {expected:?}"),
+        }
+    }
+}

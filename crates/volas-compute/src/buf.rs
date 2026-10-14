@@ -73,7 +73,7 @@ pub(crate) fn build_f64(n: usize, fill: impl FnOnce(&mut [MaybeUninit<f64>])) ->
 /// [`OutBuf::ptr`]), then [`OutBuf::finish`] yields the column.
 ///
 /// Release codegen matches the retired `set_len` pattern (no prefill memset of the
-/// valid region, raw stores). Debug poisons the valid region and `finish` asserts none
+/// valid region, raw stores). The Vec stays empty until `finish`. Debug poisons the valid region and `finish` asserts none
 /// survived, so a missed slot is a deterministic test failure rather than UB. Pair with
 /// `MallocPreScribble=1` / `cargo miri test` for luck-free coverage.
 pub(crate) struct OutBuf {
@@ -91,7 +91,7 @@ impl OutBuf {
         let warm = warm.min(n);
         let mut v = Vec::<f64>::with_capacity(n);
         let p = v.as_mut_ptr();
-        // SAFETY: writing the `n` reserved slots, then `set_len(n)`. The valid region is
+        // SAFETY: writing within the reserved capacity while the Vec length stays zero. The valid region is
         // uninitialised in release (the kernel's writes fill it) and poisoned in debug
         // (so `finish` can prove every slot was overwritten).
         unsafe {
@@ -102,7 +102,7 @@ impl OutBuf {
             for i in warm..n {
                 p.add(i).write(POISON);
             }
-            v.set_len(n);
+
         }
         OutBuf {
             v,
@@ -118,7 +118,7 @@ impl OutBuf {
     #[inline]
     pub(crate) fn set(&mut self, i: usize, val: f64) {
         debug_assert!(i < self.n, "OutBuf::set out of range");
-        // SAFETY: `i < n == capacity`; `f64` is `Copy` so the uninitialised prior value
+        // SAFETY: `i < n <= capacity`; `f64` is `Copy` so the uninitialised prior value
         // is not dropped.
         unsafe {
             self.v.as_mut_ptr().add(i).write(val);
@@ -135,7 +135,7 @@ impl OutBuf {
 
     /// Yield the finished column, asserting (debug) that every valid slot was written.
     #[inline]
-    pub(crate) fn finish(self) -> Vec<f64> {
+    pub(crate) fn finish(mut self) -> Vec<f64> {
         #[cfg(debug_assertions)]
         {
             let p = self.v.as_ptr();
@@ -149,6 +149,9 @@ impl OutBuf {
                 );
             }
         }
+        // SAFETY: the warm-up and the kernel have written every reserved slot.
+        // Until this point the Vec length is zero, including during unwinding.
+        unsafe { self.v.set_len(self.n); }
         self.v
     }
 }
@@ -156,6 +159,12 @@ impl OutBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn outbuf_does_not_expose_uninitialized_elements() {
+        let out = OutBuf::warmup(5, 2);
+        assert_eq!(out.v.len(), 0);
+    }
 
     #[test]
     fn outbuf_set_and_finish() {

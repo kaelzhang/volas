@@ -39,6 +39,8 @@ pandas / stock_pandas / talib live in the ``dev`` extra (the parity tests use th
 as oracles); polars and pandas-ta live in the ``benchmark`` extra.
 """
 
+import os
+from math import ceil
 from pathlib import Path
 
 import numpy as np
@@ -147,7 +149,8 @@ def _generated_ohlcv(n, seed=20260606):
 # auto-calibrated `benchmark()` the recompute candidates would otherwise get —
 # that asymmetry is exactly why the rounds used to be 50 vs ~30k). A uniform count
 # keeps the timings comparable and stable.
-APPEND_ROUNDS = 500
+# Paired A/B spreads the original 500-round budget across independent pairs.
+APPEND_ROUNDS = max(5, ceil(500 / int(os.environ.get('VOLAS_BENCHMARK_PAIRS', '1'))))
 
 # Bumped whenever the measurement protocol changes meaning (not when indicators
 # are added): leader comparisons across different methodologies are flagged in

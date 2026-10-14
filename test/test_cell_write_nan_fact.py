@@ -11,6 +11,8 @@ import pytest
 
 import volas
 
+from test.exact import assert_exact
+
 DIRECTIVES = ['ema:3', 'smma:3', 'rsi:3', 'macd', 'atr:3', 'kdj.k']
 
 
@@ -43,4 +45,4 @@ def test_a_nan_overwritten_in_the_same_batch_leaves_the_column_complete(via, dir
         df.loc[[label, label], 'close'] = [np.nan, 11.0]
     assert df.iat[3, j] == 11.0 and not np.isnan(df['close'].to_numpy()).any()
     got = df[directive].to_numpy()
-    np.testing.assert_array_equal(got, _expected(df, directive))
+    assert_exact(got, _expected(df, directive))

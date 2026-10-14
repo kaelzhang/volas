@@ -7,24 +7,12 @@ use crate::guard::{NonFiniteRows, RowGuard, Unguarded};
 // Statistic — rolling regression & dispersion
 // ---------------------------------------------------------------------------
 
-/// Least-squares fit of `y = m·x + b` over each trailing `period`-bar window, in
-/// TA-Lib's coordinate convention: `x = 0` at the most recent bar, increasing into
-/// the past (`x = period-1` at the oldest). Returns `(slope m, intercept b)` per
-/// row, both NaN during warm-up. Shared by the whole linear-regression family.
-/// O(n·period), matching TA-Lib's own inner loop (the constants close-form the
-/// `Σx` / `Σx²` of `0..period`, so only `Σy` and `Σxy` are summed per window).
-fn linreg_fit(data: &[f64], period: usize, origin: usize) -> (Vec<f64>, Vec<f64>) {
-    linreg_fit_pass(data, period, origin, &mut ())
-}
-
-fn linreg_fit_pass(data: &[f64], period: usize, origin: usize, states: &mut impl crate::pass::StateSink) -> (Vec<f64>, Vec<f64>) {
-    let (m, b, finite) = linreg_fit_with::<Unguarded>(data, period, origin, states);
-    if finite {
-        (m, b)
-    } else {
+/// Compute only the requested regression line, using the shared exact sliding fit.
+fn linreg_fit_pass(data: &[f64], period: usize, origin: usize, states: &mut impl crate::pass::StateSink, project: impl Fn(f64, f64) -> f64) -> Vec<f64> {
+    let (out, finite) = linreg_fit_with::<Unguarded>(data, period, origin, states, &project);
+    if finite { out } else {
         states.restart();
-        let (m, b, _) = linreg_fit_with::<NonFiniteRows>(data, period, origin, states);
-        (m, b)
+        linreg_fit_with::<NonFiniteRows>(data, period, origin, states, &project).0
     }
 }
 
@@ -41,16 +29,15 @@ fn linreg_fit_pass(data: &[f64], period: usize, origin: usize, states: &mut impl
 /// window's anchor-row value `K` ([`linreg_fit_of`]), so the slope's numerator carries
 /// no cancellation between the level and the trend. Shared by linearreg / slope /
 /// intercept / angle / tsf.
-fn linreg_fit_with<G: RowGuard>(data: &[f64], period: usize, origin: usize, states: &mut impl crate::pass::StateSink) -> (Vec<f64>, Vec<f64>, bool) {
+fn linreg_fit_with<G: RowGuard>(data: &[f64], period: usize, origin: usize, states: &mut impl crate::pass::StateSink, project: &impl Fn(f64, f64) -> f64) -> (Vec<f64>, bool) {
     let n = data.len();
     if period == 0 || period > n {
-        return (vec![f64::NAN; n], vec![f64::NAN; n], true);
+        return (vec![project(f64::NAN, f64::NAN); n], true);
     }
     let p = period as f64;
     let (sum_x, divisor) = linreg_x_sums(period);
     // Single-write (D2): NaN warm-up `[0, period-1)`, each valid row written once.
-    let mut slope = crate::buf::OutBuf::warmup(n, period - 1);
-    let mut intercept = crate::buf::OutBuf::warmup(n, period - 1);
+    let mut out = crate::buf::OutBuf::warmup(n, period - 1);
     let mut guard = G::default();
     let mut anchors = Anchors::from(origin, period);
     let mut k = data[0];
@@ -88,11 +75,10 @@ fn linreg_fit_with<G: RowGuard>(data: &[f64], period: usize, origin: usize, stat
             let (sd, sad) = linreg_sums(rows, |_| true);
             linreg_fit_of(p, sum_x, divisor, k, &sd, &sad)
         };
-        slope.set(i, m);
-        intercept.set(i, b);
+        out.set(i, project(m, b));
     }
     let finite = finite && sum_d.value().is_finite() && sum_ad.value().is_finite();
-    (slope.finish(), intercept.finish(), finite)
+    (out.finish(), finite)
 }
 
 /// The fit sums `(Σy, Σ age·y)` of one window's `rows` (oldest first, the newest at age
@@ -166,36 +152,27 @@ fn linreg_slide(sum_y: &mut Csum, sum_xy: &mut Csum, p: f64, entering: Option<f6
 
 /// Linear regression value at the current bar: `b + m·(period-1)` (TA-Lib LINEARREG).
 pub fn linearreg(data: &[f64], period: usize, origin: usize) -> Vec<f64> {
-    let (m, b) = linreg_fit(data, period, origin);
-    let x = period.saturating_sub(1) as f64;
-    b.iter().zip(&m).map(|(b, m)| b + m * x).collect()
+    linreg_pass(data, period, LinregLine::Value, origin, &mut ())
 }
 
 /// Linear regression slope `m` (TA-Lib LINEARREG_SLOPE).
 pub fn linearreg_slope(data: &[f64], period: usize, origin: usize) -> Vec<f64> {
-    linreg_fit(data, period, origin).0
+    linreg_pass(data, period, LinregLine::Slope, origin, &mut ())
 }
 
 /// Linear regression intercept `b` (TA-Lib LINEARREG_INTERCEPT).
 pub fn linearreg_intercept(data: &[f64], period: usize, origin: usize) -> Vec<f64> {
-    linreg_fit(data, period, origin).1
+    linreg_pass(data, period, LinregLine::Intercept, origin, &mut ())
 }
 
 /// Linear regression angle in degrees: `atan(m)·180/π` (TA-Lib LINEARREG_ANGLE).
 pub fn linearreg_angle(data: &[f64], period: usize, origin: usize) -> Vec<f64> {
-    let deg = 180.0 / std::f64::consts::PI;
-    linreg_fit(data, period, origin)
-        .0
-        .iter()
-        .map(|m| m.atan() * deg)
-        .collect()
+    linreg_pass(data, period, LinregLine::Angle, origin, &mut ())
 }
 
 /// Time series forecast — regression value one bar ahead: `b + m·period` (TA-Lib TSF).
 pub fn tsf(data: &[f64], period: usize, origin: usize) -> Vec<f64> {
-    let (m, b) = linreg_fit(data, period, origin);
-    let x = period as f64;
-    b.iter().zip(&m).map(|(b, m)| b + m * x).collect()
+    linreg_pass(data, period, LinregLine::Forecast, origin, &mut ())
 }
 
 /// Rolling population variance over `period`: `(Σd² − (Σd)²/p) / p` on the data shifted
@@ -562,12 +539,12 @@ pub enum LinregLine {
     Forecast,
 }
 
-/// The length of [`linreg_fit`]'s resumable state: `[Σy, Σage·y]` (each a [`Csum`]),
+/// The length of [`linreg_fit_pass`]'s resumable state: `[Σy, Σage·y]` (each a [`Csum`]),
 /// the non-finite rows in the window, the rows of the first window seen, the absolute
 /// position of the next row (for re-anchoring).
 const LINREG_STATE: usize = 2 * Csum::STATE + 3;
 
-/// [`linreg_fit`]'s state after the rows of `data` (shared by the whole family).
+/// [`linreg_fit_pass`]'s state after the rows of `data` (shared by the whole family).
 pub fn linreg_state(data: &[f64], period: usize, origin: usize) -> Option<Vec<f64>> {
     let mut init = vec![0.0; LINREG_STATE];
     init[6] = origin as f64;
@@ -740,12 +717,11 @@ pub fn beta_step(
 
 /// Linear-regression batch pass with the same fit and terminal-state publication.
 pub fn linreg_pass(data: &[f64], period: usize, line: LinregLine, origin: usize, states: &mut impl crate::pass::StateSink) -> Vec<f64> {
-    let (m, b) = linreg_fit_pass(data, period, origin, states);
-    m.into_iter().zip(b).map(|(m, b)| match line {
-        LinregLine::Value => b + m * period.saturating_sub(1) as f64,
-        LinregLine::Slope => m,
-        LinregLine::Intercept => b,
-        LinregLine::Angle => m.atan() * (180.0 / std::f64::consts::PI),
-        LinregLine::Forecast => b + m * period as f64,
-    }).collect()
+    match line {
+        LinregLine::Value => linreg_fit_pass(data, period, origin, states, |m, b| b + m * period.saturating_sub(1) as f64),
+        LinregLine::Slope => linreg_fit_pass(data, period, origin, states, |m, _| m),
+        LinregLine::Intercept => linreg_fit_pass(data, period, origin, states, |_, b| b),
+        LinregLine::Angle => linreg_fit_pass(data, period, origin, states, |m, _| m.atan() * (180.0 / std::f64::consts::PI)),
+        LinregLine::Forecast => linreg_fit_pass(data, period, origin, states, |m, b| b + m * period as f64),
+    }
 }

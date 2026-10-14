@@ -210,9 +210,9 @@ pub fn dx_final_state(high: &[f64], low: &[f64], close: &[f64], period: usize) -
     let mut prev = 0.0;
     dm_tr_fold(high, low, close, period, |_, sp, sm, st| {
         prev = dx_out(prev, sp, sm, st);
-        last = Some(vec![sp, sm, st, prev]);
+        last = Some([sp, sm, st, prev]);
     });
-    last
+    last.map(|s| s.to_vec())
 }
 
 /// Resume [`dx`] from `state = [sp, sm, st, dx]` over rows `[from, n)`. `None` at
@@ -253,8 +253,8 @@ pub fn adx_final_state(
     period: usize,
 ) -> Option<Vec<f64>> {
     let mut last = None;
-    adx_fold(high, low, close, period, |_, s, adx| last = Some(vec![s[0], s[1], s[2], adx]));
-    last
+    adx_fold(high, low, close, period, |_, s, adx| last = Some([s[0], s[1], s[2], adx]));
+    last.map(|s| s.to_vec())
 }
 
 /// Resume [`adx`] from `state = [sp, sm, st, adx]` over rows `[from, n)`. `None` at

@@ -188,15 +188,15 @@ impl<'a> Meta<'a> {
 ///     window (int, optional): make this a bounded rolling-window frame showing only
 ///         the last ``window`` rows (see above). Requires ``max_lookback``.
 ///     max_lookback (int | list[str], optional): REQUIRED with ``window`` (and valid only
-///         with it). A **list of indicator directives** declares them: the hidden margin
+///         with it). A **list of directives** declares them: the hidden margin
 ///         is the largest of their lookbacks (e.g. ``['atr:14', 'ma:50']`` -> margin 49),
 ///         and each is computed at construction over all the given rows and cached — a
 ///         recursion (EMA, Wilder smoothing, a cumulative line, …) can only be computed
 ///         this way, including nested and combined recursions. An **int** is the margin
 ///         alone. A directive requested later is computed only when it depends on a
 ///         trailing window of at most the margin's rows, else it raises. A list entry must
-///         be an indicator directive (e.g. ``'ma:50'``); a bare/typo'd name (``'ma50'``)
-///         and an empty list are rejected.
+///         be a valid directive: a raw column (``'close'``) has lookback zero and stays
+///         data; an unknown name (``'ma50'``) and an empty list are rejected.
 #[pyclass(name = "DataFrame")]
 pub struct PyDataFrame {
     pub(crate) inner: DataFrame,

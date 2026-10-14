@@ -12,7 +12,7 @@ MATURIN ?= $(PYTHON) -m maturin
 PY_PREFIX = $(shell $(PYTHON) -c "import sys; print(sys.prefix)")
 MATURIN_DEVELOP_ENV = VIRTUAL_ENV="$(PY_PREFIX)" CONDA_PREFIX="$(PY_PREFIX)"
 
-.PHONY: install install-rust build build-pkg build-ext clean test test-quick count-indicators coverage coverage-html audit-harness audit-harness-release audit-harness-checked docs benchmark perf-ab asm-diff asm-diff-update hot-asm hot-asm-check hot-asm-update anime-fonts anime lint fix fmt check cargo-test upload publish bump dev ci
+.PHONY: help install install-rust build build-pkg build-ext clean test test-quick count-indicators coverage coverage-html audit-harness audit-harness-release audit-harness-checked docs benchmark perf-ab asm-diff asm-diff-update hot-asm hot-asm-check hot-asm-update anime-fonts anime lint fix fmt check cargo-test upload publish bump dev ci
 
 # Install all dependencies (Python + Rust)
 install:
@@ -140,7 +140,7 @@ BENCH_DIR := .benchmarks/$(BENCH_STAMP)
 # The report's sections (each = one test function in test_benchmark.py); `SECTION=`
 # filters `make benchmark` / `make perf-ab` to one via `-k test_<section>`. `tf_live`
 # (the volas-only live time-frame rows) is gated by perf_gate but not rendered.
-BENCH_SECTIONS := windowed append api calc coverage tf_live
+BENCH_SECTIONS := windowed append api calc coverage tf_live first_cache
 ifdef SECTION
 ifeq ($(filter $(SECTION),$(BENCH_SECTIONS)),)
 $(error SECTION must be one of: $(BENCH_SECTIONS))
@@ -171,16 +171,26 @@ else
 	@echo "\033[1m>> Benchmark archived to $(BENCH_DIR)/ <<\033[0m"
 endif
 
-# Standardized local A/B performance comparison (THE pipeline for "did my
-# change move performance?"): builds BASE from a read-only Git archive, benchmarks it,
-# rebuilds HEAD (the current tree, incl. uncommitted changes), benchmarks it,
-# and prints the verdict — perf_gate for the full suite, a compact normalized
-# report for a single indicator. Same harness, same machine, back-to-back
-# (exactly the CI gate's method). Benchmark results are not retained.
+# Standardized local A/B performance comparison: build BASE from a git archive
+# and HEAD (current tree, including uncommitted changes) into separate sites.
+# Identical fresh pytest processes alternate AB/BA for six paired rounds.
+# Reports use the median of per-round HEAD/base ratios, with relative MAD noise;
+# base times are round medians, head times are base times multiplied by paired
+# ratios. The 5us floor, geomean <= 1.10 and per-item <= 1.60 are unchanged.
+# Auto-calibrated items get 0.05s/process; the 500-round pedantic budget is
+# spread across pairs (84 per process for six pairs, same for BASE and HEAD).
+# Repeated cost-check rounds are divided across pairs, rounding up.
+# First-cache keeps 20 rounds per process to stabilize million-row medians under load.
+# The full gate measures every volas section and release cost bounds.
+# Sub-5us rows contribute one summed bucket per section, with the same limits.
+# Nothing is archived unless PERF_AB_JSON_DIR is explicitly supplied.
 #
 #   make perf-ab BASE=HEAD~1                       # full suite
 #   make perf-ab BASE=HEAD~1 INDICATOR=bop         # one indicator
 #   make perf-ab BASE=HEAD~1 SECTION=windowed      # one report section
+#   BASE_SITE=/isolated/site make perf-ab BASE=HEAD  # reuse a prebuilt BASE
+#   PERF_AB_ROUNDS=10 make perf-ab BASE=HEAD       # even, >= 6 pairs
+# PERF_AB_KSELECT overrides the default full-suite selector for focused probes.
 BASE ?= HEAD~1
 perf-ab:
 	@VOLAS_PYTHON=$(PYTHON) bash scripts/perf_ab.sh "$(BASE)" "$(INDICATOR)" "$(SECTION)"
@@ -328,3 +338,13 @@ dev: build test-quick
 
 # Full CI check: lint, then the full suite with the combined coverage report.
 ci: lint test
+
+# Show the main verification commands and the release performance protocol.
+help:
+	@echo "make test       Full correctness suite and 100% combined Rust coverage"
+	@echo "make lint       Source size, ruff, mypy and clippy checks"
+	@echo "make docs       Strict Sphinx documentation build"
+	@echo "make perf-ab BASE=<ref>   All volas sections + original release cost bounds"
+	@echo "  Six balanced AB/BA pairs; geomean <=1.10, item <=1.60; sub-5us rows summed by section"
+	@echo "  SECTION=<section> / INDICATOR=<directive> for focused measurements"
+	@echo "  PERF_AB_JSON_DIR=<dir> retains raw pairs, cost checks and logs (including failures)"

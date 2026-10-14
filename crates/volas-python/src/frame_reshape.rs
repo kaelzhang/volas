@@ -77,14 +77,21 @@ impl PyDataFrame {
         let view = self.read()?;
         let df = view.as_ref();
         let idx = df.index();
+        let all_missing = df.columns().iter().all(|c| c.null_count() == c.len());
+        if all_missing {
+            return Ok(PyDataFrame::plain(DataFrame::new(df.names().to_vec(), df.columns().iter().map(|c| c.take(&[])).collect(), None).map_err(pyerr)?));
+        }
         let mut cols = Vec::with_capacity(df.width());
         for (name, col) in df.names().iter().zip(df.columns()) {
             let s = PySeries {
                 inner: Series::new(Some(name.clone()), col.clone(), Arc::clone(idx)),
             };
             let m = s.mode();
-            let take: Vec<usize> = if m.inner.is_empty() { vec![] } else { vec![0] };
-            cols.push(m.inner.data.take(&take));
+            cols.push(if m.inner.is_empty() {
+                Column::na_of(col.dtype(), 1)
+            } else {
+                m.inner.data.take(&[0])
+            });
         }
         Ok(PyDataFrame::plain(
             DataFrame::new(df.names().to_vec(), cols, None).map_err(pyerr)?,
@@ -198,7 +205,8 @@ impl PyDataFrame {
     /// per column via ``cumulators``. A cached directive column is not carried (it
     /// is computed over the coarse bars when requested there). If the source already has a ``time_frame``,
     /// the target must be a whole multiple of it (e.g. 5m→15m, not 5m→7m, and not
-    /// a week/3-day into a month); cumulating to the *same* frame is a ``copy()``.
+    /// a week/3-day into a month). The same target re-aggregates the current data
+    /// rows with the requested cumulators, just like any other target.
     ///
     /// Args:
     ///     time_frame (str | TimeFrame): the target bucket, e.g. ``'1d'``,
@@ -222,10 +230,6 @@ impl PyDataFrame {
         let view = self.read()?;
         let target = resolve_time_frame(time_frame)?;
         if let Some(tfs) = &self.tf {
-            // Same frame is a no-op resample == copy() (keeps the cursor & state).
-            if target == tfs.time_frame() {
-                return Ok(self.copy());
-            }
             if !tfs.time_frame().can_coarsen(target) {
                 return Err(PyValueError::new_err(format!(
                     "cannot cumulate {} -> {}: the target is not a whole multiple of the source frame",
@@ -240,14 +244,13 @@ impl PyDataFrame {
             view.names().iter().filter(|n| !view.is_computed(n)).cloned().collect();
         let base = view.select(&data).map_err(pyerr)?;
         let spec = build_agg_spec_for(cumulators, Some(base.names()))?;
-        let mut cum = Cumulator::new(target, spec.clone());
-        cum.append(&base).map_err(pyerr)?;
-        let frame = cum.frame().map_err(pyerr)?;
+        let cum = Cumulator::from_frame(&base, target, spec.clone()).map_err(pyerr)?;
+        let (frame, open, aggregate) = cum.into_parts().map_err(pyerr)?;
         // The result is a fresh frame (no cached directive columns -> cursor 0)
         // that carries the open period's fine bars so further appends fold in.
         Ok(PyDataFrame {
             inner: frame,
-            tf: Some(TfState::from_cumulator(target, spec, &cum)),
+            tf: Some(TfState::from_cumulated(target, spec, open, aggregate)),
             window: None,
         })
     }

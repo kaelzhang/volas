@@ -227,38 +227,38 @@ pub(super) fn dispatch(
         // (min_periods = period, so an NA-bearing window stays NA).
         ("median", _) => {
             let p = arg_usize(args, 0);
-            f64col(volas_compute::window::median(&close(0)?, p, p))
+            f64col(volas_compute::window::median(&close(0)?, p, p).map_err(|e| volas_core::VolasError::Value(e.to_string()))?)
         }
         ("quantile", _) => {
             let p = arg_usize(args, 0);
             let q = arg_f64(args, 1);
-            f64col(volas_compute::window::quantile(&close(0)?, p, p, q, "linear"))
+            f64col(volas_compute::window::quantile(&close(0)?, p, p, q, "linear").map_err(|e| volas_core::VolasError::Value(e.to_string()))?)
         }
         // percent rank of the current bar within its window, in (0, 1].
         ("rank", _) => {
             let p = arg_usize(args, 0);
-            f64col(volas_compute::window::rank(&close(0)?, p, p, "average", true, true))
+            f64col(volas_compute::window::rank(&close(0)?, p, p, "average", true, true).map_err(|e| volas_core::VolasError::Value(e.to_string()))?)
         }
         ("skew", _) => {
             let p = arg_usize(args, 0);
-            f64col(volas_compute::window::skew(&close(0)?, p, p))
+            f64col(volas_compute::window::skew(&close(0)?, p, p).map_err(|e| volas_core::VolasError::Value(e.to_string()))?)
         }
         ("kurt", _) => {
             let p = arg_usize(args, 0);
-            f64col(volas_compute::window::kurt(&close(0)?, p, p))
+            f64col(volas_compute::window::kurt(&close(0)?, p, p).map_err(|e| volas_core::VolasError::Value(e.to_string()))?)
         }
         ("sem", _) => {
             let p = arg_usize(args, 0);
-            f64col(volas_compute::window::sem(&close(0)?, p, p, 1))
+            f64col(volas_compute::window::sem(&close(0)?, p, p, 1).map_err(|e| volas_core::VolasError::Value(e.to_string()))?)
         }
         // TradingView dispersion / order statistics (window family).
         ("dev", _) => {
             let p = arg_usize(args, 0);
-            f64col(volas_compute::window::dev(&close(0)?, p, p))
+            f64col(volas_compute::window::dev(&close(0)?, p, p).map_err(|e| volas_core::VolasError::Value(e.to_string()))?)
         }
         ("mode", _) => {
             let p = arg_usize(args, 0);
-            f64col(volas_compute::window::mode(&close(0)?, p, p))
+            f64col(volas_compute::window::mode(&close(0)?, p, p).map_err(|e| volas_core::VolasError::Value(e.to_string()))?)
         }
         // TradingView oscillators (cog / rci) and the per-bar volume study iii.
         ("cog", _) => f64col(ind::cog(&close(0)?, arg_usize(args, 0), ops.origin())),

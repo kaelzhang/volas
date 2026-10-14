@@ -213,15 +213,23 @@ impl SeriesILoc {
     }
 }
 
-/// A dtype-exact, hash-able key for a cell: `None` for a missing cell, else a
-/// string discriminated by dtype (float by bit pattern, so distinct values never
-/// collide — with `-0.0` canonicalized to `0.0`, numerically one value). Backs
+/// A value-exact, hash-able key for a cell: `None` for a missing cell.
+/// Numeric integers share keys across storage dtypes; other floats use bits.
+/// Signed zeros share the integer zero key. Backs
 /// value_counts / mode / isin / duplicated / replace.
 pub(crate) fn cell_key(col: &Column, i: usize) -> Option<String> {
     if !col.is_valid(i) {
         return None;
     }
-    let float = |x: f64| format!("f{:x}", if x == 0.0 { 0.0f64 } else { x }.to_bits());
+    // Integral floats share an integer key only inside the exact int64 domain.
+    // Never cast an integer to float: adjacent large integers must stay distinct.
+    let float = |x: f64| {
+        if x.fract() == 0.0 && x >= i64::MIN as f64 && x < -(i64::MIN as f64) {
+            format!("i{}", x as i64)
+        } else {
+            format!("f{:x}", x.to_bits())
+        }
+    };
     Some(match col {
         Column::F64(v) => float(v[i]),
         Column::F32(v) => float(v[i] as f64),

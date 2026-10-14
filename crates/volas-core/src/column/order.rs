@@ -2,6 +2,7 @@
 //! sort/rank, the typed extreme/running-extreme, append, scatter, and equality.
 
 use super::*;
+use super::fold::collect_with_spare;
 
 impl Column {
     /// A contiguous `[start, end)` slice (a fresh buffer).
@@ -21,24 +22,39 @@ impl Column {
 
     /// Gather the given positions into a new column (fancy indexing).
     pub fn take(&self, idx: &[usize]) -> Column {
+        self.take_with_spare(idx, 0, 0)
+    }
+
+    /// Gather into the final buffers with room for rows the builder will append.
+    pub(super) fn take_with_spare(&self, idx: &[usize], spare: usize, bytes: usize) -> Column {
+        let gather = |v: &[f64]| collect_with_spare(idx.iter().map(|&i| v[i]), spare);
         match self {
-            Column::F64(v) => Column::f64(idx.iter().map(|&i| v[i]).collect()),
-            Column::F32(v) => Column::f32(idx.iter().map(|&i| v[i]).collect()),
+            Column::F64(v) => Column::f64(gather(v)),
+            Column::F32(v) => Column::f32(collect_with_spare(idx.iter().map(|&i| v[i]), spare)),
             Column::Bool(v, val) => {
-                Column::bool_masked(idx.iter().map(|&i| v[i]).collect(), val.take(idx))
+                Column::bool_masked(collect_with_spare(idx.iter().map(|&i| v[i]), spare), val.take(idx))
             }
             Column::I64(v, val) => {
-                Column::i64_masked(idx.iter().map(|&i| v[i]).collect(), val.take(idx))
+                Column::i64_masked(collect_with_spare(idx.iter().map(|&i| v[i]), spare), val.take(idx))
             }
             Column::I32(v, val) => {
-                Column::i32_masked(idx.iter().map(|&i| v[i]).collect(), val.take(idx))
+                Column::i32_masked(collect_with_spare(idx.iter().map(|&i| v[i]), spare), val.take(idx))
             }
             // Gather straight into one contiguous `StrBuffer` (no intermediate
             // `Vec<String>`, so no per-cell allocation).
             Column::Str(v, val) => {
-                Column::Str(idx.iter().map(|&i| v.get(i)).collect(), val.take(idx))
+                if spare == 0 && bytes == 0 {
+                    return Column::Str(idx.iter().map(|&i| v.get(i)).collect(), val.take(idx));
+                }
+                let size = idx.iter().map(|&i| v.get(i).len()).sum::<usize>();
+                let capacity = if spare == 0 { size + bytes } else { (size * 2).max(size + bytes) };
+                let capacity = if capacity == 0 || spare == 0 { capacity } else { capacity.max(8) };
+                let rows = idx.len() + spare + usize::from(spare != 0);
+                let mut builder = crate::strbuf::StrBufferBuilder::with_capacities(rows, capacity);
+                for &i in idx { builder.push(v.get(i)); }
+                Column::Str(builder.finish(), val.take(idx))
             }
-            Column::Datetime(v) => Column::datetime(idx.iter().map(|&i| v[i]).collect()),
+            Column::Datetime(v) => Column::datetime(collect_with_spare(idx.iter().map(|&i| v[i]), spare)),
         }
     }
 
@@ -222,13 +238,22 @@ impl Column {
     /// by raw `i64`, `bool` by `false < true`. The result is always `f64` (ties
     /// can average to `x.5`), so rank is order-based, not a numeric-arithmetic op.
     pub fn rank(&self, method: stats::RankMethod, ascending: bool, pct: bool) -> Vec<f64> {
+        self.rank_with_na(method, ascending, pct, None)
+    }
+
+    /// Rank missing cells as one tie group, at the top (`Some(true)`) or bottom
+    /// (`Some(false)`) independent of sort direction, or keep them missing.
+    pub fn rank_with_na(&self, method: stats::RankMethod, ascending: bool, pct: bool, na_top: Option<bool>) -> Vec<f64> {
         stats::rank_by(
             self.len(),
-            |i| self.is_valid(i),
-            |a, b| self.cmp_at(a, b),
-            method,
-            ascending,
-            pct,
+            |i| na_top.is_some() || self.is_valid(i),
+            |a, b| match (self.is_valid(a), self.is_valid(b)) {
+                (true, true) => self.cmp_at(a, b),
+                (false, false) => Ordering::Equal,
+                (false, true) => if na_top == Some(ascending) { Ordering::Less } else { Ordering::Greater },
+                (true, false) => if na_top == Some(ascending) { Ordering::Greater } else { Ordering::Less },
+            },
+            method, ascending, pct,
         )
     }
 

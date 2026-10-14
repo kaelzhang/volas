@@ -146,3 +146,21 @@ fn reduction_scalars_keep_bool_and_missing() {
     let ints = Column::from_scalars(&[(DType::I64, Scalar::F64(f64::NAN))]).unwrap();
     assert!(!ints.is_valid(0));
 }
+
+#[test]
+fn default_rank_keeps_missing_and_orders_large_integers_exactly() {
+    let a = 1_i64 << 53;
+    let col = Column::i64_from_options([Some(a + 1), None, Some(a), Some(a + 1)]);
+    for (method, ascending, pct, expected) in [
+        (stats::RankMethod::Average, true, false, [2.5_f64, f64::NAN, 1.0, 2.5]),
+        (stats::RankMethod::Dense, false, true, [0.5, f64::NAN, 1.0, 0.5]),
+    ] {
+        for (actual, expected) in col.rank(method, ascending, pct).into_iter().zip(expected) {
+            if expected.is_nan() {
+                assert!(actual.is_nan());
+            } else {
+                assert_eq!(actual.to_bits(), expected.to_bits());
+            }
+        }
+    }
+}

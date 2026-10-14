@@ -71,7 +71,7 @@ pub(super) fn compute(ops: &Operands, cmd: &BoundCommand, marks: &[usize]) -> Op
         }
         ("ma", _) if ind::generic_ma_type(p(0), p(1)) == 0 => {
             let x = close()?;
-            KernelPass::run_marked(marks, |s| kernels::sma_pass((&*x).into(), p(0), origin, s).into_raw_vec_and_offset().0)
+            KernelPass::run_marked(marks, |s| kernels::sma_pass(&x, p(0), origin, s))
         }
         ("ma", _) | ("wma" | "trima" | "sum", _) => {
             let x = close()?;
@@ -90,17 +90,16 @@ pub(super) fn compute(ops: &Operands, cmd: &BoundCommand, marks: &[usize]) -> Op
         }
         ("boll" | "accbands", None) => {
             let x = close()?;
-            KernelPass::run_marked(marks, |s| kernels::sma_pass((&*x).into(), p(0), origin, s).into_raw_vec_and_offset().0)
+            KernelPass::run_marked(marks, |s| kernels::sma_pass(&x, p(0), origin, s))
         }
         ("boll", Some(_)) | ("bbw", _) => {
             let x = close()?;
             KernelPass::run_marked(marks, |s| {
-                let (m, d) = kernels::rolling_mean_std_pass((&*x).into(), p(0), 0, origin, s);
-                m.iter().zip(&d).map(|(m, d)| match cmd.sub {
+                kernels::rolling_dispersion_pass(&x, p(0), 0, origin, s, |m, d| match cmd.sub {
                     Some("upper") => m + arg_f64(cmd.args, 1) * d,
                     Some(_) => m - arg_f64(cmd.args, 1) * d,
                     None => 4.0 * d / m,
-                }).collect()
+                })
             })
         }
         ("vwma", _) => {
@@ -208,8 +207,24 @@ pub(super) fn compute(ops: &Operands, cmd: &BoundCommand, marks: &[usize]) -> Op
     }
 }
 
+/// A pass publishes both states only when both complete input tails exist.
+/// Declining leaves short history to the continuation owner's warm-up capture.
+fn tails(values: &[f64], reach: usize) -> Option<(&[f64], &[f64])> {
+    let n = values.len();
+    let before = n.checked_sub(1)?;
+    Some((&values[n.checked_sub(reach)?..], &values[before.checked_sub(reach)?..before]))
+}
+
+fn append_tails(pass: &mut KernelPass, values: &[f64], reach: usize) -> Option<()> {
+    let (after, before) = tails(values, reach)?;
+    pass.after.extend_from_slice(after);
+    pass.before.extend_from_slice(before);
+    append_tail(&mut pass.points, values, reach);
+    Some(())
+}
+
 fn stage(stage: ind::MaStage, data: &[f64], origin: usize, marks: &[usize]) -> Option<KernelPass> {
-    let mut states = volas_compute::pass::States { marks: marks.to_vec(), points: volas_compute::pass::KernelPoints::with_capacity(marks.len()), ..Default::default() };
+    let mut states = volas_compute::pass::States { marks: marks.iter().copied().filter(|&end| end > 0).collect(), points: volas_compute::pass::KernelPoints::with_capacity(marks.len()), ..Default::default() };
     let values = stage.pass(data, origin, &mut states)?;
     Some(KernelPass { values, after: states.after?, before: states.before?, points: states.points })
 }
@@ -227,10 +242,7 @@ fn averages(ops: &Operands, cmd: &BoundCommand, marks: &[usize]) -> Option<Kerne
     }
     if let Some(smooth) = a.smooth {
         let mut signal = stage(smooth, &fast.values, ops.origin(), marks)?;
-        let n = data.len();
-        signal.after.extend_from_slice(&fast.values[n - smooth.reach()..]);
-        signal.before.extend_from_slice(&fast.values[n - 1 - smooth.reach()..n - 1]);
-        append_tail(&mut signal.points, &fast.values, smooth.reach());
+        append_tails(&mut signal, &fast.values, smooth.reach())?;
         merge_points(&mut fast.points, &signal.points, 0);
         fast.after.extend(signal.after);
         fast.before.extend(signal.before);
@@ -248,7 +260,7 @@ fn mavp(ops: &Operands, cmd: &BoundCommand, marks: &[usize]) -> Option<KernelPas
     let (lo, hi, mt) = (p(0), p(1), p(2));
     let lb = ind::generic_ma_lookback(hi, mt);
     let n = data.len();
-    let mut result = KernelPass { values: vec![f64::NAN; n], after: vec![n as f64], before: vec![(n - 1) as f64], points: { let mut points = volas_compute::pass::KernelPoints::with_capacity(marks.len()); for &end in marks { points.capture(end, |words| words.push(end as f64)); } points } };
+    let mut result = KernelPass { values: vec![f64::NAN; n], after: vec![n as f64], before: vec![n.checked_sub(1)? as f64], points: { let mut points = volas_compute::pass::KernelPoints::with_capacity(marks.len()); for &end in marks { points.capture(end, |words| words.push(end as f64)); } points } };
     // Classify the output rows once. Each stage writes only its selected rows,
     // rather than re-reading and clamping every period for every stage.
     let mut selected = vec![Vec::new(); hi - lo + 1];
@@ -257,7 +269,7 @@ fn mavp(ops: &Operands, cmd: &BoundCommand, marks: &[usize]) -> Option<KernelPas
     }
     for q in lo..=hi {
         let start = lb - ind::generic_ma_lookback(q, mt);
-        let pass = stage(ind::MaStage::new(q, mt)?, &data[start..], ops.origin() + start, &marks.iter().map(|&end| end.saturating_sub(start)).collect::<Vec<_>>())?;
+        let pass = stage(ind::MaStage::new(q, mt)?, data.get(start..)?, ops.origin() + start, &marks.iter().filter_map(|&end| end.checked_sub(start).filter(|&end| end > 0)).collect::<Vec<_>>())?;
         merge_points(&mut result.points, &pass.points, start);
         result.after.extend(pass.after);
         result.before.extend(pass.before);
@@ -275,14 +287,11 @@ fn stochastic(ops: &Operands, cmd: &BoundCommand, marks: &[usize]) -> Option<Ker
     let mut result = stage(ind::MaStage::new(stages[0].0, stages[0].1)?, &raw, ops.origin(), marks)?;
     if count == 2 {
         let smooth = ind::MaStage::new(stages[1].0, stages[1].1)?;
-        let pass = stage(smooth, &result.values, ops.origin(), marks)?;
+        let mut pass = stage(smooth, &result.values, ops.origin(), marks)?;
+        append_tails(&mut pass, &result.values, smooth.reach())?;
         merge_points(&mut result.points, &pass.points, 0);
-        append_tail(&mut result.points, &result.values, smooth.reach());
         result.after.extend(pass.after);
         result.before.extend(pass.before);
-        let n = raw.len();
-        result.after.extend_from_slice(&result.values[n - smooth.reach()..]);
-        result.before.extend_from_slice(&result.values[n - 1 - smooth.reach()..n - 1]);
         result.values = pass.values;
     }
     Some(result)
@@ -292,21 +301,20 @@ fn stochrsi(ops: &Operands, cmd: &BoundCommand, marks: &[usize]) -> Option<Kerne
     let x = ops.f64(0, "close").ok()?;
     let p = |i| arg_usize(cmd.args, i);
     let mut rsi = KernelPass::run_marked(marks, |s| ind::rsi_pass(&x, p(0), s))?;
-    let n = x.len();
     let c = p(1) - 1;
-    rsi.after.extend_from_slice(&rsi.values[n - c..]);
-    rsi.before.extend_from_slice(&rsi.values[n - 1 - c..n - 1]);
+    // The RSI kernel can seed before the stochastic input ring is complete.
+    let (after, before) = tails(&rsi.values, c)?;
+    rsi.after.extend_from_slice(after);
+    rsi.before.extend_from_slice(before);
     append_tail(&mut rsi.points, &rsi.values, c);
     let raw = ind::stochrsi_from_rsi(&rsi.values, p(1));
     if cmd.sub == Some("d") {
         let ma = ind::MaStage::new(p(2), p(3))?;
-        let pass = stage(ma, &raw, ops.origin(), marks)?;
+        let mut pass = stage(ma, &raw, ops.origin(), marks)?;
+        append_tails(&mut pass, &raw, ma.reach())?;
         merge_points(&mut rsi.points, &pass.points, 0);
-        append_tail(&mut rsi.points, &raw, ma.reach());
         rsi.after.extend(pass.after);
         rsi.before.extend(pass.before);
-        rsi.after.extend_from_slice(&raw[n - ma.reach()..]);
-        rsi.before.extend_from_slice(&raw[n - 1 - ma.reach()..n - 1]);
         rsi.values = pass.values;
     } else { rsi.values = raw; }
     Some(rsi)
@@ -325,8 +333,11 @@ fn merge_points(points: &mut volas_compute::pass::KernelPoints, part: &volas_com
 
 fn append_tail(points: &mut volas_compute::pass::KernelPoints, values: &[f64], reach: usize) {
     points.transform(|end, state, out| {
+        let Some(start) = end.checked_sub(reach) else { return false; };
         out.extend_from_slice(state);
-        out.extend_from_slice(&values[end.saturating_sub(reach)..end]);
+        out.extend_from_slice(&values[start..end]);
         true
     });
 }
+#[cfg(test)]
+mod tests;

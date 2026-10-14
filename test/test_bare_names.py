@@ -57,9 +57,10 @@ def test_every_command_spelling_and_the_renamed_column_read_the_data():
     np.testing.assert_array_equal(df['close * change:'], want)
 
 
-def test_a_column_named_like_a_command_a_cached_directive_uses_cannot_be_added():
+@pytest.mark.parametrize('spelling', ['change', 'CHANGE', 'ChAnGe'])
+def test_a_column_named_like_a_command_a_cached_directive_uses_cannot_be_added(spelling):
     df = frame(change=False)
-    df['close * change']
+    df[f'close * {spelling}']
     before = state(df)
     with pytest.raises(ValueError) as err:
         df['change'] = CHANGE
@@ -132,3 +133,53 @@ def test_several_cached_directives_are_named_together():
 def test_a_command_with_a_required_series_is_not_a_bare_command():
     df = volas.DataFrame({'close': CLOSE, 'repeat': CHANGE})
     assert np.array_equal(df.exec('close + repeat'), CLOSE + CHANGE)
+
+
+@pytest.mark.parametrize('spelling', ['change', 'CHANGE', 'ChAnGe'])
+def test_binding_reads_the_physical_data_column_under_every_command_spelling(spelling):
+    df = volas.DataFrame({'close': CLOSE, spelling: CHANGE})
+    before_columns = list(df.columns)
+    for name in ('change', 'CHANGE', 'ChAnGe', 'change:', 'CHANGE:'):
+        directive = f'close * {name}'
+        np.testing.assert_array_equal(df.exec(directive), CLOSE * CHANGE)
+        np.testing.assert_array_equal(df[directive], CLOSE * CHANGE)
+        np.testing.assert_array_equal(df[name], CHANGE)
+    assert list(df.columns) == [*before_columns, f'close*{spelling}']
+    assert not df.is_computed(spelling)
+    assert df.is_computed(f'close*{spelling}')
+    np.testing.assert_array_equal(df.get_column(spelling), CHANGE)
+
+
+@pytest.mark.parametrize('spelling', ['change', 'CHANGE', 'ChAnGe'])
+def test_added_equivalent_column_spelling_requires_dropping_the_cached_command(spelling):
+    df = frame(change=False)
+    df[f'close * {spelling}']
+    before = state(df)
+    with pytest.raises(ValueError) as err:
+        df['CHANGE'] = CHANGE
+    assert str(err.value) == CANNOT_ADD.replace("column 'change'", "column 'CHANGE'")
+    assert state(df) == before
+    assert df.is_computed('close*change')
+    np.testing.assert_array_equal(df['close*change'],
+                                  frame(change=False).exec('close * change'))
+    dropped = df.drop([f'close * {spelling}'], axis=1)
+    assert 'close*change' not in dropped.columns
+    dropped['CHANGE'] = CHANGE
+    assert not dropped.is_computed('CHANGE')
+    for name in ('change', 'CHANGE', 'ChAnGe', 'change:', 'CHANGE:'):
+        np.testing.assert_array_equal(dropped[name], CHANGE)
+        np.testing.assert_array_equal(dropped.exec(f'close * {name}'), CLOSE * CHANGE)
+        np.testing.assert_array_equal(dropped[f'close * {name}'], CLOSE * CHANGE)
+    assert df.is_computed('close*change')
+    assert state(df) == before
+
+
+@pytest.mark.parametrize('spelling', ['CHANGE', 'ChAnGe'])
+def test_declared_bare_commands_use_canonical_identity_for_added_columns(spelling):
+    df = volas.DataFrame({'close': CLOSE, 'volume': VOLUME},
+                         window=5, max_lookback=[f'close * {spelling}'])
+    before = state(df)
+    with pytest.raises(ValueError) as err:
+        df['change'] = CHANGE[-5:]
+    assert str(err.value) == CANNOT_ADD
+    assert state(df) == before

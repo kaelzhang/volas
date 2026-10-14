@@ -27,7 +27,7 @@ use volas_directive::{parse, stringify};
 use crate::*;
 
 /// The windowed-frame lookback bound — how `max_lookback=` is supplied: either an
-/// explicit row count, or a list of indicator directives whose largest lookback it is
+/// explicit row count, or a list of directives whose largest lookback it is
 /// derived from (so the caller never hand-computes a compound indicator's warm-up).
 #[derive(FromPyObject)]
 pub(crate) enum LookbackBound {
@@ -90,7 +90,7 @@ pub(crate) struct Bounds {
 
 /// Validate the windowing arguments — before any data is touched. `max_lookback` only
 /// applies with `window`; with `window` it is required, an int or a non-empty list of
-/// indicator directives (whose largest lookback is the margin).
+/// directives (whose largest lookback is the margin).
 pub(crate) fn bounds(
     window: Option<usize>,
     max_lookback: Option<LookbackBound>,
@@ -110,7 +110,7 @@ pub(crate) fn bounds(
         None => {
             return Err(PyValueError::new_err(
                 "a windowed frame needs its lookback bound — pass max_lookback= \
-                 (an int, or a list of indicator directives to derive it from)",
+                 (an int, or a list of directives to derive it from)",
             ))
         }
         Some(LookbackBound::Count(l)) => (l, Vec::new()),
@@ -121,13 +121,13 @@ pub(crate) fn bounds(
                      computes, or an int (max_lookback=0 for none)",
                 ));
             }
-            // Each entry must name an INDICATOR: `indicator_lookback` rejects a typo'd
-            // / bare-column directive (e.g. `ma5` for `ma:5`) instead of deriving a
-            // silent 0-row margin.
+            // Any valid directive may be declared, including a raw column (lookback
+            // zero). Bare names are bound against the constructed frame in `bound`,
+            // where a column such as `ma` need not be a usable bare command.
             let mut max = 0usize;
             for d in &inds {
-                let node = parse(d).map_err(pyerr)?;
-                max = max.max(volas_directive::lookback::indicator_lookback(&node).map_err(pyerr)?);
+                let node = parse(d).map_err(directive_err)?;
+                max = max.max(volas_directive::lookback::lookback(&node));
             }
             (max, inds)
         }
@@ -180,11 +180,19 @@ impl PyDataFrame {
         let mut nodes = Vec::with_capacity(declared.len());
         for text in &declared {
             let node = parse(text).map_err(directive_err)?;
+            // An existing raw column is already kept as data: it needs no computed
+            // cache or warm-up. Binding still enforces the bare-name ambiguity rule.
+            if let volas_directive::types::Node::Name(name) = node.node() {
+                if self.inner.has_column(name) && !self.inner.is_computed(name) {
+                    volas_directive::bind_frame(&node, &|n| self.inner.has_column(n), text).map_err(value_err)?;
+                    continue;
+                }
+            }
             self.check_kept(&node, text)?;
             self.check_declarable(&node, text)?;
-            nodes.push(node);
+            nodes.push((text, node));
         }
-        for (text, node) in declared.iter().zip(&nodes) {
+        for (text, node) in &nodes {
             let canonical = stringify(node.as_ref());
             if !self.inner.is_computed(&canonical) {
                 self.cache_new(text, node)?;
@@ -236,7 +244,8 @@ impl PyDataFrame {
     /// directive this frame already caches, its column.
     pub(crate) fn admit_new(&self, node: &Ast, text: &str) -> PyResult<()> {
         let Some(w) = &self.window else { return Ok(()) };
-        let reach = volas_directive::lookback::reach(node);
+        let bound = Self::bind(&self.inner, node, text)?;
+        let reach = volas_directive::lookback::reach(&bound);
         let why = match reach.history {
             History::Window if reach.lookback <= w.lookback => return Ok(()),
             History::Window => format!(

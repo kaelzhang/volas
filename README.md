@@ -202,6 +202,17 @@ df['close'].to_numpy()           # 1-D ndarray
 df.to_numpy()                    # 2-D ndarray (rows x columns)
 ```
 
+[Cumulation](docs/cumulation.md) accepts empty datetime frames and applies the
+requested aggregation rules even at the same time frame. Window declarations
+also accept raw columns (`max_lookback=['close']`, lookback zero).
+
+Arrow imports take an owned snapshot by default. For immutable producers,
+`DataFrame.from_arrow(table, copy=False)` and `Series.from_arrow(array, copy=False)`
+retain the zero-copy import option: the producer and every alias must never write
+borrowed memory again while imported objects or views survive. Zero-copy exports
+are unchanged. **Breaking change:** producer writes after a default import no longer
+change volas data. See the [interop contract](docs/interop.md#arrow--dlpack-interop-zero-copy).
+
 ## Built-in Indicators
 
 The complete directive reference lives in [INDICATORS.md](INDICATORS.md). It
@@ -214,6 +225,12 @@ expose read-only `values()`, `spec()`, and `bare()` accessors. Execution, lookba
 and continuation APIs accept `&Ast`. The binder prepares the continuation plan
 once, including any stateful subtrees and their hidden input columns. `stringify`
 accepts `&Ast` or a lenient `&Form` using the same canonical renderer.
+
+Rust `compute::window` helpers return typed `WindowError` results for invalid
+window, decay, quantile, rank, or input-shape parameters; see the
+[compute crate guide](crates/volas-compute/README.md). `time::Agg::reduce` rejects
+empty or out-of-range selections. `time::aggregate_period` requires non-empty,
+ordered datetime bars within one period and rejects NaT or multiple periods.
 
 # Contributing & feedback
 

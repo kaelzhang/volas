@@ -18,6 +18,8 @@ import volas
 from volas import DataFrame
 from test import ht_reference as R
 
+from test.exact import assert_exact
+
 talib = pytest.importorskip('talib')
 
 TENCENT_FULL = str((Path(__file__).parent / 'data' / 'tencent_full.csv').resolve())
@@ -51,11 +53,11 @@ def _appended(data, directive, cut):
 
 
 def _same(got, want, exact=False):
-    got, want = np.asarray(got, float), np.asarray(want, float)
+    got, want = np.asarray(got), np.asarray(want)
     np.testing.assert_array_equal(np.isnan(got), np.isnan(want), err_msg='NaN masks differ')
     m = ~np.isnan(want)
     if exact:
-        np.testing.assert_array_equal(got[m], want[m])
+        assert_exact(got, want)
     else:
         np.testing.assert_allclose(got[m], want[m], rtol=1e-9, atol=1e-12)
 
@@ -138,8 +140,8 @@ def test_dm_period_one_starts_at_bar_one(name, fn):
 def test_obv_flat_bar_with_infinite_volume_leaves_the_total_unchanged():
     close, volume = np.array([1, 1, 2, 3.0]), np.array([10, np.inf, 3, 4.0])
     _same(_exec({'close': close, 'volume': volume}, 'obv'), talib.OBV(close, volume), exact=True)
-    _same(_exec({'close': close, 'volume': volume}, 'obv'), [10, 10, 13, 17])
-    _same(_appended({'close': close, 'volume': volume}, 'obv', 1), [10, 10, 13, 17], exact=True)
+    _same(_exec({'close': close, 'volume': volume}, 'obv'), [10.0, 10.0, 13.0, 17.0])
+    _same(_appended({'close': close, 'volume': volume}, 'obv', 1), [10.0, 10.0, 13.0, 17.0], exact=True)
 
 
 # --- AD / ADOSC / CMF / III / WVAD: one range-flow rule, zero flow when H == L ----------

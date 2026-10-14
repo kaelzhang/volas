@@ -81,46 +81,83 @@ impl Column {
         op: CombineOp,
         groups: impl ExactSizeIterator<Item = &'a [usize]>,
     ) -> std::result::Result<Column, (usize, VolasError)> {
+        self.reduce_groups_with_spare(op, groups, 0, 0)
+    }
+
+    /// The grouped fold with capacity for a following append. `spare_bytes` is
+    /// the additional UTF-8 payload size; fixed-width columns only use `spare_rows`.
+    pub fn reduce_groups_with_spare<'a>(
+        &self,
+        op: CombineOp,
+        groups: impl ExactSizeIterator<Item = &'a [usize]>,
+        spare_rows: usize,
+        spare_bytes: usize,
+    ) -> std::result::Result<Column, (usize, VolasError)> {
         if !op.supports(self.dtype()) {
             return Err((0, op.unsupported(self.dtype())));
         }
         if op.is_endpoint() {
-            let n = groups.len();
-            let (positions, valid) = match self {
-                Column::F64(s) => endpoint_groups(op, groups, |r| !s[r].is_nan()),
-                Column::F32(s) => endpoint_groups(op, groups, |r| !s[r].is_nan()),
-                Column::Datetime(s) => endpoint_groups(op, groups, |r| s[r] != i64::MIN),
-                Column::I64(_, v) | Column::I32(_, v) | Column::Bool(_, v) | Column::Str(_, v) => endpoint_groups(op, groups, |r| v.is_valid(r)),
-            };
-            let mut out = self.take(&positions);
-            match &mut out {
-                Column::F64(v) => {
-                    for i in 0..n { if !valid.is_valid(i) { v.set(i, f64::NAN); } }
-                }
-                Column::F32(v) => {
-                    for i in 0..n { if !valid.is_valid(i) { v.set(i, f32::NAN); } }
-                }
-                Column::Datetime(v) => {
-                    for i in 0..n { if !valid.is_valid(i) { v.make_mut()[i] = i64::MIN; } }
-                }
-                Column::I64(_, v) | Column::I32(_, v) | Column::Bool(_, v) | Column::Str(_, v) => *v = valid,
-            }
-            return Ok(out);
+            return Ok(self.endpoint_columns(op, groups, spare_rows, spare_bytes));
         }
         Ok(match self {
-            Column::F64(s) => Column::f64(groups.map(|r| float_reduce(op, s, r[0], r[1..].iter().copied())).collect()),
-            Column::F32(s) => Column::f32(groups.map(|r| float_reduce(op, s, r[0], r[1..].iter().copied())).collect()),
+            Column::F64(s) => Column::f64(collect_with_spare(groups.map(|r| float_reduce(op, s, r[0], r[1..].iter().copied())), spare_rows)),
+            Column::F32(s) => Column::f32(collect_with_spare(groups.map(|r| float_reduce(op, s, r[0], r[1..].iter().copied())), spare_rows)),
             Column::I64(s, sv) => {
-                let (values, valid) = int_groups(op, s, sv, groups, DType::I64)?;
+                let (values, valid) = int_groups(op, s, sv, groups, DType::I64, spare_rows)?;
                 Column::i64_masked(values, valid)
             }
             Column::I32(s, sv) => {
-                let (values, valid) = int_groups(op, s, sv, groups, DType::I32)?;
+                let (values, valid) = int_groups(op, s, sv, groups, DType::I32, spare_rows)?;
                 Column::i32_masked(values, valid)
             }
-            Column::Datetime(s) => Column::datetime(groups.map(|r| instant_reduce(op, s, r[0], r[1..].iter().copied())).collect()),
+            Column::Datetime(s) => Column::datetime(collect_with_spare(groups.map(|r| instant_reduce(op, s, r[0], r[1..].iter().copied())), spare_rows)),
             _ => unreachable!("the support table admits no other pair"), // LCOV_EXCL_LINE
         })
+    }
+
+    /// Endpoints write directly to the final typed values. Only strings need a
+    /// position pass to learn the exact UTF-8 byte capacity before gathering.
+    fn endpoint_columns<'a>(
+        &self, op: CombineOp, groups: impl ExactSizeIterator<Item = &'a [usize]>,
+        spare: usize, bytes: usize,
+    ) -> Column {
+        match self {
+            Column::F64(s) => {
+                let (values, _, missing) = endpoint_values(op, groups, s, |r| !s[r].is_nan(), |_| f64::NAN, spare);
+                let mut out = Column::f64(values);
+                // Match the original builder's learned NaN fact as well as its bits.
+                if let (Some(row), Column::F64(v)) = (missing, &mut out) { v.set(row, f64::NAN); }
+                out
+            }
+            Column::F32(s) => {
+                let (values, _, missing) = endpoint_values(op, groups, s, |r| !s[r].is_nan(), |_| f32::NAN, spare);
+                let mut out = Column::f32(values);
+                if let (Some(row), Column::F32(v)) = (missing, &mut out) { v.set(row, f32::NAN); }
+                out
+            }
+            Column::Datetime(s) => {
+                let (values, _, _) = endpoint_values(op, groups, s, |r| s[r] != i64::MIN, |_| i64::MIN, spare);
+                Column::datetime(values)
+            }
+            Column::I64(s, v) => {
+                let (values, valid, _) = endpoint_values(op, groups, s, |r| v.is_valid(r), |x| x, spare);
+                Column::i64_masked(values, valid)
+            }
+            Column::I32(s, v) => {
+                let (values, valid, _) = endpoint_values(op, groups, s, |r| v.is_valid(r), |x| x, spare);
+                Column::i32_masked(values, valid)
+            }
+            Column::Bool(s, v) => {
+                let (values, valid, _) = endpoint_values(op, groups, s, |r| v.is_valid(r), |x| x, spare);
+                Column::bool_masked(values, valid)
+            }
+            Column::Str(_, v) => {
+                let (positions, valid) = endpoint_groups(op, groups, |r| v.is_valid(r));
+                let mut out = self.take_with_spare(&positions, spare, bytes);
+                if let Column::Str(_, v) = &mut out { *v = valid; }
+                out
+            }
+        }
     }
 
     /// Set cell `row` to the aggregate of the single value `src[src_row]` under
@@ -429,10 +466,11 @@ fn int_groups<'a, T: crate::buffer::Element + Copy + Into<i64> + TryFrom<i64>>(
     sv: &Validity,
     groups: impl ExactSizeIterator<Item = &'a [usize]>,
     dtype: DType,
+    spare: usize,
 ) -> std::result::Result<(Vec<T>, Validity), (usize, VolasError)> {
     let n = groups.len();
     let mut valid = Validity::default();
-    let mut values = Vec::with_capacity(n);
+    let mut values = Vec::with_capacity(reserved_capacity::<T>(n, spare));
     for (i, rows) in groups.enumerate() {
         let value = int_reduce(op, s, sv, rows[0], rows[1..].iter().copied(), dtype).map_err(|e| (i, e))?;
         valid.set(i, n, value.is_some());
@@ -618,4 +656,35 @@ fn write_int<T: crate::buffer::Element + Copy>(buf: &mut Buffer<T>, val: &mut Va
 #[inline(never)]
 fn fold_overflow(dtype: DType) -> VolasError {
     crate::numeric::overflow(dtype, "a time-frame fold")
+}
+
+/// Materialize an exact-length iterator once, retaining spare append capacity.
+pub(super) fn collect_with_spare<T>(values: impl ExactSizeIterator<Item = T>, spare: usize) -> Vec<T> {
+    let mut out = Vec::with_capacity(reserved_capacity::<T>(values.len(), spare));
+    out.extend(values);
+    out
+}
+
+/// Keep the normal Vec growth minimum for a buffer that will continue appending.
+fn reserved_capacity<T>(len: usize, spare: usize) -> usize {
+    let capacity = len + spare;
+    if spare == 0 { capacity } else { capacity.max(if std::mem::size_of::<T>() == 1 { 8 } else { 4 }) }
+}
+
+fn endpoint_values<'a, T: Copy>(
+    op: CombineOp, groups: impl ExactSizeIterator<Item = &'a [usize]>, source: &[T],
+    present: impl Fn(usize) -> bool, absent: impl Fn(T) -> T, spare: usize,
+) -> (Vec<T>, Validity, Option<usize>) {
+    let n = groups.len();
+    let mut values = Vec::with_capacity(reserved_capacity::<T>(n, spare));
+    let mut valid = Validity::default();
+    let mut missing = None;
+    for (i, rows) in groups.enumerate() {
+        let first = rows[0];
+        let (present, last) = endpoint_scan(first, rows[1..].iter().copied(), &present);
+        let row = if present && op == CombineOp::Replace { last } else { first };
+        valid.set(i, n, present);
+        values.push(if present { source[row] } else { missing.get_or_insert(i); absent(source[row]) });
+    }
+    (values, valid, missing)
 }

@@ -68,6 +68,13 @@ Now we get a 5-minute kline:
 2020-01-01 00:15:00  330.0  335.2  322.0  323.0  82452902.0
 ```
 
+An empty DatetimeIndex input returns an empty time-frame-aware result with the
+same data columns, dtypes, index name and timezone; it can receive finer bars later.
+Cumulating to the source's own time frame re-aggregates its **current data rows**
+with the requested cumulators, drops cached directives, and uses those cumulators
+for later appends. It does not recover the original fine-bar history of already
+aggregated rows. Unknown columns or aggregator names raise on every target.
+
 `cumulate` defaults to OHLCV semantics — `open`=first, `high`=max, `low`=min,
 `close`=last, `volume`=sum — and **any other column falls back to `last`**. Pass
 `cumulators=` to override a column's aggregator; the common case is a non-OHLCV
@@ -443,3 +450,8 @@ key is `UTC`. String `"UTC"` and numeric UTC offsets remain fixed specifications
 `cumulate` to a daily (or coarser) bar aligns buckets to the frame's local
 trading day — DST-aware for a named zone — while the raw `.index` numpy export
 stays UTC (matching pandas `.values`).
+
+Rust callers of `volas_time::aggregate_period` must supply a non-empty,
+nondecreasing DatetimeIndex without NaT, with every bar in the same grid period.
+Duplicate timestamps keep the last bar. Invalid inputs return `VolasError::Value`;
+`Agg::reduce` also rejects empty or out-of-range row selections.

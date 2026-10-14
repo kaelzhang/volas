@@ -146,11 +146,10 @@ fn continuation_reach(node: &BoundNode) -> usize {
 
 /// Like [`lookback`], but requires the directive to name an **indicator**. A
 /// top-level bare name that binds to no command — a raw column reference, or a
-/// typo'd directive such as `ma5` for `ma:5` — is rejected (the same
-/// `unknown command "…"` error `df.exec` raises) rather than silently treated as a
-/// 0-lookback column; a bare sub-requiring name (`kdj`) is rejected too. This is
-/// the form a windowed frame's `max_lookback` list takes, where a bare column
-/// reference is meaningless and would silently under-size the retention margin.
+/// typo'd directive such as `ma5` for `ma:5` — is rejected rather than treated as a
+/// 0-lookback column; a bare sub-requiring name (`kdj`) is rejected too. This helper
+/// is for callers specifically requiring an indicator. Window declarations accept
+/// raw columns too, so they use [`lookback`] and bind names against their frame.
 ///
 /// Dataframe-agnostic: it validates the directive's form only — it never consults
 /// a column — so it stays a pure function of the directive, exactly like

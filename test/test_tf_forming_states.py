@@ -20,6 +20,8 @@ import volas
 
 from .test_window_locality import RECURSIVE, SUBCOMMANDS
 
+from test.exact import assert_exact
+
 OHLCV = ("open", "high", "low", "close", "volume")
 T0 = np.datetime64("2026-01-01T00:00")
 
@@ -50,15 +52,7 @@ def _bar(cols, i, minute):
 
 
 def _bit_exact(live, ref, ctx):
-    live = np.asarray(live, dtype=float)
-    ref = np.asarray(ref, dtype=float)
-    assert live.shape == ref.shape, f"{ctx}: shape {live.shape} != {ref.shape}"
-    both_nan = np.isnan(live) & np.isnan(ref)
-    a = np.where(both_nan, 0.0, live)
-    b = np.where(both_nan, 0.0, ref)
-    if not np.array_equal(a, b):
-        bad = int(np.argmax((a != b) & ~(np.isnan(a) & np.isnan(b))))
-        raise AssertionError(f"{ctx}: diverged at row {bad}: live={live[bad]!r} ref={ref[bad]!r}")
+    assert_exact(live, ref, ctx)
 
 
 def _reference(live):

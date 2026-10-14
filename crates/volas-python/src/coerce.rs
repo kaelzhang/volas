@@ -1,7 +1,9 @@
 //! Coerce Python objects into volas columns / dtypes for construction.
 
 
-use numpy::PyReadonlyArray1;
+use numpy::{Element, PyReadonlyArray1};
+use std::borrow::Cow;
+
 use pyo3::exceptions::{PyOverflowError, PyTypeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::PyList;
@@ -11,6 +13,14 @@ use volas_core::{
 
 #[allow(unused_imports)]
 use crate::*;
+
+/// Borrow a contiguous input, or copy a strided input in logical element order.
+pub(crate) fn numpy_values<'a, T: Element + Copy>(a: &'a PyReadonlyArray1<'_, T>) -> Cow<'a, [T]> {
+    match a.as_slice() {
+        Ok(values) => Cow::Borrowed(values),
+        Err(_) => Cow::Owned(a.as_array().iter().copied().collect()),
+    }
+}
 
 /// The `(unit, count)` of a NumPy datetime64 (`kind == "M"`) / timedelta64
 /// (`kind == "m"`) array or scalar (`np.datetime_data`), or `None` for any other
@@ -152,26 +162,26 @@ pub(crate) fn pyany_to_column(v: &Bound<'_, PyAny>) -> PyResult<Column> {
     if let Some((unit, count)) = numpy_time_unit(v, "M")? {
         let view = v.call_method1("view", ("int64",))?;
         let a = view.extract::<PyReadonlyArray1<i64>>()?;
-        let ns = datetime::datetime64_values_to_ns(a.as_slice()?, &unit, count).map_err(pyerr)?;
+        let ns = datetime::datetime64_values_to_ns(&numpy_values(&a), &unit, count).map_err(pyerr)?;
         return Ok(Column::datetime(ns));
     }
     if let Some(col) = exact_array_kind(v)? {
         return Ok(col);
     }
     if let Ok(a) = v.extract::<PyReadonlyArray1<f64>>() {
-        return Ok(Column::f64(a.as_slice()?.to_vec()));
+        return Ok(Column::f64(numpy_values(&a).into_owned()));
     }
     if let Ok(a) = v.extract::<PyReadonlyArray1<f32>>() {
-        return Ok(Column::f32(a.as_slice()?.to_vec()));
+        return Ok(Column::f32(numpy_values(&a).into_owned()));
     }
     if let Ok(a) = v.extract::<PyReadonlyArray1<i64>>() {
-        return Ok(Column::i64(a.as_slice()?.to_vec()));
+        return Ok(Column::i64(numpy_values(&a).into_owned()));
     }
     if let Ok(a) = v.extract::<PyReadonlyArray1<i32>>() {
-        return Ok(Column::i32(a.as_slice()?.to_vec()));
+        return Ok(Column::i32(numpy_values(&a).into_owned()));
     }
     if let Ok(a) = v.extract::<PyReadonlyArray1<bool>>() {
-        return Ok(Column::bool(a.as_slice()?.to_vec()));
+        return Ok(Column::bool(numpy_values(&a).into_owned()));
     }
     // A Python list infers its dtype like pandas/NumPy: all-bool -> bool, all-int
     // -> int64, else float64 (empty -> float64). Bool / int are tried before float
@@ -268,8 +278,7 @@ fn exact_array_kind(v: &Bound<'_, PyAny>) -> PyResult<Option<Column>> {
         "u" if size < 8 => pyany_to_column(&v.call_method1("astype", ("int64",))?).map(Some),
         "u" => {
             let a = v.extract::<PyReadonlyArray1<u64>>()?;
-            let vals = a
-                .as_slice()?
+            let vals = numpy_values(&a)
                 .iter()
                 .map(|&x| i64::try_from(x).map_err(|_| int64_overflow()))
                 .collect::<PyResult<Vec<i64>>>()?;

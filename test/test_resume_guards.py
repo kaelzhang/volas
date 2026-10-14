@@ -15,6 +15,8 @@ from volas import DataFrame
 
 from .test_window_locality import RECURSIVE, SUBCOMMANDS
 
+from test.exact import assert_exact
+
 _KEYS = sorted(set(RECURSIVE.values()) | {SUBCOMMANDS[k] for k in SUBCOMMANDS if k.split(".", 1)[0] in RECURSIVE})
 
 
@@ -39,11 +41,7 @@ def _series(kind, n=90):
 
 
 def _bits(got, want, ctx):
-    got, want = np.asarray(got, dtype=float), np.asarray(want, dtype=float)
-    same = (got == want) | (np.isnan(got) & np.isnan(want))
-    if not same.all():
-        bad = int(np.flatnonzero(~same)[0])
-        raise AssertionError(f"{ctx}: row {bad}: {got[bad]!r} vs {want[bad]!r}")
+    assert_exact(got, want, ctx)
 
 
 @pytest.mark.parametrize("kind", ["zero", "flat", "zero-then-walk", "steps"])

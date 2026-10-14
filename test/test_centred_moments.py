@@ -17,6 +17,8 @@ import pytest
 
 from volas import DataFrame
 
+from test.exact import assert_exact
+
 U = Fraction(1, 2**53)
 
 
@@ -29,11 +31,7 @@ LEVELS = (0.1, 100.0, 1234.5, 12345.67, 98765.4321)
 
 
 def _bits(got, want, ctx):
-    got, want = np.asarray(got, dtype=float), np.asarray(want, dtype=float)
-    same = (got == want) | (np.isnan(got) & np.isnan(want))
-    if not same.all():
-        bad = int(np.flatnonzero(~same)[0])
-        raise AssertionError(f"{ctx}: row {bad}: {got[bad]!r} vs {want[bad]!r}")
+    assert_exact(got, want, ctx)
 
 
 def _paths(cols, directive, seed=30):
@@ -231,8 +229,4 @@ def test_the_window_variance_depends_on_the_window_values_alone(method):
 
 
 def _bits_eq(got, want, ctx):
-    got, want = np.asarray(got, dtype=float), np.asarray(want, dtype=float)
-    same = (got == want) | (np.isnan(got) & np.isnan(want))
-    if not same.all():
-        bad = int(np.flatnonzero(~same)[0])
-        raise AssertionError(f"{ctx}: row {bad}: {got[bad]!r} vs {want[bad]!r}")
+    assert_exact(got, want, ctx)

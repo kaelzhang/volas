@@ -150,7 +150,7 @@ impl PyDataFrame {
             }
         }
         if let Ok(arr) = key.extract::<PyReadonlyArray1<bool>>() {
-            return Ok(Py::new(py, self.masked(arr.as_slice()?)?)?.into_any());
+            return Ok(Py::new(py, self.masked(&crate::coerce::numpy_values(&arr))?)?.into_any());
         }
         // boolean mask as a plain Python list (df[[True, False, ...]]). An empty
         // list is an empty column projection, not a mask, so it falls through.
@@ -570,9 +570,9 @@ impl PyDataFrame {
     }
 
     /// Bind a new directive (`directive` as written, parsed to `node`) against `frame`:
-    /// each bare name reads the data column or the built-in command it names, and one
-    /// that is both is rejected.
-    fn bind(
+    /// a physical data column owns every equivalent directive spelling; otherwise
+    /// the name binds to its built-in command.
+    pub(crate) fn bind(
         frame: &DataFrame,
         node: &volas_directive::Ast,
         directive: &str,

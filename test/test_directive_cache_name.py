@@ -1,11 +1,9 @@
 """A cached directive's column name is ``directive_stringify`` of it — one renderer —
-and it keeps a command apart from a bare name.
+and retains the bound command independently of its spelling.
 
 ``directive_stringify(d)`` is documented as "the actual column name volas caches it
 under": every argument is written as its bound value (``ma:05`` caches as ``ma:5``), and
-an explicit command whose arguments are all defaults keeps its colon (``boll:20`` caches
-as ``boll:``), so its name never re-reads as a bare name — which a data column of that
-name would take. A cached column refreshes from the directive it was bound to, never
+default arguments are dropped (``boll:20`` caches as ``boll``). A cached column refreshes from the directive it was bound to, never
 from a re-read of its name.
 """
 
@@ -18,6 +16,8 @@ import pytest
 
 import volas
 from test.harness.inventory import executable_lines, sample_value
+
+from test.exact import same_exact
 
 N = 60
 
@@ -39,8 +39,7 @@ def _frame(rows=N, **extra):
 
 
 def _same(a, b):
-    a, b = np.asarray(a, dtype=float), np.asarray(b, dtype=float)
-    return bool(((a == b) | (np.isnan(a) & np.isnan(b))).all())
+    return same_exact(a, b)
 
 
 def _spellings(line):
@@ -144,6 +143,22 @@ def test_a_cached_command_binding_is_protected_across_spellings():
         np.testing.assert_array_equal(df[d], DATA['close'])
 
 
+def test_a_cached_name_does_not_bypass_the_data_shadow_rule():
+    """An explicit cached command protects its computation until it is dropped;
+    afterwards, every directive spelling resolves to the physical data column."""
+    df = _frame()
+    df['close - OBV:']
+    held = np.asarray(df['close-obv']).copy()
+    with pytest.raises(ValueError, match="cannot add column 'obv'"):
+        df['obv'] = np.zeros(N)
+    np.testing.assert_array_equal(df['close-obv'], held)
+    assert np.asarray(df['close - obv:']).shape == (N,)
+    df = df.drop(['close-obv'], axis=1)
+    df['obv'] = np.zeros(N)
+    for directive in ('close - obv', 'close - OBV:', 'close - obv:'):
+        np.testing.assert_array_equal(df[directive], DATA['close'])
+
+
 def _appended(directive, extra=None, rows=N - 1):
     """`directive` cached on the first `rows` rows, then one row appended and read."""
     extra = extra or {}
@@ -199,3 +214,27 @@ def test_a_folded_forming_bar_refreshes_a_displaced_ichimoku_span():
     df.append(bar)
     assert len(df) == n
     assert _same(df[d], df.exec(d, dtype='float64'))
+
+
+@pytest.mark.parametrize('spelling', ['accbands', 'ACCBANDS', 'AcCbAnDs'])
+@pytest.mark.parametrize('template', ['({0})+({0}@open)', '-{0}', 'ma:3@{0}'])
+def test_a_bare_command_collision_uses_its_canonical_identity(spelling, template):
+    df = _frame()
+    directive = template.format(spelling)
+    df[directive]
+    canonical = volas.directive_stringify(directive)
+    before = df.to_numpy().copy()
+    columns = list(df.columns)
+    with pytest.raises(ValueError) as err:
+        df['accbands'] = np.zeros(N)
+    assert str(err.value) == (
+        f"cannot add column 'accbands': the cached directive '{canonical}' uses the built-in "
+        "command 'accbands' under that name. Rename the new column, or drop the cached directive "
+        f"first — df.drop(['{canonical}'], axis=1)."
+    )
+    assert list(df.columns) == columns
+    assert np.array_equal(df.to_numpy(), before, equal_nan=True)
+    assert df.is_computed(canonical)
+    dropped = df.drop([directive], axis=1)
+    dropped['accbands'] = np.zeros(N)
+    assert np.array_equal(dropped['accbands'].to_numpy(), np.zeros(N))

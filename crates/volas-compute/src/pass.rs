@@ -257,8 +257,8 @@ mod snapshot_tests {
                     for period in [0, 1, 20, 1000, n + 1].map(std::hint::black_box) {
                         let marks: Vec<_> = (16..n).step_by(16).collect();
                         let mut states = States { points: KernelPoints::with_capacity(marks.len()), marks, ..Default::default() };
-                        let actual = sma_pass((&*data).into(), period, origin, &mut states);
-                        let expected = sma((&*data).into(), period, origin);
+                        let actual = sma_pass(&data, period, origin, &mut states);
+                        let expected = sma(&data, period, origin);
                         assert_eq!(actual.iter().map(|v| v.to_bits()).collect::<Vec<_>>(), expected.iter().map(|v| v.to_bits()).collect::<Vec<_>>(), "{mode}, n{n}, period{period}, origin{origin}");
                     }
                 }
@@ -267,24 +267,24 @@ mod snapshot_tests {
     }
 
     #[test]
-    fn captured_seeded_smoothing_preserves_strided_rows_and_states() {
+    fn captured_seeded_smoothing_preserves_sampled_rows_and_states() {
         use crate::raw::kernels;
         for mode in ["clean", "leading", "interior", "infinite"] {
-            let data = ndarray::Array1::from_iter((0..2200).map(|i| {
+            let data: Vec<_> = (0..2200).map(|i| {
                 if mode == "leading" && i < 46 || mode == "interior" && i % 19 == 0 { f64::NAN }
                 else if mode == "infinite" && i == 50 { f64::INFINITY }
                 else { 100.0 + (i as f64 * 0.7).sin() }
-            }));
-            for view in [data.view(), data.slice(ndarray::s![..;2]), data.slice(ndarray::s![..;-2])] {
+            }).collect();
+            for view in [data.clone(), data.iter().step_by(2).copied().collect(), data.iter().rev().step_by(2).copied().collect()] {
                 for period in [0, 1, 20, 1000, 3000].map(std::hint::black_box) {
                     for wilder in [false, true] {
                         let step = |previous, input| if wilder { kernels::wilder_step(period)(previous, input) }
                             else { kernels::ema_step(period)(previous, input) };
                         let marks: Vec<_> = (16..view.len()).step_by(16).collect();
                         let mut states = States { points: KernelPoints::with_capacity(marks.len()), marks, ..Default::default() };
-                        let actual = kernels::sma_seeded_pass(view, period, step, &mut states);
-                        let expected = kernels::sma_seeded_pass(view, period, step, &mut ());
-                        assert_eq!(actual.iter().map(|v| v.to_bits()).collect::<Vec<_>>(), expected.iter().map(|v| v.to_bits()).collect::<Vec<_>>(), "{mode}, period{period}, wilder{wilder}, stride{}", view.strides()[0]);
+                        let actual = kernels::sma_seeded_pass(&view, period, step, &mut states);
+                        let expected = kernels::sma_seeded_pass(&view, period, step, &mut ());
+                        assert_eq!(actual.iter().map(|v| v.to_bits()).collect::<Vec<_>>(), expected.iter().map(|v| v.to_bits()).collect::<Vec<_>>(), "{mode}, period{period}, wilder{wilder}, length{}", view.len());
                         for (end, words) in states.points.iter() {
                             assert_eq!(words[0].to_bits(), expected[end - 1].to_bits());
                         }
@@ -367,5 +367,53 @@ mod schedule_tests {
         assert_eq!(states.points.at(7), Some(&[7.0][..]));
         assert_eq!(states.before.as_deref(), Some(&[8.0][..]));
         assert_eq!(states.after.as_deref(), Some(&[9.0][..]));
+    }
+}
+
+#[cfg(test)]
+mod publication_cost {
+    use super::*;
+    #[derive(Default)]
+    struct Calls(usize);
+    impl StateSink for Calls {
+        const CAPTURE: bool = true;
+        fn next_end(&self, start: usize, len: usize) -> usize {
+            if start < len { len - 1 } else { len }
+        }
+        fn record(&mut self, _: usize, _: usize, _: impl FnOnce(&mut Vec<f64>)) { self.0 += 1; }
+        fn compose(&mut self, _: usize, _: &[&Self], _: impl Fn(usize, &mut Vec<f64>)) { self.0 += 1; }
+    }
+    #[test]
+    fn a_seeded_smoother_publishes_only_its_terminal_rows() {
+        for n in [100, 10_000] {
+            let data = vec![100.0; n];
+            let mut calls = Calls::default();
+            crate::raw::indicators::ema_pass(&data, 20, &mut calls);
+            assert_eq!(calls.0, 2, "n={n}");
+        }
+    }
+    #[test]
+    fn a_composite_uses_one_publication_envelope() {
+        for n in [100, 10_000] {
+            let data = vec![100.0; n];
+            let mut calls = Calls::default();
+            let values = crate::raw::indicators::bbi_pass(&data, 2, 3, 5, 20, 0, &mut calls);
+            assert_eq!(values.len(), n);
+            assert_eq!(values[n - 1], 100.0);
+            assert_eq!(calls.0, 1, "n={n}");
+        }
+    }
+
+    #[test]
+    fn mfi_publishes_outside_its_numerical_spans() {
+        use crate::raw::indicators::{mfi, mfi_pass};
+        for n in [100, 10_000] {
+            let data: Vec<_> = (0..n).map(|i| 100.0 + (i as f64 / 7.0).sin()).collect();
+            let mut calls = Calls::default();
+            let captured = mfi_pass(&data, &data, &data, &data, 14, 0, &mut calls);
+            let plain = mfi(&data, &data, &data, &data, 14, 0);
+            assert!(captured.iter().zip(plain).all(|(a, b)| a.to_bits() == b.to_bits() || a.is_nan() && b.is_nan()));
+            assert_eq!(calls.0, 3, "n{n}");
+        }
     }
 }

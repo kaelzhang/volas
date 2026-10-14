@@ -10,6 +10,10 @@
 //! dtype-preserving members `first` / `last` / `count` / `nunique` through the
 //! position / count kernels instead).
 
+mod params;
+pub use params::{validate_alpha, validate_window, WindowError};
+use params::{validate_pair, validate_quantile, validate_rank};
+
 use crate::accum::{comoment, square_terms, Csum, Exact};
 use std::collections::HashMap;
 
@@ -56,21 +60,24 @@ pub fn count(
     window: usize,
     min_periods: usize,
     center: bool,
-) -> Vec<f64> {
-    let n = data.len();
-    let fwd = if center { window - window / 2 - 1 } else { 0 };
-    let back = window.saturating_sub(fwd + 1);
-    (0..n)
-        .map(|i| {
-            let end = std::cmp::min(i + fwd, n - 1);
-            let start = if window == usize::MAX { 0 } else { i.saturating_sub(back) };
-            let covered = end - start + 1;
-            if covered < min_periods.max(1) {
-                return f64::NAN;
-            }
-            data[start..=end].iter().filter(|x| !x.is_nan()).count() as f64
-        })
-        .collect()
+) -> Result<Vec<f64>, WindowError> {
+    validate_window(window, min_periods)?;
+    Ok({
+        let n = data.len();
+        let fwd = if center { window - window / 2 - 1 } else { 0 };
+        let back = window.saturating_sub(fwd + 1);
+        (0..n)
+            .map(|i| {
+                let end = std::cmp::min(i + fwd, n - 1);
+                let start = if window == usize::MAX { 0 } else { i.saturating_sub(back) };
+                let covered = end - start + 1;
+                if covered < min_periods.max(1) {
+                    return f64::NAN;
+                }
+                data[start..=end].iter().filter(|x| !x.is_nan()).count() as f64
+            })
+            .collect()
+    })
 }
 
 /// The infinities of the current window: counts of `+inf` and `-inf`.
@@ -111,7 +118,7 @@ impl Infinities {
 /// are kept exactly by [`Exact`] expansions once the compensated form can no longer
 /// hold them — after an extreme value (its magnitude far from the rest's), every later
 /// row is added to the expansion and rounded from it, an `O(expansion words)` step with
-/// an allocation per row instead of the compensated add, for the rest of that series.
+/// inline storage for common expansions instead of the compensated add, for the rest of that series.
 /// `read(sums, infinities, count)`.
 fn present_sums<const K: usize>(
     data: &[f64],
@@ -120,8 +127,18 @@ fn present_sums<const K: usize>(
     terms: impl Fn(f64) -> [f64; K],
     read: impl Fn(&[Csum; K], f64, usize) -> f64,
 ) -> Vec<f64> {
+    present_sums_at(data, window, min_periods, terms, |_, sums, inf, count| read(sums, inf, count))
+}
+
+/// The same exact slide, with the window's endpoint available to its reader.
+fn present_sums_at<const K: usize>(
+    data: &[f64],
+    window: usize,
+    min_periods: usize,
+    terms: impl Fn(f64) -> [f64; K],
+    mut read: impl FnMut(usize, &[Csum; K], f64, usize) -> f64,
+) -> Vec<f64> {
     let rolling = window != usize::MAX;
-    let min_periods = min_periods.max(1);
     let mut sums = [Csum::default(); K];
     let mut expansion: Option<[Exact; K]> = None;
     let mut inf = Infinities::default();
@@ -172,22 +189,24 @@ fn present_sums<const K: usize>(
         if let Some(e) = &expansion {
             sums = std::array::from_fn(|j| e[j].to_csum());
         }
-        out.push(if count >= min_periods { read(&sums, inf.value(), count) } else { f64::NAN });
+        out.push(if count >= min_periods { read(i, &sums, inf.value(), count) } else { f64::NAN });
     }
     out
 }
 
 /// Rolling / expanding sum of the present values (pandas `sum`): the exact sum of the
 /// finite ones, or the IEEE value of the window's infinities.
-pub fn sum(data: &[f64], window: usize, min_periods: usize) -> Vec<f64> {
-    present_sums(data, window, min_periods, |x| [x], |[s], inf, _| if inf != 0.0 { inf } else { s.value() })
+pub fn sum(data: &[f64], window: usize, min_periods: usize) -> Result<Vec<f64>, WindowError> {
+    validate_window(window, min_periods)?;
+    Ok(present_sums(data, window, min_periods, |x| [x], |[s], inf, _| if inf != 0.0 { inf } else { s.value() }))
 }
 
 /// Rolling / expanding mean of the present values (pandas `mean`): the exact sum over
 /// the count ([`Csum::mean`] — a flat window has its value as mean), or the IEEE value
 /// of the window's infinities.
-pub fn mean(data: &[f64], window: usize, min_periods: usize) -> Vec<f64> {
-    present_sums(data, window, min_periods, |x| [x], |[s], inf, n| if inf != 0.0 { inf } else { s.mean(n as f64) })
+pub fn mean(data: &[f64], window: usize, min_periods: usize) -> Result<Vec<f64>, WindowError> {
+    validate_window(window, min_periods)?;
+    Ok(present_sums(data, window, min_periods, |x| [x], |[s], inf, n| if inf != 0.0 { inf } else { s.mean(n as f64) }))
 }
 
 // --- min / max (monotonic deque, O(n)) ---------------------------------------
@@ -203,7 +222,7 @@ fn extremum(data: &[f64], window: usize, min_periods: usize, is_min: bool) -> Ve
             nobs -= 1;
         }
         if let Some(&front) = deque.front() {
-            if window != usize::MAX && front + window <= i {
+            if window != usize::MAX && i >= window && front <= i - window {
                 deque.pop_front();
             }
         }
@@ -228,13 +247,15 @@ fn extremum(data: &[f64], window: usize, min_periods: usize, is_min: bool) -> Ve
 }
 
 /// Rolling / expanding minimum (pandas `min`).
-pub fn min(data: &[f64], window: usize, min_periods: usize) -> Vec<f64> {
-    extremum(data, window, min_periods, true)
+pub fn min(data: &[f64], window: usize, min_periods: usize) -> Result<Vec<f64>, WindowError> {
+    validate_window(window, min_periods)?;
+    Ok(extremum(data, window, min_periods, true))
 }
 
 /// Rolling / expanding maximum (pandas `max`).
-pub fn max(data: &[f64], window: usize, min_periods: usize) -> Vec<f64> {
-    extremum(data, window, min_periods, false)
+pub fn max(data: &[f64], window: usize, min_periods: usize) -> Result<Vec<f64>, WindowError> {
+    validate_window(window, min_periods)?;
+    Ok(extremum(data, window, min_periods, false))
 }
 
 // --- dispersion / moments -----------------------------------------------------
@@ -282,36 +303,41 @@ fn present_var(data: &[f64], window: usize, min_periods: usize, ddof: usize, rea
 }
 
 /// Rolling / expanding sample variance (pandas `var`, default ddof=1).
-pub fn var(data: &[f64], window: usize, min_periods: usize, ddof: usize) -> Vec<f64> {
-    present_var(data, window, min_periods, ddof, |v, _| v)
+pub fn var(data: &[f64], window: usize, min_periods: usize, ddof: usize) -> Result<Vec<f64>, WindowError> {
+    validate_window(window, min_periods)?;
+    Ok(present_var(data, window, min_periods, ddof, |v, _| v))
 }
 
 /// Rolling / expanding standard deviation (pandas `std`).
-pub fn std(data: &[f64], window: usize, min_periods: usize, ddof: usize) -> Vec<f64> {
-    present_var(data, window, min_periods, ddof, |v, _| v.sqrt())
+pub fn std(data: &[f64], window: usize, min_periods: usize, ddof: usize) -> Result<Vec<f64>, WindowError> {
+    validate_window(window, min_periods)?;
+    Ok(present_var(data, window, min_periods, ddof, |v, _| v.sqrt()))
 }
 
 /// Standard error of the mean (pandas `sem`): `std(ddof) / sqrt(count)`.
-pub fn sem(data: &[f64], window: usize, min_periods: usize, ddof: usize) -> Vec<f64> {
-    present_var(data, window, min_periods, ddof, |v, n| (v / n as f64).sqrt())
+pub fn sem(data: &[f64], window: usize, min_periods: usize, ddof: usize) -> Result<Vec<f64>, WindowError> {
+    validate_window(window, min_periods)?;
+    Ok(present_var(data, window, min_periods, ddof, |v, n| (v / n as f64).sqrt()))
 }
 
 /// Mean absolute deviation about the window mean (TradingView `ta.dev`):
 /// `mean(|x - mean(x)|)` over the present values — the dispersion measure CCI
 /// is built on, and the one statistic missing from var/std/sem.
-pub fn dev(data: &[f64], window: usize, min_periods: usize) -> Vec<f64> {
-    per_window(data, window, min_periods, |b| {
+pub fn dev(data: &[f64], window: usize, min_periods: usize) -> Result<Vec<f64>, WindowError> {
+    validate_window(window, min_periods)?;
+    Ok(per_window(data, window, min_periods, |b| {
         let m = window_mean(b);
         b.iter().map(|x| (x - m).abs()).sum::<f64>() / b.len() as f64
-    })
+    }))
 }
 
 /// Rolling mode (TradingView `ta.mode`): the most frequent present value; ties
 /// resolve to the SMALLEST value; NA cells are ignored. Values are counted by numeric
 /// equality, so `-0.0` and `+0.0` are one value (as pandas counts them), and a zero mode
 /// is `+0.0` whichever signed zeros the window holds.
-pub fn mode(data: &[f64], window: usize, min_periods: usize) -> Vec<f64> {
-    per_sorted_window(data, window, min_periods, |sorted, _| {
+pub fn mode(data: &[f64], window: usize, min_periods: usize) -> Result<Vec<f64>, WindowError> {
+    validate_window(window, min_periods)?;
+    Ok(per_sorted_window(data, window, min_periods, |sorted, _| {
         // `sorted` is ascending (total order: the signed zeros sit side by side), so
         // numerically equal values are contiguous: scan runs and keep the value with
         // the longest run; on a tie the earlier (smaller) value is already held,
@@ -331,13 +357,27 @@ pub fn mode(data: &[f64], window: usize, min_periods: usize) -> Vec<f64> {
             }
         }
         best_val + 0.0 // a zero mode is +0
-    })
+    }))
+}
+
+/// Borrow finite windows and read their exact mean from the shared sliding sum.
+/// Central moments still reduce in the original row order. Missing/non-finite
+/// inputs retain the present-value gather and direct exact mean.
+fn per_moment(data: &[f64], window: usize, min_periods: usize, mut f: impl FnMut(&[f64], f64) -> f64) -> Vec<f64> {
+    if data.iter().all(|x| x.is_finite()) {
+        present_sums_at(data, window, min_periods, |x| [x], |i, sums, _, count| {
+            f(&data[win_start(i, window)..=i], sums[0].mean(count as f64))
+        })
+    } else {
+        per_window(data, window, min_periods, |b| f(b, window_mean(b)))
+    }
 }
 
 /// Bias-corrected sample skewness (pandas `skew`; needs >= 3 present values). A
 /// constant window is exactly `0` (pandas 3's degenerate-window rule).
-pub fn skew(data: &[f64], window: usize, min_periods: usize) -> Vec<f64> {
-    per_window(data, window, min_periods, |b| {
+pub fn skew(data: &[f64], window: usize, min_periods: usize) -> Result<Vec<f64>, WindowError> {
+    validate_window(window, min_periods)?;
+    Ok(per_moment(data, window, min_periods, |b, m| {
         let n = b.len() as f64;
         if b.len() < 3 {
             return f64::NAN;
@@ -345,20 +385,20 @@ pub fn skew(data: &[f64], window: usize, min_periods: usize) -> Vec<f64> {
         if is_constant(b) {
             return 0.0;
         }
-        let m = window_mean(b);
         let m2 = b.iter().map(|x| (x - m).powi(2)).sum::<f64>() / n;
         let m3 = b.iter().map(|x| (x - m).powi(3)).sum::<f64>() / n;
         if m2 <= 0.0 {
             return f64::NAN;
         }
         (n * (n - 1.0)).sqrt() / (n - 2.0) * m3 / m2.powf(1.5)
-    })
+    }))
 }
 
 /// Bias-corrected excess kurtosis (pandas `kurt`; needs >= 4 present values). A
 /// constant window is exactly `-3` (pandas 3's degenerate-window rule).
-pub fn kurt(data: &[f64], window: usize, min_periods: usize) -> Vec<f64> {
-    per_window(data, window, min_periods, |b| {
+pub fn kurt(data: &[f64], window: usize, min_periods: usize) -> Result<Vec<f64>, WindowError> {
+    validate_window(window, min_periods)?;
+    Ok(per_moment(data, window, min_periods, |b, m| {
         let n = b.len() as f64;
         if b.len() < 4 {
             return f64::NAN;
@@ -366,7 +406,6 @@ pub fn kurt(data: &[f64], window: usize, min_periods: usize) -> Vec<f64> {
         if is_constant(b) {
             return -3.0;
         }
-        let m = window_mean(b);
         let m2 = b.iter().map(|x| (x - m).powi(2)).sum::<f64>() / n;
         let m4 = b.iter().map(|x| (x - m).powi(4)).sum::<f64>() / n;
         if m2 <= 0.0 {
@@ -374,7 +413,7 @@ pub fn kurt(data: &[f64], window: usize, min_periods: usize) -> Vec<f64> {
         }
         ((n + 1.0) * m4 / (m2 * m2) - 3.0 * (n - 1.0)) * (n - 1.0)
             / ((n - 2.0) * (n - 3.0))
-    })
+    }))
 }
 
 // --- order statistics ----------------------------------------------------------
@@ -459,10 +498,11 @@ fn per_sorted_window(
 }
 
 /// Rolling / expanding median (pandas `median`).
-pub fn median(data: &[f64], window: usize, min_periods: usize) -> Vec<f64> {
-    per_sorted_window(data, window, min_periods, |s, _| {
+pub fn median(data: &[f64], window: usize, min_periods: usize) -> Result<Vec<f64>, WindowError> {
+    validate_window(window, min_periods)?;
+    Ok(per_sorted_window(data, window, min_periods, |s, _| {
         sorted_quantile(s, 0.5, "linear")
-    })
+    }))
 }
 
 /// Rolling / expanding quantile (pandas `quantile(q, interpolation)`).
@@ -472,10 +512,12 @@ pub fn quantile(
     min_periods: usize,
     q: f64,
     interpolation: &str,
-) -> Vec<f64> {
-    per_sorted_window(data, window, min_periods, |s, _| {
+) -> Result<Vec<f64>, WindowError> {
+    validate_window(window, min_periods)?;
+    validate_quantile(q, interpolation)?;
+    Ok(per_sorted_window(data, window, min_periods, |s, _| {
         sorted_quantile(s, q, interpolation)
-    })
+    }))
 }
 
 /// Rank of the CURRENT row's value within its trailing window (pandas `rank`):
@@ -488,7 +530,9 @@ pub fn rank(
     method: &str,
     ascending: bool,
     pct: bool,
-) -> Vec<f64> {
+) -> Result<Vec<f64>, WindowError> {
+    validate_window(window, min_periods)?;
+    validate_rank(method)?;
     rank_padded(data, window, min_periods, method, ascending, pct, data.len())
 }
 
@@ -506,8 +550,11 @@ pub fn rank_padded(
     ascending: bool,
     pct: bool,
     data_len: usize,
-) -> Vec<f64> {
-    per_sorted_window(data, window, min_periods, |s, i| {
+) -> Result<Vec<f64>, WindowError> {
+    validate_window(window, min_periods)?;
+    validate_rank(method)?;
+    if data_len > data.len() || (data_len == 0 && !data.is_empty()) { return Err(WindowError::Padding); }
+    Ok(per_sorted_window(data, window, min_periods, |s, i| {
         let x = data[i.min(data_len.saturating_sub(1))];
         if x.is_nan() {
             return f64::NAN;
@@ -529,7 +576,7 @@ pub fn rank_padded(
         } else {
             r
         }
-    })
+    }))
 }
 
 /// The hash key of a present value under NUMERIC equality: `0.0` and `-0.0` are
@@ -544,34 +591,37 @@ fn value_key(x: f64) -> u64 {
 }
 
 /// Count of distinct present values per window (pandas `nunique`).
-pub fn nunique(data: &[f64], window: usize, min_periods: usize) -> Vec<f64> {
-    let n = data.len();
-    let mut out = vec![f64::NAN; n];
-    let mut counts: HashMap<u64, usize> = HashMap::new();
-    let mut nobs = 0usize;
-    for i in 0..n {
-        if window != usize::MAX && i >= window {
-            let leaving = data[i - window];
-            if !leaving.is_nan() {
-                nobs -= 1;
-                let k = value_key(leaving);
-                let c = counts.get_mut(&k).expect("leaving value was inserted");
-                *c -= 1;
-                if *c == 0 {
-                    counts.remove(&k);
+pub fn nunique(data: &[f64], window: usize, min_periods: usize) -> Result<Vec<f64>, WindowError> {
+    validate_window(window, min_periods)?;
+    Ok({
+        let n = data.len();
+        let mut out = vec![f64::NAN; n];
+        let mut counts: HashMap<u64, usize> = HashMap::new();
+        let mut nobs = 0usize;
+        for i in 0..n {
+            if window != usize::MAX && i >= window {
+                let leaving = data[i - window];
+                if !leaving.is_nan() {
+                    nobs -= 1;
+                    let k = value_key(leaving);
+                    let c = counts.get_mut(&k).expect("leaving value was inserted");
+                    *c -= 1;
+                    if *c == 0 {
+                        counts.remove(&k);
+                    }
                 }
             }
+            let x = data[i];
+            if !x.is_nan() {
+                nobs += 1;
+                *counts.entry(value_key(x)).or_insert(0) += 1;
+            }
+            if nobs >= min_periods {
+                out[i] = counts.len() as f64;
+            }
         }
-        let x = data[i];
-        if !x.is_nan() {
-            nobs += 1;
-            *counts.entry(value_key(x)).or_insert(0) += 1;
-        }
-        if nobs >= min_periods.max(1) {
-            out[i] = counts.len() as f64;
-        }
-    }
-    out
+        out
+    })
 }
 
 /// Position of the first / last PRESENT value in each window (`None` below
@@ -582,21 +632,24 @@ pub fn edge_positions(
     window: usize,
     min_periods: usize,
     last: bool,
-) -> Vec<Option<usize>> {
-    let n = valid.len();
-    let mut out = vec![None; n];
-    for i in 0..n {
-        let start = win_start(i, window);
-        let nobs = valid[start..=i].iter().filter(|&&v| v).count();
-        if nobs >= min_periods.max(1) {
-            out[i] = if last {
-                (start..=i).rev().find(|&k| valid[k])
-            } else {
-                (start..=i).find(|&k| valid[k])
-            };
+) -> Result<Vec<Option<usize>>, WindowError> {
+    validate_window(window, min_periods)?;
+    Ok({
+        let n = valid.len();
+        let mut out = vec![None; n];
+        for i in 0..n {
+            let start = win_start(i, window);
+            let nobs = valid[start..=i].iter().filter(|&&v| v).count();
+            if nobs >= min_periods {
+                out[i] = if last {
+                    (start..=i).rev().find(|&k| valid[k])
+                } else {
+                    (start..=i).find(|&k| valid[k])
+                };
+            }
         }
-    }
-    out
+        out
+    })
 }
 
 // --- two-series ---------------------------------------------------------------
@@ -631,8 +684,10 @@ fn pairwise(
 }
 
 /// Rolling / expanding sample covariance of two series (pandas `cov`).
-pub fn cov(x: &[f64], y: &[f64], window: usize, min_periods: usize, ddof: usize) -> Vec<f64> {
-    pairwise(x, y, window, min_periods, |bx, by| {
+pub fn cov(x: &[f64], y: &[f64], window: usize, min_periods: usize, ddof: usize) -> Result<Vec<f64>, WindowError> {
+    validate_window(window, min_periods)?;
+    validate_pair(x, y)?;
+    Ok(pairwise(x, y, window, min_periods, |bx, by| {
         if bx.len() <= ddof {
             return f64::NAN;
         }
@@ -646,12 +701,14 @@ pub fn cov(x: &[f64], y: &[f64], window: usize, min_periods: usize, ddof: usize)
             .map(|(a, b)| (a - mx) * (b - my))
             .sum::<f64>()
             / (n - ddof as f64)
-    })
+    }))
 }
 
 /// Rolling / expanding Pearson correlation of two series (pandas `corr`).
-pub fn corr(x: &[f64], y: &[f64], window: usize, min_periods: usize) -> Vec<f64> {
-    pairwise(x, y, window, min_periods, |bx, by| {
+pub fn corr(x: &[f64], y: &[f64], window: usize, min_periods: usize) -> Result<Vec<f64>, WindowError> {
+    validate_window(window, min_periods)?;
+    validate_pair(x, y)?;
+    Ok(pairwise(x, y, window, min_periods, |bx, by| {
         let sx = buf_var(bx, 1).sqrt();
         let sy = buf_var(by, 1).sqrt();
         // A zero *or NaN* std has no correlation; the negated form catches both.
@@ -671,7 +728,7 @@ pub fn corr(x: &[f64], y: &[f64], window: usize, min_periods: usize) -> Vec<f64>
             .sum::<f64>()
             / (n - 1.0);
         c / (sx * sy)
-    })
+    }))
 }
 
 // --- exponentially weighted ----------------------------------------------------
@@ -685,69 +742,78 @@ pub fn ewm_mean(
     adjust: bool,
     ignore_na: bool,
     min_periods: usize,
-) -> Vec<f64> {
-    let old_wt_factor = 1.0 - alpha;
-    let new_wt = if adjust { 1.0 } else { alpha };
-    let mut avg = f64::NAN;
-    let mut old_wt = 1.0;
-    let mut nobs = 0usize;
-    data.iter()
-        .map(|&x| {
-            let is_obs = !x.is_nan();
-            nobs += is_obs as usize;
-            if !avg.is_nan() {
-                if is_obs || !ignore_na {
-                    old_wt *= old_wt_factor;
-                    if is_obs {
-                        if avg != x {
-                            avg = (old_wt * avg + new_wt * x) / (old_wt + new_wt);
-                        }
-                        if adjust {
-                            old_wt += new_wt;
-                        } else {
-                            old_wt = 1.0;
+) -> Result<Vec<f64>, WindowError> {
+    validate_alpha(alpha)?;
+    Ok({
+        let old_wt_factor = 1.0 - alpha;
+        let new_wt = if adjust { 1.0 } else { alpha };
+        let mut avg = f64::NAN;
+        let mut old_wt = 1.0;
+        let mut nobs = 0usize;
+        data.iter()
+            .map(|&x| {
+                let is_obs = x.is_finite();
+                nobs += is_obs as usize;
+                if !avg.is_nan() {
+                    if is_obs || !ignore_na {
+                        old_wt *= old_wt_factor;
+                        if is_obs {
+                            if avg != x {
+                                // pandas 3 uses the complement of the decayed weight
+                                // for its com=1 recursive mean, including across gaps.
+                                let wt = if !adjust && alpha == 0.5 { 1.0 - old_wt } else { new_wt };
+                                avg = (old_wt * avg + wt * x) / (old_wt + wt);
+                            }
+                            if adjust {
+                                old_wt += new_wt;
+                            } else {
+                                old_wt = 1.0;
+                            }
                         }
                     }
+                } else if is_obs {
+                    avg = x;
                 }
-            } else if is_obs {
-                avg = x;
-            }
-            if nobs >= min_periods.max(1) {
-                avg
-            } else {
-                f64::NAN
-            }
-        })
-        .collect()
+                if nobs >= min_periods.max(1) {
+                    avg
+                } else {
+                    f64::NAN
+                }
+            })
+            .collect()
+    })
 }
 
 /// pandas `ewm(...).sum()` — the un-normalized weighted sum
 /// (`adjust=True` only; pandas raises for `adjust=False`, and so does the caller).
-pub fn ewm_sum(data: &[f64], alpha: f64, ignore_na: bool, min_periods: usize) -> Vec<f64> {
-    let old_wt_factor = 1.0 - alpha;
-    let mut s = f64::NAN;
-    let mut nobs = 0usize;
-    data.iter()
-        .map(|&x| {
-            let is_obs = !x.is_nan();
-            nobs += is_obs as usize;
-            if !s.is_nan() {
-                if is_obs || !ignore_na {
-                    s *= old_wt_factor;
-                    if is_obs {
-                        s += x;
+pub fn ewm_sum(data: &[f64], alpha: f64, ignore_na: bool, min_periods: usize) -> Result<Vec<f64>, WindowError> {
+    validate_alpha(alpha)?;
+    Ok({
+        let old_wt_factor = 1.0 - alpha;
+        let mut s = f64::NAN;
+        let mut nobs = 0usize;
+        data.iter()
+            .map(|&x| {
+                let is_obs = x.is_finite();
+                nobs += is_obs as usize;
+                if !s.is_nan() {
+                    if is_obs || !ignore_na {
+                        s *= old_wt_factor;
+                        if is_obs {
+                            s += x;
+                        }
                     }
+                } else if is_obs {
+                    s = x;
                 }
-            } else if is_obs {
-                s = x;
-            }
-            if nobs >= min_periods.max(1) {
-                s
-            } else {
-                f64::NAN
-            }
-        })
-        .collect()
+                if nobs >= min_periods.max(1) {
+                    s
+                } else {
+                    f64::NAN
+                }
+            })
+            .collect()
+    })
 }
 
 /// pandas `ewm(...).cov(other)` kernel — also the engine behind `var` / `std`
@@ -761,69 +827,73 @@ pub fn ewm_cov(
     ignore_na: bool,
     bias: bool,
     min_periods: usize,
-) -> Vec<f64> {
-    let old_wt_factor = 1.0 - alpha;
-    let new_wt = if adjust { 1.0 } else { alpha };
-    let (mut mean_x, mut mean_y) = (f64::NAN, f64::NAN);
-    let mut cov = 0.0;
-    let (mut sum_wt, mut sum_wt2, mut old_wt) = (1.0, 1.0, 1.0);
-    let mut nobs = 0usize;
-    x.iter()
-        .zip(y)
-        .map(|(&xi, &yi)| {
-            let is_obs = !xi.is_nan() && !yi.is_nan();
-            nobs += is_obs as usize;
-            if !mean_x.is_nan() {
-                if is_obs || !ignore_na {
-                    sum_wt *= old_wt_factor;
-                    sum_wt2 *= old_wt_factor * old_wt_factor;
-                    old_wt *= old_wt_factor;
-                    if is_obs {
-                        let (old_mean_x, old_mean_y) = (mean_x, mean_y);
-                        if mean_x != xi {
-                            mean_x = (old_wt * old_mean_x + new_wt * xi) / (old_wt + new_wt);
-                        }
-                        if mean_y != yi {
-                            mean_y = (old_wt * old_mean_y + new_wt * yi) / (old_wt + new_wt);
-                        }
-                        cov = (old_wt
-                            * (cov + (old_mean_x - mean_x) * (old_mean_y - mean_y))
-                            + new_wt * (xi - mean_x) * (yi - mean_y))
-                            / (old_wt + new_wt);
-                        sum_wt += new_wt;
-                        sum_wt2 += new_wt * new_wt;
-                        old_wt += new_wt;
-                        if !adjust {
-                            sum_wt /= old_wt;
-                            sum_wt2 /= old_wt * old_wt;
-                            old_wt = 1.0;
+) -> Result<Vec<f64>, WindowError> {
+    validate_alpha(alpha)?;
+    validate_pair(x, y)?;
+    Ok({
+        let old_wt_factor = 1.0 - alpha;
+        let new_wt = if adjust { 1.0 } else { alpha };
+        let (mut mean_x, mut mean_y) = (f64::NAN, f64::NAN);
+        let mut cov = 0.0;
+        let (mut sum_wt, mut sum_wt2, mut old_wt) = (1.0, 1.0, 1.0);
+        let mut nobs = 0usize;
+        x.iter()
+            .zip(y)
+            .map(|(&xi, &yi)| {
+                let is_obs = xi.is_finite() && yi.is_finite();
+                nobs += is_obs as usize;
+                if !mean_x.is_nan() {
+                    if is_obs || !ignore_na {
+                        sum_wt *= old_wt_factor;
+                        sum_wt2 *= old_wt_factor * old_wt_factor;
+                        old_wt *= old_wt_factor;
+                        if is_obs {
+                            let (old_mean_x, old_mean_y) = (mean_x, mean_y);
+                            if mean_x != xi {
+                                mean_x = (old_wt * old_mean_x + new_wt * xi) / (old_wt + new_wt);
+                            }
+                            if mean_y != yi {
+                                mean_y = (old_wt * old_mean_y + new_wt * yi) / (old_wt + new_wt);
+                            }
+                            cov = (old_wt
+                                * (cov + (old_mean_x - mean_x) * (old_mean_y - mean_y))
+                                + new_wt * (xi - mean_x) * (yi - mean_y))
+                                / (old_wt + new_wt);
+                            sum_wt += new_wt;
+                            sum_wt2 += new_wt * new_wt;
+                            old_wt += new_wt;
+                            if !adjust {
+                                sum_wt /= old_wt;
+                                sum_wt2 /= old_wt * old_wt;
+                                old_wt = 1.0;
+                            }
                         }
                     }
+                } else if is_obs {
+                    mean_x = xi;
+                    mean_y = yi;
                 }
-            } else if is_obs {
-                mean_x = xi;
-                mean_y = yi;
-            }
-            if nobs >= min_periods.max(1) {
-                if bias {
-                    cov
-                } else {
-                    let numerator = sum_wt * sum_wt;
-                    let denominator = numerator - sum_wt2;
-                    if denominator > 0.0 {
-                        (numerator / denominator) * cov
+                if nobs >= min_periods.max(1) {
+                    if bias {
+                        cov
                     } else {
-                        f64::NAN
+                        let numerator = sum_wt * sum_wt;
+                        let denominator = numerator - sum_wt2;
+                        if denominator > 0.0 {
+                            (numerator / denominator) * cov
+                        } else {
+                            f64::NAN
+                        }
                     }
+                } else {
+                    f64::NAN
                 }
-            } else {
-                f64::NAN
-            }
-        })
-        .collect()
+            })
+            .collect()
+    })
 }
 
-/// pandas `ewm(...).var(bias)` — `ewm_cov(x, x)`.
+/// pandas `ewm(...).var(bias)` — `ewm_cov(x, x)?`.
 pub fn ewm_var(
     data: &[f64],
     alpha: f64,
@@ -831,12 +901,13 @@ pub fn ewm_var(
     ignore_na: bool,
     bias: bool,
     min_periods: usize,
-) -> Vec<f64> {
+) -> Result<Vec<f64>, WindowError> {
+    validate_alpha(alpha)?;
     ewm_cov(data, data, alpha, adjust, ignore_na, bias, min_periods)
 }
 
 /// pandas `ewm(...).corr(other)`: `cov / sqrt(var_x · var_y)` with the biased
-/// (bias=true) building blocks, exactly as pandas computes it.
+/// (bias=true) building blocks. Divide before multiplying to retain range.
 pub fn ewm_corr(
     x: &[f64],
     y: &[f64],
@@ -844,29 +915,37 @@ pub fn ewm_corr(
     adjust: bool,
     ignore_na: bool,
     min_periods: usize,
-) -> Vec<f64> {
-    let cv = ewm_cov(x, y, alpha, adjust, ignore_na, true, min_periods);
-    // pandas masks each side to the PAIRWISE-present rows before the marginal
-    // variances, so a row missing in `y` does not perturb `var(x)`.
-    let n = x.len();
-    let (mut xp, mut yp) = (vec![f64::NAN; n], vec![f64::NAN; n]);
-    for i in 0..n {
-        if !x[i].is_nan() && !y[i].is_nan() {
-            xp[i] = x[i];
-            yp[i] = y[i];
-        }
-    }
-    let vx = ewm_cov(&xp, &xp, alpha, adjust, ignore_na, true, min_periods);
-    let vy = ewm_cov(&yp, &yp, alpha, adjust, ignore_na, true, min_periods);
-    cv.iter()
-        .zip(vx.iter().zip(&vy))
-        .map(|(&c, (&a, &b))| {
-            let d = (a * b).sqrt();
-            if d > 0.0 {
-                c / d
-            } else {
-                f64::NAN
+) -> Result<Vec<f64>, WindowError> {
+    validate_alpha(alpha)?;
+    validate_pair(x, y)?;
+    Ok({
+        let cv = ewm_cov(x, y, alpha, adjust, ignore_na, true, min_periods)?;
+        // pandas masks each side to the PAIRWISE-present rows before the marginal
+        // variances, so a row missing in `y` does not perturb `var(x)`.
+        let n = x.len();
+        let (mut xp, mut yp) = (vec![f64::NAN; n], vec![f64::NAN; n]);
+        for i in 0..n {
+            if x[i].is_finite() && y[i].is_finite() {
+                xp[i] = x[i];
+                yp[i] = y[i];
             }
-        })
-        .collect()
+        }
+        let vx = ewm_cov(&xp, &xp, alpha, adjust, ignore_na, true, min_periods)?;
+        let vy = ewm_cov(&yp, &yp, alpha, adjust, ignore_na, true, min_periods)?;
+        cv.iter()
+            .zip(vx.iter().zip(&vy))
+            .map(|(&c, (&a, &b))| {
+                if a > 0.0 && b > 0.0 {
+                    // Divide by standard deviations separately: the variance product
+                    // need never be representable. Equal variances preserve c/a exactly.
+                    if a == b { c / a } else { (c / a.sqrt()) / b.sqrt() }
+                } else {
+                    f64::NAN
+                }
+            })
+            .collect()
+    })
 }
+
+#[cfg(test)]
+mod tests;

@@ -1,5 +1,8 @@
 """Million-row range kernels and their steady-state single-bar append cost."""
 
+from math import ceil
+import os
+
 import numpy as np
 import pytest
 
@@ -40,4 +43,4 @@ def test_range_single_row(benchmark, range_prices, directive):
         df.append(bar)
         df.fulfill()
 
-    benchmark.pedantic(run, setup=setup, rounds=300, iterations=1, warmup_rounds=10)
+    benchmark.pedantic(run, setup=setup, rounds=max(5, ceil(300 / int(os.environ.get('VOLAS_BENCHMARK_PAIRS', '1')))), iterations=1, warmup_rounds=10)

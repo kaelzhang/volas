@@ -210,6 +210,12 @@ let _ = five_min;
 `TimeFrame` 是一个枚举（`Min1`、`Min5`、`Hour1`、`Day1` …），也可用
 `TimeFrame::from_label("5m")` 从标签解析。
 
+Rust 增量输入可用 `volas::time::Cumulator::append`，它保留开放周期的细粒度 bar。`frame(&self)` 返回独立快照，cumulator 仍可继续使用；完成输入后，`into_frame(self)` 消费 cumulator 并转移输出 buffer；`into_parts(self)` 还返回开放周期及其运行中的聚合状态，供实时续算使用。
+
+`Cumulator::from_frame(&fine, tf, spec)` 构建并摄入初始批次，为消费式输出和首次实时追加预留容量；验证行为与 `new` 后调用 `append` 一致，仍延迟检查未闭合周期的错误。
+普通 `new` / `append` 构建器保留既有快照容量预算。
+
+
 ## 错误处理
 
 可失败的函数返回 `Result<_, VolasError>`（单一错误枚举）——对非法输入不 panic。未知或

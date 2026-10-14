@@ -8,11 +8,11 @@ import pytest
 
 import volas
 
+from test.exact import same_exact
+
 
 def _bits(a, b):
-    """Bit-identical (the sign of a zero included); any two NaNs match."""
-    a, b = np.asarray(a, dtype=float), np.asarray(b, dtype=float)
-    return a.shape == b.shape and bool(((a.view(np.uint64) == b.view(np.uint64)) | (np.isnan(a) & np.isnan(b))).all())
+    return same_exact(a, b)
 
 
 def _appended(data, directive, cut):

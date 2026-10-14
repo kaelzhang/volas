@@ -19,6 +19,8 @@ import pytest
 import volas
 from volas import DataFrame
 
+from test.exact import assert_exact
+
 ROOT = Path(__file__).resolve().parent.parent
 
 # command -> a runnable directive exercising it.
@@ -381,7 +383,7 @@ def test_a_missing_period_is_a_missing_mavp_row():
     got = np.asarray(DataFrame(data).exec(FINITE["mavp"]), float)
     clean = _exec(FINITE["mavp"])
     assert np.isnan(got[K])
-    np.testing.assert_array_equal(np.delete(got, K), np.delete(clean, K))
+    assert_exact(np.delete(got, K), np.delete(clean, K))
 
 
 @pytest.mark.parametrize("directive", ["roc:1", "rocp:1", "rocr:1", "rocr100:1"])
@@ -422,7 +424,7 @@ def _closes(xs):
 ])
 def test_window_holding_inf_takes_the_formula_value(directive, want):
     got = _closes([1, 2, np.inf, 4, 5, 6]).exec(directive).tolist()
-    np.testing.assert_array_equal(got, want)
+    assert_exact(got, want)
 
 
 @pytest.mark.parametrize("directive", ["sum:3", "ma:3", "var:3", "stddev:3", "wma:3", "linearreg:3"])
@@ -434,7 +436,7 @@ def test_window_holding_nan_is_nan_then_recovers(directive):
 
 def test_opposite_infinities_in_one_window_are_nan():
     got = _closes([1, np.inf, -np.inf, 4, 5]).exec("sum:2").tolist()
-    np.testing.assert_array_equal(got, [np.nan, np.inf, np.nan, -np.inf, 9.0])
+    assert_exact(got, [np.nan, np.inf, np.nan, -np.inf, 9.0])
 
 
 # --- pandas-semantics rolling: NaN is missing (skipped), ±inf is a value ---
@@ -446,13 +448,13 @@ def test_opposite_infinities_in_one_window_are_nan():
 def test_rolling_recovers_after_inf_leaves(method, want):
     s = DataFrame({"x": [1.0, 2.0, np.inf, 4.0, 5.0, 6.0]})["x"]
     got = getattr(s.rolling(2), method)().to_numpy().tolist()
-    np.testing.assert_array_equal(got, want)
+    assert_exact(got, want)
 
 
 def test_rolling_mixed_infinities_are_nan_then_recover():
     s = DataFrame({"x": [1.0, np.inf, -np.inf, 4.0, 5.0]})["x"]
     got = s.rolling(2).sum().to_numpy().tolist()
-    np.testing.assert_array_equal(got, [np.nan, np.inf, np.nan, -np.inf, 9.0])
+    assert_exact(got, [np.nan, np.inf, np.nan, -np.inf, 9.0])
 
 
 @pytest.mark.parametrize("key", _FINITE_KEYS)
@@ -541,4 +543,4 @@ def test_a_candle_pattern_is_missing_exactly_while_it_reads_a_missing_candle(pat
     clean, got = _cdl(directive), _cdl(directive, column, bad)
     span = volas.directive_lookback(directive) + 1
     assert np.isnan(got[K:K + span]).all()
-    np.testing.assert_array_equal(np.delete(got, range(K, K + span)), np.delete(clean, range(K, K + span)))
+    assert_exact(np.delete(got, range(K, K + span)), np.delete(clean, range(K, K + span)))

@@ -15,6 +15,8 @@ from volas import DataFrame, Timestamp, to_datetime
 
 from .test_window_locality import FINITE, RECURSIVE, SUBCOMMANDS
 
+from test.exact import assert_exact
+
 OHLCV = ("open", "high", "low", "close", "volume")
 T0 = np.datetime64("2026-01-01T00:00", "ns")
 MINUTE = np.timedelta64(1, "m")
@@ -54,15 +56,7 @@ def _np(x):
 
 
 def _same(got, want, ctx):
-    got, want = _np(got), _np(want)
-    if got.dtype == bool or want.dtype == bool:
-        assert np.array_equal(got.astype(bool), want.astype(bool)), ctx
-        return
-    got, want = got.astype(float), want.astype(float)
-    same = (got == want) | (np.isnan(got) & np.isnan(want))
-    if not same.all():
-        bad = int(np.flatnonzero(~same)[0])
-        raise AssertionError(f"{ctx}: row {bad}: {got[bad]!r} vs {want[bad]!r}")
+    assert_exact(_np(got), _np(want), ctx)
 
 
 def _full(live):

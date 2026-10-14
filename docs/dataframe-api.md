@@ -73,7 +73,7 @@ Which gets the 2-period simple moving average on column `"close"`.
 
   The constructor does **not** accept a `pandas.DataFrame` or an Arrow object — bridge
   those with the dedicated [`DataFrame.from_pandas`](#dataframefrom_pandaspdf---dataframe) /
-  [`DataFrame.from_arrow`](#dataframefrom_arrowdata---dataframe) instead. To attach a
+  [`DataFrame.from_arrow`](#dataframefrom_arrowdata-copytrue---dataframe) instead. To attach a
   [`DatetimeIndex`](https://pandas.pydata.org/docs/reference/api/pandas.DatetimeIndex.html),
   parse a column with `to_datetime`, promote it with `set_index`, then tag a zone with
   `tz_localize` / `tz_convert`. See [Timezones](cumulation.md#timezones).
@@ -120,13 +120,14 @@ Which gets the 2-period simple moving average on column `"close"`.
   valid only with it): the hidden margin of rows kept behind the visible ones, and the
   directives the frame computes exactly (see
   [What a bounded window computes](#bounded-rolling-window)). Pass a **list of
-  indicator directives** to **declare** them: the margin is the largest of their
+  directives** to **declare** them: the margin is the largest of their
   lookbacks (e.g. `['atr:14', 'ma:50']` → margin 49), and each is computed at
   construction over all the given rows and cached — a running accumulator or a recursive
   one (`ma`, EMA, Wilder
   smoothing, a cumulative line, …) can only be computed this way. Or pass an **int**: the
-  margin alone, declaring nothing. Each list entry must be an indicator directive
-  (`'ma:50'`); a bare/typo'd name (`'ma50'`) and an empty list are rejected, and so is a
+  margin alone, declaring nothing. A raw-column directive (`'close'`) is also valid:
+  its lookback is zero and it stays a data column. Unknown columns (`'ma50'`) and an
+  empty list are rejected, and so is a
   directive whose column name is a data column of the frame (`'macd:'` beside a data
   column `macd`): rename that column to declare it.
 
@@ -301,18 +302,17 @@ shares the index's name is kept as a column. See [pandas interop](interop.md#pan
 df = DataFrame.from_pandas(pandas_df)   # pandas.DataFrame -> volas DataFrame
 ```
 
-### DataFrame.from_arrow(data) -> DataFrame
+### DataFrame.from_arrow(data, copy=True) -> DataFrame
 
-A **volas-specific static method** that builds a `DataFrame` from any object exposing
-the Arrow **C-Stream** protocol (`__arrow_c_stream__`) — a `pyarrow.Table` /
-`RecordBatch` / `RecordBatchReader`, a polars `DataFrame`, etc. The data buffers are
-borrowed where the dtypes match (otherwise a column is copied), a multi-chunk source
-is concatenated, and the result carries a fresh `RangeIndex`. The producer's buffers
-are validated before they are read: a malformed array (buffer sizes, offsets out of
+Builds a `DataFrame` from the Arrow **C-Stream** protocol (`__arrow_c_stream__`):
+`pyarrow.Table` / `RecordBatch` / `RecordBatchReader`, polars `DataFrame`, etc. Imports
+form owned snapshots by default, including multi-chunk sources, with a fresh
+`RangeIndex`. Producer buffers are validated before reading: a malformed array (buffer sizes, offsets out of
 range or not monotonic, a present string that is not valid UTF-8) raises `ValueError`.
 A null string slot's bytes are unspecified in Arrow and are never read.
 
 - **data** the Arrow source — any object implementing `__arrow_c_stream__`.
+- **copy** keyword-only `bool = True`. `False` borrows matching numeric and dense ns-datetime buffers. The producer and every alias must never write borrowed memory again while any imported object or view survives. Other layouts still copy.
 
 ```py
 df = DataFrame.from_arrow(pa_table)        # pyarrow.Table     -> DataFrame
@@ -320,7 +320,7 @@ df = DataFrame.from_arrow(polars_df)       # polars.DataFrame  -> DataFrame
 ```
 
 > Arrow is **not** accepted by the `DataFrame(data=...)` constructor (which takes a
-> `dict` or another `DataFrame`); build from an Arrow object through `from_arrow`.
+> `dict` or another `DataFrame`); use `from_arrow` for whole Arrow tables. Arrow arrays inside a `dict` are supported and copied.
 
 ### df.exec(directive: str) -> np.ndarray
 
@@ -767,7 +767,11 @@ df.to_csv(index=False, columns=['open', 'high', 'low', 'close', 'volume'])
 `df[col]` and `df[directive]` return a named 1-D `Series`. See the
 [Series API](series-api.md) for operators, datetime access, and export methods.
 
-### Series.from_arrow(data, name=None) -> Series
+`dt.strftime(fmt)` applies the same format language as `Timestamp.strftime(fmt)`.
+`%f` writes six fractional digits; `%.f` writes the nonzero fraction in groups of
+three digits, up to nanoseconds. Missing values stay `NA`. Format errors are
+reported when formatting the first present value; an empty or all-NaT Series
+returns its empty or missing result.
 
 See {ref}`Series Arrow import <series-from-arrow>`.
 
@@ -827,7 +831,8 @@ its last row is their cumulation. On a tf-aware frame:
   marks them stale, and the next read recomputes just the tail.
 - **df.cumulate(target)** must be a whole multiple of the source frame (e.g.
   `5m→15m`, not `5m→7m`; a week or 3-day bar does not nest into a month/year);
-  the same frame is a `copy()`.
+  at the same time frame it re-aggregates the current data rows with the requested
+  cumulators (see [Cumulation](cumulation.md)).
 - **A derived frame of the same bars stays tf-aware.** A selection ending at the forming
   row (`df.iloc[a:]`, `df.tail(n)`, `df.loc[t:]`) keeps the open period, so the next finer
   bar still folds into it; a projection and `rename` (each column keeps its aggregator)
@@ -924,6 +929,10 @@ int column) becomes `NaT`, like `pd.to_datetime`.
   parsed field is honored: an offset (`%z` / `%:z`) makes the value an absolute instant,
   exactly like an offset-aware string without `format`; time fields the format omits
   are zero. `%Z` (a zone *name*) raises `ValueError` — use a numeric offset.
+
+Empty, blank and missing string cells become `NaT` before format validation.
+An empty or all-missing string input therefore does not raise for an invalid
+format. Otherwise errors follow input order and name the first failing text.
 
 Naive strings parse as UTC and offset-aware strings (`…+08:00`) are absolute. To
 *display* the resulting index in a zone, make it the index and tag the zone with

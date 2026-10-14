@@ -15,6 +15,8 @@ from .harness.data import EPOCHS, NS, Schema, make_rows
 from .harness.ledger import Ledger
 from .harness.schedules import OHLCV
 
+from test.exact import same_exact
+
 
 def _walk(n, seed=1):
     rng = np.random.default_rng(seed)
@@ -33,7 +35,7 @@ def _frame(cols, a, b, index=None):
 
 
 def _same(a, b):
-    return np.array_equal(np.asarray(a, float), np.asarray(b, float), equal_nan=True)
+    return same_exact(a, b)
 
 
 # --- atomicity (I8) -----------------------------------------------------------------
@@ -246,7 +248,7 @@ def test_stochrsi_d_resume_is_bit_exact():
         df.fulfill()
         df.append(_frame(cols, 22, 40))
         got, want = np.asarray(df['stochrsi.d']), np.asarray(_frame(cols, 0, 40)['stochrsi.d'])
-        if not np.array_equal(got, want, equal_nan=True):
+        if not same_exact(got, want):
             drift.append(seed)
     assert not drift
 
@@ -284,7 +286,7 @@ def test_a_windowed_recursive_column_is_bit_exact():
     w['ema:10']
     for i in range(40, 200):
         w.append(_frame(cols, i, i + 1))  # no read until the end
-    assert np.array_equal(np.asarray(w['ema:10']), np.asarray(_frame(cols, 0, 200)['ema:10'])[-5:])
+    assert same_exact(np.asarray(w['ema:10']), np.asarray(_frame(cols, 0, 200)['ema:10'])[-5:])
 
 
 def test_trix_resume_matches_on_zero_prices():
@@ -306,7 +308,7 @@ def test_a_recursive_composite_continues_across_a_slice():
     assert df.is_computed('close+kama:3@open')
     df.append(_frame(cols, 30, 31))
     df.fulfill()
-    assert np.array_equal(np.asarray(df['close+kama:3@open'])[-1:],
+    assert same_exact(np.asarray(df['close+kama:3@open'])[-1:],
                           np.asarray(_frame(cols, 0, 31)['close+kama:3@open'])[-1:])
 
 
@@ -341,4 +343,4 @@ def test_a_re_sent_last_row_of_a_lookback_long_slice_is_exact(directive):
     whole.append(resent)
     tail = df.iloc[40 - keep:]
     tail.append(resent)
-    assert np.array_equal(tail[directive].to_numpy(), whole[directive].to_numpy()[-keep:], equal_nan=True)
+    assert same_exact(tail[directive].to_numpy(), whole[directive].to_numpy()[-keep:])

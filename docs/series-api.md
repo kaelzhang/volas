@@ -40,16 +40,17 @@ t.dt.floor('15min')        # datetime Series aligned to the 15-minute bar
 ```
 
 (series-from-arrow)=
-## Series.from_arrow(data, name=None) -> Series
+## Series.from_arrow(data, name=None, copy=True) -> Series
 
 A **volas-specific static method** that builds a `Series` from any object exposing the
 Arrow **C-Data** array protocol (`__arrow_c_array__`) — a `pyarrow.Array`, a polars
-`Series`, etc. The data buffer is borrowed where the dtype matches (otherwise copied);
-the result carries a fresh `RangeIndex`. A malformed array raises `ValueError`, exactly
-as in [`DataFrame.from_arrow`](dataframe-api.md#dataframefrom_arrowdata---dataframe).
+`Series`, etc. Imports form owned snapshots with a fresh `RangeIndex`. A malformed
+array raises `ValueError`, exactly as in
+[`DataFrame.from_arrow`](dataframe-api.md#dataframefrom_arrowdata-copytrue---dataframe).
 
 - **data** the Arrow source — any object implementing `__arrow_c_array__`.
 - **name?** `str | None = None` the name for the resulting `Series`.
+- **copy** keyword-only `bool = True`. `False` opts into borrowing under the same producer-immutability precondition as `DataFrame.from_arrow`; conversion layouts still copy.
 
 ```py
 s = Series.from_arrow(pa_array, name='close')   # pyarrow.Array -> Series

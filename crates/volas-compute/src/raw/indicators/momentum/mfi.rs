@@ -15,7 +15,7 @@ pub fn mfi(high: &[f64], low: &[f64], close: &[f64], volume: &[f64], period: usi
 }
 
 /// MFI batch pass with terminal-state publication.
-pub fn mfi_pass(high: &[f64], low: &[f64], close: &[f64], volume: &[f64], period: usize, origin: usize, states: &mut impl crate::pass::StateSink) -> Vec<f64> {
+pub fn mfi_pass<S: crate::pass::StateSink>(high: &[f64], low: &[f64], close: &[f64], volume: &[f64], period: usize, origin: usize, states: &mut S) -> Vec<f64> {
     // The flow loop reads its inputs unchecked: inputs of unequal length line up no row.
     if !super::super::same_len(&[high, low, close, volume]) {
         return Vec::new();
@@ -61,22 +61,64 @@ pub fn mfi_pass(high: &[f64], low: &[f64], close: &[f64], volume: &[f64], period
     }
     // Re-anchor from the ring: the window's flows, oldest (slot `oldest`) first.
     let mut clean = true;
-    let mut reanchor = |pos_sum: &mut Csum, neg_sum: &mut Csum, ring_pos: &[f64], ring_neg: &[f64], oldest: usize| {
-        clean &= pos_sum.value().is_finite() && neg_sum.value().is_finite();
-        if clean {
-            let window = (0..period).map(|k| (oldest + k) % period);
-            [*pos_sum, *neg_sum] = Csum::of_rows(window.map(|k| [ring_pos[k], ring_neg[k]]));
-        }
-    };
     let exact = |a: &Csum, b: &Csum| a.is_exact() && b.is_exact();
     if !exact(&pos_sum, &neg_sum) {
-        reanchor(&mut pos_sum, &mut neg_sum, &ring_pos, &ring_neg, 0);
+        mfi_reanchor(period, &mut clean, &mut pos_sum, &mut neg_sum, &ring_pos, &ring_neg, 0);
     }
     out.set(period, mfi_value([pos_sum.value(), neg_sum.value()]));
     states.record(period, n, |out| Slide::append_components(out, [pos_sum, neg_sum], 0, origin + period));
-    let mut slot = 0usize; // ring slot holding the oldest in-window bar (to evict next)
-    i = period + 1;
-    while i < n {
+    let mut running = MfiLoop { out, ring_pos, ring_neg, pos_sum, neg_sum, prev_tp, slot: 0, clean };
+    let mut from = period + 1;
+    while from < n {
+        let end = states.next_end(from + 1, n).clamp(from + 1, n);
+        running = mfi_span(running, [high, low, close, volume], period, from..end);
+        states.record(end - 1, n, |out| Slide::append_components(out, [running.pos_sum, running.neg_sum], 0, origin + end - 1));
+        from = end;
+    }
+    if running.clean && running.pos_sum.value().is_finite() && running.neg_sum.value().is_finite() {
+        return running.out.finish();
+    }
+    states.restart();
+    // A non-finite flow entered: window-local careful path (see `crate::guard`). Flows
+    // exist for bars `1..n`; flow `j` is bar `j + 1`'s.
+    let flow = |j: usize| mfi_flow(high, low, close, volume, j);
+    let mut out = crate::buf::OutBuf::warmup(n, period);
+    let mut child = states.shifted(1);
+    crate::guard::window_sums_pass(n - 1, period, Order::DropAdd, origin, flow, |j, s| out.set(j + 1, mfi_value(s)), &mut child);
+    child.restore_offset(1);
+    *states = child;
+    out.finish()
+}
+
+/// Re-anchor the window from its ring in the original subtract-then-add order.
+#[inline]
+fn mfi_reanchor(period: usize, clean: &mut bool, pos_sum: &mut Csum, neg_sum: &mut Csum, ring_pos: &[f64], ring_neg: &[f64], oldest: usize) {
+    *clean &= pos_sum.value().is_finite() && neg_sum.value().is_finite();
+    if *clean {
+        let window = (0..period).map(|k| (oldest + k) % period);
+        [*pos_sum, *neg_sum] = Csum::of_rows(window.map(|k| [ring_pos[k], ring_neg[k]]));
+    }
+}
+
+/// Numerical continuation across publication spans; the output remains write-once.
+struct MfiLoop {
+    out: crate::buf::OutBuf,
+    ring_pos: Vec<f64>,
+    ring_neg: Vec<f64>,
+    pos_sum: Csum,
+    neg_sum: Csum,
+    prev_tp: f64,
+    slot: usize,
+    clean: bool,
+}
+
+// The publication arena must not share the numerical loop's register frame.
+// Both value-only and capturing calls run this same arithmetic owner.
+#[inline(never)]
+fn mfi_span(running: MfiLoop, [high, low, close, volume]: [&[f64]; 4], period: usize, rows: std::ops::Range<usize>) -> MfiLoop {
+    let MfiLoop { mut out, mut ring_pos, mut ring_neg, mut pos_sum, mut neg_sum, mut prev_tp, mut slot, mut clean } = running;
+    let exact = |a: &Csum, b: &Csum| a.is_exact() && b.is_exact();
+    for i in rows {
         pos_sum.sub(ring_pos[slot]); // bar leaving the window
         neg_sum.sub(ring_neg[slot]);
         let tp = (unsafe { *high.get_unchecked(i) }
@@ -89,30 +131,16 @@ pub fn mfi_pass(high: &[f64], low: &[f64], close: &[f64], volume: &[f64], period
         pos_sum.add(p);
         neg_sum.add(ng);
         if !exact(&pos_sum, &neg_sum) {
-            reanchor(&mut pos_sum, &mut neg_sum, &ring_pos, &ring_neg, (slot + 1) % period);
+            mfi_reanchor(period, &mut clean, &mut pos_sum, &mut neg_sum, &ring_pos, &ring_neg, (slot + 1) % period);
         }
         out.set(i, mfi_value([pos_sum.value(), neg_sum.value()]));
-        states.record(i, n, |out| Slide::append_components(out, [pos_sum, neg_sum], 0, origin + i));
         prev_tp = tp;
         slot += 1;
         if slot == period {
             slot = 0;
         }
-        i += 1;
     }
-    if clean && pos_sum.value().is_finite() && neg_sum.value().is_finite() {
-        return out.finish();
-    }
-    states.restart();
-    // A non-finite flow entered: window-local careful path (see `crate::guard`). Flows
-    // exist for bars `1..n`; flow `j` is bar `j + 1`'s.
-    let flow = |j: usize| mfi_flow(high, low, close, volume, j);
-    let mut out = crate::buf::OutBuf::warmup(n, period);
-    let mut child = states.shifted(1);
-    crate::guard::window_sums_pass(n - 1, period, Order::DropAdd, origin, flow, |j, s| out.set(j + 1, mfi_value(s)), &mut child);
-    child.restore_offset(1);
-    *states = child;
-    out.finish()
+    MfiLoop { out, ring_pos, ring_neg, pos_sum, neg_sum, prev_tp, slot, clean }
 }
 
 /// MFI's signed money flow of bar `j + 1` (term `j`): `[positive, negative]`.

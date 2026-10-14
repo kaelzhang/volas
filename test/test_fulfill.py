@@ -14,6 +14,8 @@ import numpy as np
 
 import volas
 
+from test.exact import assert_exact
+
 TENCENT = str((Path(__file__).parent / 'data' / 'tencent.csv').resolve())
 
 
@@ -86,8 +88,7 @@ def test_fulfill_single_bar_resume_ema_smma_explicit_series():
     for d in directives:
         exp = np.asarray(ref[d].to_numpy(), float)
         got = np.asarray(df[d].to_numpy(), float)
-        m = ~np.isnan(exp)
-        np.testing.assert_array_equal(got[m], exp[m])  # strict bit-exactness
+        assert_exact(got, exp)  # strict bit-exactness
 
 
 def test_fulfill_no_computed_columns_is_noop():
@@ -96,7 +97,7 @@ def test_fulfill_no_computed_columns_is_noop():
     assert 'ma:20' not in df.columns
 
 
-def test_fulfill_is_incremental_not_full_recompute():
+def test_fulfill_is_incremental_not_full_recompute(cost_guard):
     # fulfill (O(lookback)) must be dramatically cheaper than a full O(n) recompute.
     n = 100_000
     base = {c: np.arange(n, dtype=float) for c in ['open', 'high', 'low', 'close', 'volume']}
@@ -105,15 +106,15 @@ def test_fulfill_is_incremental_not_full_recompute():
     one = volas.DataFrame({c: [1.0] for c in ['open', 'high', 'low', 'close', 'volume']})
     df = df.append(one)
 
-    t0 = time.perf_counter()
-    df.fulfill()
-    fulfill_us = (time.perf_counter() - t0) * 1e6
+    def elapsed(call):
+        start = time.perf_counter()
+        call()
+        return (time.perf_counter() - start) * 1e6
 
-    t0 = time.perf_counter()
-    df.exec('ma:30')  # a full O(n) recompute of a fresh directive
-    full_us = (time.perf_counter() - t0) * 1e6
+    fulfill_us, full_us = cost_guard.pair(lambda: elapsed(df.fulfill),
+                                         lambda: elapsed(lambda: df.exec('ma:30')))
 
-    assert fulfill_us * 10 < full_us, (fulfill_us, full_us)
+    cost_guard(fulfill_us * 10, full_us)
 
 
 # The probe path executes on the LIVE frame (incl. the stale cached column) for

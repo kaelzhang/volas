@@ -740,8 +740,20 @@ The window API is pandas-aligned and differential-tested method by method
   window's own `count()`); volas ranks within the clipped window.
 - **`sum()` / `mean()` over a window holding an infinity give the infinity.** A
   window holding `+inf` sums to `+inf` (`-inf` likewise, and both signs to NaN), and
-  the next window without it is exact again. pandas returns NaN for every window
-  holding an infinity, an artefact of its compensated summation, not a definition.
+  the next window without it is exact again. pandas 3.0.3 converts infinities to
+  missing before window aggregation and computes over the remaining finite values.
+- **Rolling / expanding `max`, `min`, `median`, `quantile`, `rank`, `nunique`,
+  `first` and `last` treat infinities as present values.** They participate in
+  ordering, distinct counts and `min_periods`; pandas 3.0.3 excludes them.
+  For `[1, +inf]` with `rolling(2, min_periods=1)`, volas's last `max` and
+  `median` are `+inf` and its last `rank` is 2; pandas returns 1, 1 and NaN.
+  Interpolation follows IEEE arithmetic: a median involving `-inf` may be NaN.
+- **EWM excludes both infinity signs**, like pandas 3.0.3. They are gaps governed
+  by `ignore_na` and do not count toward `min_periods`, so the recursive state
+  remains usable. This applies to `mean`, `sum`, `var`, `std`, `cov` and `corr`.
+  EWM correlation divides by standard deviations separately to avoid overflow
+  or underflow in their product; equal variances use `cov / variance`, preserving
+  exact self-correlation where the finite covariance itself is representable.
 
 ## Integer exactness
 

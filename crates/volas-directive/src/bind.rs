@@ -162,6 +162,18 @@ pub fn is_bare_command(name: &str) -> bool {
 /// Canonical directive spelling of a physical data-column label. Invalid directive
 /// labels retain their ordinary exact-name semantics at the caller's lookup boundary.
 pub fn canonical_data_name(text: &str) -> Result<String> {
+    // Ordinary schema labels need neither a parsed tree nor its continuation facts.
+    // Keep the renderer's bare-name rule: only commands usable bare normalize.
+    let mut bytes = text.bytes();
+    if bytes.next().is_some_and(crate::parser::is_ident_start)
+        && bytes.all(crate::parser::is_ident_char)
+    {
+        return Ok(if is_bare_command(text) {
+            normalize(text).into_owned()
+        } else {
+            text.to_string()
+        });
+    }
     crate::parse(text).map(|node| crate::stringify::stringify_node(node.node()))
 }
 
@@ -212,9 +224,9 @@ fn bind_frame_node(node: &BoundNode, resolve: &impl Fn(&str) -> Option<String>) 
     })
 }
 
-/// Whether the frame-bound `node` reads the built-in command spelled exactly `name`
-/// through a bare name — so a data column added under that name would have changed
-/// what it reads.
+/// Whether the frame-bound `node` uses a built-in command through a bare name
+/// whose canonical command name is `name`. Command spelling does not affect its
+/// identity; the prospective data column's `name` stays case-sensitive.
 pub fn uses_bare_command(node: &Ast, name: &str) -> bool {
     uses_bare_node(node.node(), name)
 }
@@ -223,7 +235,7 @@ fn uses_bare_node(node: &BoundNode, name: &str) -> bool {
     match node {
         Node::Data(_) | Node::Name(_) | Node::Scalar(_) => false,
         Node::Command(c) => {
-            c.args.bare.as_deref().is_some_and(|bare| normalize(bare) == normalize(name)) || c.series.iter().any(|s| uses_bare_node(s, name))
+            (c.args.bare.is_some() && c.name == name) || c.series.iter().any(|s| uses_bare_node(s, name))
         }
         Node::Unary { operand, .. } => uses_bare_node(operand, name),
         Node::Binary { left, right, .. } => uses_bare_node(left, name) || uses_bare_node(right, name),

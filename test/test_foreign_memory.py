@@ -1,22 +1,14 @@
-"""Bytes volas does not own can never carry a stale "no missing value" fact.
+"""Default foreign imports freeze bytes; exports lend read-only views.
 
-A float column remembers whether it holds a NaN, so a recursive indicator over a frame
-known to be complete skips the missing-row check. That is only sound while the bytes
-cannot change behind the frame's back:
-
-- a zero-copy **import** (Arrow — `from_arrow`, the C-Data / C-Stream protocols)
-  borrows the producer's buffer, which the producer may still write: the fact is never
-  remembered for it, so a row made missing through the source is skipped exactly like
-  one the frame was built with;
-- a zero-copy **export** (DLPack, Arrow) lends a read-only view: nothing can write
-  through it;
-- NumPy import and `to_numpy` copy, so neither side can reach the other's bytes.
+Explicit immutable borrowing never permits writes through producer aliases.
 """
 
 import numpy as np
 import pytest
 
 from volas import DataFrame, Series
+
+from test.exact import assert_exact
 
 pa = pytest.importorskip("pyarrow")
 
@@ -26,9 +18,7 @@ CLOSE = 100.0 + np.cumsum(_rng.standard_normal(N))
 
 
 def _bit_exact(got, want):
-    got, want = np.asarray(got, dtype=float), np.asarray(want, dtype=float)
-    nan = np.isnan(got) & np.isnan(want)
-    np.testing.assert_array_equal(np.where(nan, 0.0, got), np.where(nan, 0.0, want))
+    assert_exact(got, want)
 
 
 def _borrowed_arrow(values):
@@ -39,26 +29,26 @@ def _borrowed_arrow(values):
 
 
 @pytest.mark.parametrize("directive", ["ema:5", "rsi:5", "macd", "ht_trendline"])
-def test_a_row_made_missing_through_an_arrow_source_is_skipped(directive):
+def test_an_arrow_source_write_cannot_change_the_import_snapshot(directive):
     source = CLOSE.copy()
     df = DataFrame.from_arrow(pa.table({"close": _borrowed_arrow(source)}))
     clean = np.asarray(df.exec(directive, dtype='float64'), float)  # the frame has now looked at its bytes
     _bit_exact(clean, DataFrame({"close": CLOSE.copy()}).exec(directive))
     source[100] = np.nan  # written behind the frame's back
     got = df.exec(directive)
-    _bit_exact(got, DataFrame({"close": source.copy()}).exec(directive))
-    assert np.isnan(np.asarray(got, float)[100])
+    _bit_exact(got, clean)
+    assert not np.isnan(np.asarray(got, float)[100])
 
 
-def test_a_borrowed_series_is_rescanned_too():
+def test_an_imported_series_keeps_its_snapshot():
     source = CLOSE.copy()
     s = Series.from_arrow(_borrowed_arrow(source), name="close")
     df = DataFrame({"close": s})
     df.exec("ema:5")
     source[50] = np.nan
-    # the frame shares the borrowed buffer, so the write is visible — and skipped
+    # The Series owns the import snapshot; the frame shares that stable column.
     now = np.asarray(df["close"], float).copy()
-    assert np.isnan(now[50])
+    assert not np.isnan(now[50])
     _bit_exact(df.exec("ema:5"), DataFrame({"close": now}).exec("ema:5"))
 
 
