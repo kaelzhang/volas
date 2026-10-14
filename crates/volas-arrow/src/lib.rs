@@ -4,8 +4,8 @@
 //! the Python layer composes this bridge with the C-Data interface.
 //!
 //! ## Ownership contract
-//! Imports form owned snapshots by default. Explicit `*_with_copy(..., false)`
-//! imports borrow matching numeric / dense ns-datetime data, with the precondition
+//! Arrow data is immutable. Imports borrow matching numeric / dense ns-datetime
+//! data by default; `*_with_copy(..., true)` takes an owned snapshot. The precondition is
 //! that the producer and every alias never write borrowed memory again while any
 //! imported column or view survives. Conversion layouts still copy.
 //! Exports share read-only data buffers; bool and validity are repacked.
@@ -18,6 +18,9 @@ use std::sync::Arc;
 use arrow_array::ArrayRef;
 use arrow_buffer::{Buffer as ArrowBuffer, NullBuffer};
 use volas_core::{Buffer, Validity};
+
+/// Default ownership policy for all Arrow-family imports, including Python bindings.
+pub const DEFAULT_IMPORT_COPY: bool = false;
 
 mod chunks;
 mod export;

@@ -1,4 +1,4 @@
-"""Foreign imports freeze input before caches or continuation states are built."""
+"""Explicit Arrow snapshots and copying constructors isolate foreign writes."""
 import numpy as np
 import pandas as pd
 import pyarrow as pa
@@ -24,9 +24,9 @@ class Stream:
 
 
 ENTRY_POINTS = {
-    'frame_arrow': lambda a: DataFrame.from_arrow(pa.table({'close': a})),
-    'series_arrow': lambda a: DataFrame({'close': Series.from_arrow(a)}),
-    'stream': lambda a: DataFrame.from_arrow(Stream(a)),
+    'frame_arrow': lambda a: DataFrame.from_arrow(pa.table({'close': a}), copy=True),
+    'series_arrow': lambda a: DataFrame({'close': Series.from_arrow(a, copy=True)}),
+    'stream': lambda a: DataFrame.from_arrow(Stream(a), copy=True),
     'frame_column': lambda a: DataFrame({'close': a}),
     'pandas_column': lambda a: DataFrame({'close': pd.Series(a, dtype=pd.ArrowDtype(a.type))}),
     'pandas_arrow': lambda a: DataFrame.from_pandas(
@@ -88,20 +88,20 @@ def test_import_layout_matrix(dtype, nullable, chunks):
     a = pa.array(values, type=dtype)
     parts = [a] if chunks == 1 else [a.slice(i, 2) for i in range(0, 6, 2)]
     table = pa.table({'close': pa.chunked_array(parts)})
-    owned = DataFrame.from_arrow(table)['close']
+    owned = DataFrame.from_arrow(table, copy=True)['close']
     borrowed = DataFrame.from_arrow(table, copy=False)['close']
-    single = Series.from_arrow(a)
+    single = Series.from_arrow(a, copy=True)
     assert owned.dtype == borrowed.dtype == single.dtype
     assert_exact(owned, borrowed)
     assert_exact(owned, single)
 
 
 @pytest.mark.parametrize('dtype', ['float32', 'float64', 'int32', 'int64'])
-def test_default_native_import_owns_and_opt_in_shares(dtype):
+def test_explicit_snapshot_owns_and_default_shares(dtype):
     source = np.arange(30, dtype=dtype)
     a = arrow(source)
-    owned = Series.from_arrow(a)
-    borrowed = Series.from_arrow(a, copy=False)
+    owned = Series.from_arrow(a, copy=True)
+    borrowed = Series.from_arrow(a)
     assert owned.to_arrow().buffers()[1].address != source.ctypes.data
     assert borrowed.to_arrow().buffers()[1].address == source.ctypes.data
     del borrowed
@@ -119,7 +119,7 @@ def test_import_precondition_is_public():
 @pytest.mark.parametrize('changed', [np.nan, 1000.0])
 def test_import_snapshot_survives_window_checkpoints(changed):
     source = np.arange(1., 161.)
-    frame = DataFrame({'close': Series.from_arrow(arrow(source))},
+    frame = DataFrame({'close': Series.from_arrow(arrow(source), copy=True)},
                       window=5, max_lookback=['ema:5'])
     reference = DataFrame({'close': source.copy()})
     source[100] = changed
@@ -180,7 +180,7 @@ def test_snapshot_isolates_values_and_the_validity_bitmap(dtype):
     values = np.arange(4, dtype=numpy_dtype)
     mask = np.array([0b1101], dtype='uint8')
     a = pa.Array.from_buffers(dtype, 4, [pa.py_buffer(mask), pa.py_buffer(values)])
-    snapshot = Series.from_arrow(a)
+    snapshot = Series.from_arrow(a, copy=True)
     expected = snapshot.to_numpy(dtype='object')
     values[:] = 9
     mask[0] = 0b0010

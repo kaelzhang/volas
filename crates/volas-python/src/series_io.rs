@@ -74,11 +74,11 @@ impl PySeries {
     }
 
     /// Build a Series from any object implementing the Arrow array protocol
-    /// (`__arrow_c_array__`) — a pyarrow `Array`, a polars `Series`, … — an owned snapshot by default.
-    /// `copy=False` borrows matching buffers; the producer and every alias must never write
+    /// (`__arrow_c_array__`) — a pyarrow `Array`, a polars `Series`, … — matching buffers borrowed by default. Arrow data is immutable.
+    /// `copy=False` borrows matching buffers; `copy=True` takes an owned snapshot; the producer and every alias must never write
     /// borrowed memory again while imported objects or views survive. The result carries a fresh `RangeIndex`; `name` labels it.
     #[staticmethod]
-    #[pyo3(signature = (data, name = None, *, copy = true))]
+    #[pyo3(signature = (data, name = None, *, copy = volas_arrow::DEFAULT_IMPORT_COPY), text_signature = "(data, name=None, *, copy=False)")]
     pub(crate) fn from_arrow(data: &Bound<'_, PyAny>, name: Option<String>, copy: bool) -> PyResult<PySeries> {
         let col = crate::arrow::column_from_arrow_obj(data, copy)?;
         let n = col.len();
