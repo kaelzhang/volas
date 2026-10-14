@@ -22,6 +22,7 @@ use crate::spec::{
 use crate::types::{ArgValue, Ast, Bound, BoundNode, Command, Cst, Form, FormArgs, Node};
 use volas_core::{Result, VolasError};
 use volas_time::Span;
+use std::borrow::Cow;
 
 /// Lower a concrete syntax tree to a bound AST. A bare [`Node::Name`] is left
 /// unbound — without a frame it cannot be told apart from a column reference; see
@@ -161,20 +162,26 @@ pub fn is_bare_command(name: &str) -> bool {
 
 /// Canonical directive spelling of a physical data-column label. Invalid directive
 /// labels retain their ordinary exact-name semantics at the caller's lookup boundary.
-pub fn canonical_data_name(text: &str) -> Result<String> {
+/// Unchanged identifiers borrow the schema label; only a changed spelling or an
+/// expression's rendered identity needs owned storage.
+#[inline]
+pub fn canonical_data_name(text: &str) -> Result<Cow<'_, str>> {
     // Ordinary schema labels need neither a parsed tree nor its continuation facts.
     // Keep the renderer's bare-name rule: only commands usable bare normalize.
     let mut bytes = text.bytes();
     if bytes.next().is_some_and(crate::parser::is_ident_start)
         && bytes.all(crate::parser::is_ident_char)
     {
-        return Ok(if is_bare_command(text) {
-            normalize(text).into_owned()
+        // Lowercase identifiers already render identically, whether or not they
+        // are commands. Consult the spec only if normalization changes a label.
+        let normalized = normalize(text);
+        return Ok(if normalized != text && is_bare_command(&normalized) {
+            normalized
         } else {
-            text.to_string()
+            Cow::Borrowed(text)
         });
     }
-    crate::parse(text).map(|node| crate::stringify::stringify_node(node.node()))
+    crate::parse(text).map(|node| Cow::Owned(crate::stringify::stringify_node(node.node())))
 }
 
 /// Bind to data columns named by `is_column`. A data column owns every canonical

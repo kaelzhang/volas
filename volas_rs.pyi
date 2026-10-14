@@ -642,6 +642,7 @@ class DataFrame:
 
 @final
 class DataFrameILoc:
+    """Positional indexing; either tuple axis accepts a one-dimensional bool mask."""
     @overload
     def __getitem__(self, key: int, /) -> Row: ...
     @overload
@@ -652,6 +653,7 @@ class DataFrameILoc:
 
 @final
 class DataFrameLoc:
+    """Label indexing; either tuple axis accepts a one-dimensional bool mask."""
     @overload
     def __getitem__(self, key: slice | _BoolMask, /) -> DataFrame: ...
     @overload

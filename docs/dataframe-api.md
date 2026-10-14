@@ -126,7 +126,8 @@ Which gets the 2-period simple moving average on column `"close"`.
   one (`ma`, EMA, Wilder
   smoothing, a cumulative line, …) can only be computed this way. Or pass an **int**: the
   margin alone, declaring nothing. A raw-column directive (`'close'`) is also valid:
-  its lookback is zero and it stays a data column. Unknown columns (`'ma50'`) and an
+  its lookback is zero and it stays a data column. Equivalent spellings of a physical
+  data column are also data declarations, with no computed warm-up. Unknown columns (`'ma50'`) and an
   empty list are rejected, and so is a
   directive whose column name is a data column of the frame (`'macd:'` beside a data
   column `macd`): rename that column to declare it.
@@ -242,12 +243,11 @@ allocates nothing per bar (unlike `to_numpy`, which mints a fresh matrix every c
 
 Contract:
 
-- **Only already-cached columns**, named by their **canonical directive string**. A
-  directive column must be **materialized first** — access it once and read the name
-  back (`name = wf['atr:14'].name`), because a cached directive is stored under its
-  canonical form (e.g. `'MA: 5'` → `'ma:5'`), *not* the string you passed, and `columns=`
-  matches on the exact stored name. (A directive declared in `max_lookback=['atr:14']`
-  is cached at construction; `fill_into` exports cached values, never computes them.)
+- **Only existing columns** (data or cached): materialize a directive first with
+  `name = wf['atr:14'].name`. Use `df.columns` or that returned name for the exact
+  stored label; equivalent directive spellings resolve to the same physical owner.
+  A declaration in `max_lookback` is cached at construction. `fill_into` exports
+  existing values and never computes a missing directive.
 - **`out`** must be a `float32` **or** `float64` 2-D array whose shape is **exactly**
   `(len(df), k)`, where `k` is the number of exported columns (strides are respected, so a
   non-contiguous or Fortran-order view works too). A wrong shape or dtype raises.
@@ -594,7 +594,9 @@ A frame derived from another either **continues its series** or **starts a new o
   continued afterwards — even when the projection also holds the directive's inputs. An
   `append` treats it like any data column: a bar without it leaves it missing, a bar with
   it gives that value. An unlisted cached column is dropped, and the projection keeps no
-  history before its rows.
+  history before its rows. New directives start at computation position zero on the
+  projection's own rows; index labels are preserved. A failed projection leaves the
+  source frame, including its caches and freshness, unchanged.
 - A **column removal** — `drop(axis=1)` — removes the columns it names and keeps everything
   else as it is: the remaining cached columns stay cached and continue, and the rows only
   the removed ones read before the first row are released.

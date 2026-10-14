@@ -345,7 +345,8 @@ impl DataFrame {
     /// The columns `names`, in that order, over the same rows, each a data column: a
     /// listed cached column keeps its values as this frame shows them and is plain data
     /// from then on — never continued, even with its inputs alongside (R40); an unlisted
-    /// one is dropped. The frame keeps no history before its rows (no lead).
+    /// one is dropped. This internal same-series data view retains computation
+    /// coordinates; use `project` for a public new-series projection.
     pub fn select(&self, names: &[String]) -> Result<DataFrame> {
         let mut columns = Vec::with_capacity(names.len());
         let mut name_to_idx = FxHashMap::with_capacity_and_hasher(names.len(), Default::default());
@@ -371,6 +372,25 @@ impl DataFrame {
         #[cfg(debug_assertions)]
         df.debug_check();
         Ok(df)
+    }
+
+    /// A public column projection of rows `[start, end)`: the listed values are
+    /// ordinary data in a new series, with their own computation coordinates.
+    /// Internal same-series data views use `select` and keep their origin.
+    pub fn project(&self, names: &[String], start: usize, end: usize) -> Result<DataFrame> {
+        let start = start.min(self.height);
+        let end = end.max(start).min(self.height);
+        let mut projected = self.select(names)?;
+        if start != 0 || end != self.height {
+            projected.columns = projected.columns.iter().map(|c| c.slice(start, end)).collect();
+            projected.index = Arc::new(self.index.slice(start, end));
+            projected.height = end - start;
+        }
+        projected.origin = 0;
+        projected.stale_by = STALE_BY_APPEND;
+        #[cfg(debug_assertions)]
+        projected.debug_check();
+        Ok(projected)
     }
 
     /// This frame without the columns `names` (a name that is not a column is ignored):

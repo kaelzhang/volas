@@ -100,6 +100,7 @@ mod frame_bounded;
 mod frame_construct;
 mod frame_derive;
 mod frame_index;
+mod frame_identity;
 mod frame_io;
 mod frame_reduce;
 mod frame_refresh;

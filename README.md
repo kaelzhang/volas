@@ -204,7 +204,12 @@ df.to_numpy()                    # 2-D ndarray (rows x columns)
 
 [Cumulation](docs/cumulation.md) accepts empty datetime frames and applies the
 requested aggregation rules even at the same time frame. Window declarations
-also accept raw columns (`max_lookback=['close']`, lookback zero).
+also accept raw columns (`max_lookback=['close']`, lookback zero). A physical data
+column owns every equivalent directive spelling; schemas reject two labels for
+one identity (for example, `ema:2` and `EMA:02`). Column projections preserve
+labels and values and start a new computation series. See
+[derived frames](docs/dataframe-api.md#derived-frames). NumPy bool masks on either
+indexing axis respect positive and negative strides.
 
 Arrow imports borrow matching buffers by default (`copy=False`). Arrow data is
 immutable: the producer and every alias must never write borrowed memory while
