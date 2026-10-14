@@ -1,4 +1,4 @@
-//! Arrow imports form a stable snapshot before any fact, cache or state is built.
+//! Arrow imports borrow immutable matching buffers or convert into owned storage.
 
 use arrow_array::cast::AsArray;
 use arrow_array::types::{Float32Type, Float64Type, Int32Type, Int64Type, TimestampNanosecondType};
@@ -8,9 +8,10 @@ use volas_core::{datetime, Column};
 
 use crate::{borrow_primitive, validity_of};
 
-/// Import an Arrow array into an owned snapshot, fusing dtype and validity conversion.
+/// Import immutable Arrow data, borrowing matching buffers by default.
+/// The producer and every alias must never write borrowed memory while columns or views survive.
 pub fn column_from_arrow(src: &ArrayRef) -> Result<Column, ArrowError> {
-    column_from_arrow_with_copy(src, true)
+    column_from_arrow_with_copy(src, crate::DEFAULT_IMPORT_COPY)
 }
 
 /// Import with an explicit ownership policy. With `copy=false`, the producer and

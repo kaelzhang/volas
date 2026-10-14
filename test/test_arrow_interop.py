@@ -134,7 +134,7 @@ def test_series_arrow_schema_capsule():
 
 def test_series_zero_copy_through_import_export():
     src = pa.array([7, 8, 9, 10], type=pa.int64())
-    reexport = pa.array(volas.Series.from_arrow(src, copy=False))
+    reexport = pa.array(volas.Series.from_arrow(src))
     assert src.buffers()[1].address == reexport.buffers()[1].address
 
 

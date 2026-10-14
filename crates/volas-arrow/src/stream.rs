@@ -65,6 +65,7 @@ pub fn frame_to_c_stream(
 ///
 /// # Safety
 /// `stream` must be the live `"arrow_array_stream"` capsule payload, not yet consumed.
+/// The producer and every alias must never write borrowed memory while columns or views survive.
 pub unsafe fn columns_from_c_stream(
     stream: *mut c_void,
 ) -> Result<(Vec<String>, Vec<Column>), ArrowError> {
@@ -86,10 +87,11 @@ pub unsafe fn columns_from_c_stream_with_copy(
 ///
 /// # Safety
 /// `stream` must be a live, not-yet-consumed Arrow C-Stream capsule payload.
+/// The producer and every alias must never write borrowed memory while columns or views survive.
 pub unsafe fn frame_from_c_stream(
     stream: *mut c_void,
 ) -> Result<(Vec<String>, Vec<Column>, usize), ArrowError> {
-    frame_from_c_stream_with_copy(stream, true)
+    frame_from_c_stream_with_copy(stream, crate::DEFAULT_IMPORT_COPY)
 }
 
 /// Consume a stream with an explicit ownership policy. Conversion layouts and

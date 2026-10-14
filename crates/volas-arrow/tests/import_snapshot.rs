@@ -1,4 +1,4 @@
-//! Every Rust foreign import entry point defaults to owned primitive buffers.
+//! Every Rust foreign import entry point borrows by default and offers explicit owned snapshots.
 use std::ffi::c_void;
 use std::sync::Arc;
 use arrow_array::{ArrayRef, Float32Array, Float64Array, Int32Array, Int64Array, TimestampNanosecondArray};
@@ -16,7 +16,7 @@ fn borrowed(c: &Column) -> bool {
 }
 
 #[test]
-fn all_import_entry_points_default_to_owned() {
+fn all_import_entry_points_default_to_borrowed() {
     let arrays: Vec<ArrayRef> = vec![
         Arc::new(Float64Array::from(vec![1., 2.])),
         Arc::new(Float32Array::from(vec![1., 2.])),
@@ -25,17 +25,30 @@ fn all_import_entry_points_default_to_owned() {
         Arc::new(TimestampNanosecondArray::from(vec![1, 2])),
     ];
     for a in arrays {
-        let owned = column_from_arrow(&a).unwrap();
+        let owned = column_from_arrow_with_copy(&a, true).unwrap();
         assert!(!borrowed(&owned));
-        assert!(borrowed(&column_from_arrow_with_copy(&a, false).unwrap()));
+        assert!(borrowed(&column_from_arrow(&a).unwrap()));
         let (array, schema) = column_to_c_data(&owned).unwrap();
         // SAFETY: fresh exported structs, kept alive for this call.
-        assert!(!borrowed(&unsafe { column_from_c_data(array, &schema) }.unwrap()));
+        assert!(borrowed(&unsafe { column_from_c_data(array, &schema) }.unwrap()));
         let (array, schema) = column_to_c_data(&owned).unwrap();
         // SAFETY: fresh exported structs; the owned source is immutable while shared.
         assert!(borrowed(&unsafe { column_from_c_data_with_copy(array, &schema, false) }.unwrap()));
+        let (mut array, schema) = column_to_c_data(&owned).unwrap();
+        // SAFETY: these fresh C-Data payloads live through the call; source is immutable.
+        let capsule_column = unsafe {
+            column_from_c_capsules(
+                &mut array as *mut _ as *mut c_void,
+                &schema as *const _ as *const c_void,
+            )
+        }.unwrap();
+        assert!(borrowed(&capsule_column));
         let names = vec!["close".into()];
         let cols = vec![owned];
+        let mut stream = columns_to_c_stream(&names, &cols).unwrap();
+        // SAFETY: fresh stream; immutable columns stay alive through the import.
+        let (_, got) = unsafe { columns_from_c_stream(&mut stream as *mut _ as *mut c_void) }.unwrap();
+        assert!(borrowed(&got[0]));
         for copy in [true, false] {
             let mut stream = columns_to_c_stream(&names, &cols).unwrap();
             // SAFETY: fresh stream with immutable source columns.
