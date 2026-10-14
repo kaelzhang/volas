@@ -1,7 +1,6 @@
 //! `DataFrame` text / HTML rendering (`__repr__` / `to_string` / `_repr_html_`).
 
 
-use pyo3::exceptions::PyKeyError;
 use pyo3::prelude::*;
 
 use crate::format::{
@@ -62,10 +61,7 @@ impl PyDataFrame {
         let col_pos: Vec<usize> = match &columns {
             Some(cols) => cols
                 .iter()
-                .map(|n| {
-                    df.column_pos(n)
-                        .ok_or_else(|| PyKeyError::new_err(format!("column \"{n}\" not found")))
-                })
+                .map(|n| Self::column_position(df, n))
                 .collect::<PyResult<_>>()?,
             None => (0..df.width()).collect(),
         };

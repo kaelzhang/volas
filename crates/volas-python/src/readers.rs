@@ -155,5 +155,6 @@ pub fn read_csv(
             df = df.set_index_tz(tz).map_err(pyerr)?;
         }
     }
+    PyDataFrame::validate_schema(&df)?;
     Ok(PyDataFrame::plain(df))
 }

@@ -947,3 +947,19 @@ fn batch_checkpoint_references_share_the_pool_and_keep_it_alive() {
     drop(pool);
     assert_eq!(sole_point.into_owned().state, Some(vec![4.0].into())); // unique batch owner
 }
+
+#[test]
+fn public_projection_owns_coordinates_but_internal_data_view_keeps_them() {
+    let tail = frame(10).rows(7, 10, &NoReplay);
+    let names = ["ema".to_string(), "close".to_string()];
+    let internal = tail.select(&names).unwrap();
+    assert_eq!(internal.origin(), 7);
+    let public = tail.project(&names, 1, 3).unwrap();
+    assert_eq!(public.origin(), 0);
+    assert_eq!(public.index().label_at(0), tail.index().label_at(1));
+    assert!(public.computed_columns().is_empty() && public.lead.is_none());
+    assert!(public.column("ema").unwrap().equals(&tail.column("ema").unwrap().slice(1, 3)));
+    assert_eq!(tail.project(&names, 0, 3).unwrap().origin(), 0);
+    assert_eq!(tail.project(&names, 20, 1).unwrap().height(), 0);
+    assert!(tail.project(&["absent".into()], 0, 3).is_err());
+}

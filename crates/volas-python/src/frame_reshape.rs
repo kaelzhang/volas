@@ -173,7 +173,7 @@ impl PyDataFrame {
                 }
             }
             // a column removal: every other column as it is, cached ones continuing
-            return self.derive_projection(df.drop_columns(&drop_names).map_err(pyerr)?);
+            return self.derive_projection(view.contiguous(0, view.rows()).drop_columns(&drop_names).map_err(pyerr)?);
         }
         let index = df.index();
         let targets: Vec<Label> = labels
@@ -283,6 +283,7 @@ impl PyDataFrame {
                 )));
             }
         }
+        Self::validate_data_names(result.iter().map(String::as_str))?;
         let inner = df.rename(&mapping).map_err(pyerr)?;
         self.derive_renamed(inner, &mapping)
     }

@@ -322,16 +322,13 @@ def test_a_slice_recomputes_a_recursion_after_a_write_from_its_boundary():
 
 
 @pytest.mark.parametrize('declared', ['macd:', 'MACD:12,26'])
-def test_a_declaration_named_like_a_data_column_raises(declared):
-    # the declared column would be cached under 'macd', a data column: the declaration
-    # cannot be kept, so construction refuses it rather than drop it
+def test_a_declaration_named_like_a_data_column_keeps_its_data_owner(declared):
+    # Every equivalent directive spelling binds to the physical data owner.
     data = {'close': [1., 2.], 'macd': [99., 99.]}
-    with pytest.raises(ValueError) as raised:
-        volas.DataFrame(data, window=2, max_lookback=[declared])
-    assert str(raised.value) == (
-        f"cannot declare '{declared}': its column name 'macd' is a data column of this DataFrame. "
-        "Rename the data column — df.rename(columns={'macd': 'macd_data'}) — or declare another "
-        "directive.")
+    frame = volas.DataFrame(data, window=2, max_lookback=[declared])
+    assert frame.ready
+    assert not frame.is_computed(declared)
+    assert frame[declared].to_list() == [99., 99.]
 
 
 def test_an_empty_declaration_raises():

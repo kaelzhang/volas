@@ -141,6 +141,14 @@ The pandas-shaped indexing and writing details have their own sections —
 
 A pandas-compatible subset for label and positional access. The row index may be
 a range, a `DatetimeIndex`, an integer index, or a **string index**.
+Both axes of `iloc` / `loc` accept one-dimensional bool masks, including NumPy
+arrays with positive or negative strides (`df.iloc[:, column_mask]` also works
+for scalar assignment). For array assignment, select one column. A bool dtype
+never becomes integer positions; scalar or
+multidimensional bool selectors raise. An empty list selects no rows or columns.
+Column names in `loc`, `at` and export selections resolve equivalent directive
+spellings to the stored physical label; these reads never materialize a missing
+column (use `df[directive]` first).
 
 ```py
 df.iloc[2]          # a Row by position (row.name is its index label)
