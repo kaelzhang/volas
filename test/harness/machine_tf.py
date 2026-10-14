@@ -219,8 +219,8 @@ class TfMachine(FrameMachine):
 
         def commit(_):
             start = self.visible_start()
-            self.store.write({start + i: {name: float(v)} for i, v in enumerate(values)},
-                             columns=None if existing else {name: 'float64'})
+            self.store.set_column(name, [float(v) for v in values], start=start,
+                                  dtype=str(values.dtype))
             if existing:
                 self._wrote()  # a replaced column may feed any cache
 
