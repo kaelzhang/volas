@@ -8,7 +8,7 @@ use pyo3::prelude::*;
 use pyo3::sync::GILOnceCell;
 use pyo3::types::{PyDict, PyList, PyTuple};
 use volas_core::{
-    datetime, Column, DType, DataFrame, Index,
+    datetime, Column, DataFrame, DType, Index,
     IndexKind, Scalar, Tz, Validity,
 };
 
@@ -145,6 +145,7 @@ pub(crate) fn frame_from_pandas(py: Python<'_>, pdf: &Bound<'_, PyAny>) -> PyRes
         Index::from_column(&pyany_to_column(&instants)?).map_err(pyerr)?.with_name(idx_name)
     };
     let cols = PyDataFrame::new(data.as_any(), None, None, None, None, None, None, None)?.inner;
+    // Index construction validates labels; keep the named default RangeIndex too.
     let df = PyDataFrame::plain(
         DataFrame::new(cols.names().to_vec(), cols.columns().to_vec(), Some(index))
             .map_err(pyerr)?,

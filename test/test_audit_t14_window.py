@@ -385,8 +385,8 @@ def test_frame_window_stale_guard_and_e6():
     with pytest.raises(ValueError, match="fulfill"):
         d.rolling(3).mean()                      # stale -> guarded
     d.fulfill()
-    out = d.rolling(3).mean()                    # fresh -> ok, incl. ma:5 column
-    assert "ma:5" in out.columns
+    out = d.rolling(3).mean()                    # fresh -> ok, incl. ma:5 as data
+    assert "ma:5" in out.columns and not out.is_computed("ma:5")
     # E6 across the FULL frame method set (machine loop, not spot checks)
     df = volas.DataFrame({"a": arr["close"], "b": arr["open"]})
     for m in ("count", "nunique", "sum", "mean", "median", "min", "max",

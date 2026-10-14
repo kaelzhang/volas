@@ -103,7 +103,7 @@ pub fn cmf(high: &[f64], low: &[f64], close: &[f64], volume: &[f64], n: usize, o
 /// Batch computation with terminal-state publication.
 pub fn cmf_pass<S: crate::pass::StateSink>(high: &[f64], low: &[f64], close: &[f64], volume: &[f64], n: usize, origin: usize, states: &mut S) -> Vec<f64> {
     let mfv: Vec<f64> = (0..close.len()).map(|i| mfv(high, low, close, volume, i)).collect();
-    let (mut a, mut b) = (S::default(), S::default());
+    let (mut a, mut b) = (states.child(), states.child());
     let sum_mfv = super::sum_pass(&mfv, n, origin, &mut a);
     let sum_vol = super::sum_pass(volume, n, origin, &mut b);
     states.compose(close.len(), &[&a, &b], |_, _| {});
@@ -137,7 +137,7 @@ pub fn kst_pass<S: crate::pass::StateSink>(close: &[f64], origin: usize, states:
     let mut stages = Vec::new();
     let leg = |(p, n): (usize, usize)| {
         let roc: Vec<f64> = (0..close.len()).map(|i| kst_roc(close, p, i)).collect();
-        let mut s = S::default();
+        let mut s = states.child();
         let values = kernels::sma_pass(&roc, n, origin, &mut s);
         stages.push(s);
         values

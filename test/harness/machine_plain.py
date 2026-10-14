@@ -3,8 +3,6 @@ writes, name collisions, slices, and appends / comparisons across snapshots."""
 
 from __future__ import annotations
 
-import re
-
 import numpy as np
 from hypothesis import strategies as st
 from hypothesis.stateful import initialize, precondition, rule
@@ -12,11 +10,11 @@ from hypothesis.stateful import initialize, precondition, rule
 import volas
 import volas_rs
 
-from . import build, contracts, inventory, observe
+from . import build, contracts, observe
 from .directives import stored_bare_names
 from .data import EPOCHS, NS, make_rows, next_timestamps, regimes, schemas, steps
 from .ledger import Ledger, last_close
-from .machine_base import Entry, FrameMachine
+from .machine_base import FrameMachine
 
 APPEND_FORMS = ('arrow', 'arrow', 'numpy', 'sliced', 'row', 'dict')
 BAD_APPENDS = ('dtype', 'extra_column', 'index_kind', 'naive_onto_aware', 'aware_onto_naive', 'nat',
@@ -73,9 +71,6 @@ class PlainMachine(FrameMachine):
             form = 'arrow'
         if form == 'dict' and schema.index == 'range':
             form = 'numpy'  # an unnamed RangeIndex frame takes no bar dict
-        if contracts.avoids('slice-resend-short') and step == 'resend' and self.offset > 0 and any(
-                volas.directive_lookback(name) >= len(self.df) for name in self.cached):
-            return  # a re-sent last row of a slice holding just a column's lookback
         rows, index = self._new_bars(k, regime, step)
         bar = build.bars(schema, rows, index, form, pad=2, extra=tuple(self.store.user))
         labels = index
@@ -162,7 +157,7 @@ class PlainMachine(FrameMachine):
     @rule(data=st.data(), via=st.sampled_from(['iloc', 'iat', 'at', 'loc']))
     def write_cell(self, data, via):
         """A positional / label write into a data column (invalidates every cache)."""
-        if self.stale or self._positions_carried():
+        if self.stale:
             return  # a stale write is covered by append_rejected('stale_write')
         coarse = self.coarse()
         col = data.draw(st.sampled_from([c for c in coarse.columns
@@ -195,35 +190,16 @@ class PlainMachine(FrameMachine):
 
         self.attempt(target, commit=commit, label=f'{via} write {col}[{pos}]={value!r}')
 
-    def _positions_carried(self) -> bool:
-        """Whether a cached position-valued directive (the index family) sits on a
-        slice: an invalidating write would recompute it with the slice's origin
-        (absolute positions) while a fresh cache on the same slice is relative — an
-        undecided history contract, so such writes are not generated."""
-        from .inventory import position_valued
-        heads = position_valued()
-        return self.offset > 0 and any(
-            re.search(rf'\b{re.escape(h)}\b', n) for n in self.cached for h in heads)
-
     def _invalidate_all(self):
-        # A write drops every carried state: each cached column recomputes over the
-        # rows the frame retains — except a recursion whose history started before them
-        # (a slice past its start), which only its carried state continued: every later
-        # refresh of it raises. A windowed frame replays its declared recursions from
-        # their checkpoints.
-        start = self.visible_start()
-        if self.window is None:
-            self.cached = {n: Entry(e.name, e.directive, e.env, e.start, lost=True)
-                           if e.lost or (e.start < start and _recursive(n))
-                           else Entry(e.name, e.directive, e.env, start)
-                           for n, e in self.cached.items()}
+        # A write leaves every cached column stale; its recompute keeps its history (a
+        # slice keeps the rows before it that the recompute reads).
         self.stale = set(self.cached) if len(self.df) else set()
 
     @precondition(lambda self: len(self.df) > 0)
     @rule(data=st.data())
     def write_computed(self, data):
         """A cell write into a cached float column: it becomes plain data."""
-        if self.stale or not self.cached or self._positions_carried():
+        if self.stale or not self.cached:
             return
         name = data.draw(st.sampled_from(sorted(self.cached)))
         want, error = self.oracle(self.cached[name])
@@ -251,7 +227,7 @@ class PlainMachine(FrameMachine):
     def set_column(self, data, kind):
         """``df[name] = values``: a new plain column, one named like a bare command or
         a canonical directive, or a replacement of an existing column."""
-        if self.stale or self._positions_carried():
+        if self.stale:
             return
         from .inventory import executable_lines
         if kind == 'new':
@@ -306,32 +282,14 @@ class PlainMachine(FrameMachine):
         if self.stale:
             self.attempt(lambda: self.df.iloc[a:], expect_error=ValueError, label='slice while stale')
             return
-        # A column the slice is too short to keep computed stays as the plain data it
-        # holds (fresh here: a slice of a stale frame raises).
-        held = {n: (observe.column_values_series(s), s.dtype)
-                for n, s in ((n, self.df.get_column(n)) for n in self.cached)}
-        start = self.visible_start()
+        # Every cached column continues on the slice (fresh here: a slice of a stale frame
+        # raises).
+        assert contracts.SLICE_CACHED_COLUMNS_CONTINUE
 
         def commit(result):
             self.df = result
             self.offset += a
             self.store.range_kind = False
-            new_len = len(self.df)
-            for name in list(self.cached):
-                kept = contracts.SLICE_CACHED_COLUMNS_CONTINUE and volas.directive_lookback(name) <= new_len
-                if kept and _recursive(name):
-                    # a recursion continues across the slice by its carried states
-                    # (one per recursion in it), and without one (a recursion that
-                    # recomputes, or one not yet past its warm-up) stays plain data:
-                    # the model follows which, the values are checked either way
-                    kept = self.df.is_computed(name)
-                if kept:
-                    continue
-                values, dtype = held[name]
-                del self.cached[name]
-                cells = [None] * start + [None if (isinstance(v, float) and np.isnan(v)) else v
-                                          for v in values.tolist()]
-                self.store.add_column(name, cells, 'bool' if dtype == 'bool' else 'float64')
 
         self.attempt(lambda: self.df.iloc[a:], commit=commit, label=f'iloc[{a}:]')
 
@@ -394,13 +352,9 @@ class PlainMachine(FrameMachine):
                      label='df == snapshot')
 
 
-def _names(text: str) -> set[str]:
-    """The command names a directive mentions (lower-cased, sub-commands dropped)."""
-    return {m.split('.')[0] for m in re.findall(r'[a-z_][a-z_0-9.]*', text.lower())}
-
-
 def _recursive(text: str) -> bool:
     """Whether a directive reads a recursion anywhere in it."""
+    from . import inventory
     return inventory.recursion(text)
 
 

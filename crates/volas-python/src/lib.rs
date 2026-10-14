@@ -11,9 +11,7 @@ use pyo3::create_exception;
 use pyo3::exceptions::{PyKeyError, PyOverflowError, PyTypeError, PyValueError};
 use pyo3::prelude::*;
 
-use volas_core::{
-    datetime, Column, Index, Series, VolasError,
-};
+use volas_core::{datetime, Column, Index, Series, VolasError};
 use volas_directive::parse;
 
 mod format;
@@ -33,9 +31,10 @@ pub(crate) fn pyerr(e: VolasError) -> PyErr {
         VolasError::Key(m) => PyKeyError::new_err(m),
         VolasError::DType(m) => PyTypeError::new_err(m),
         VolasError::Overflow(m) => PyOverflowError::new_err(m),
-        VolasError::Shape(m) | VolasError::Index(m) | VolasError::Value(m) | VolasError::Parse(m) => {
-            PyValueError::new_err(m)
-        }
+        VolasError::Shape(m)
+        | VolasError::Index(m)
+        | VolasError::Value(m)
+        | VolasError::Parse(m) => PyValueError::new_err(m),
     }
 }
 
@@ -91,10 +90,26 @@ fn bound_directive(directive: &volas_core::Directive) -> &volas_directive::Ast {
 }
 
 mod arrow;
-mod dlpack;
-mod scalar;
-mod convert;
 mod coerce;
+mod convert;
+mod dlpack;
+mod dt;
+mod frame;
+mod frame_access;
+mod frame_bounded;
+mod frame_construct;
+mod frame_derive;
+mod frame_index;
+mod frame_io;
+mod frame_reduce;
+mod frame_refresh;
+mod frame_repr;
+mod frame_reshape;
+mod frame_row;
+mod frame_tf;
+mod frame_transform;
+mod frame_window;
+mod scalar;
 mod series;
 mod series_construct;
 mod series_io;
@@ -102,36 +117,23 @@ mod series_ops;
 mod series_reduce;
 mod series_repr;
 mod series_reshape;
-mod series_transform;
-mod dt;
-mod window;
 mod series_support;
-mod frame;
-mod frame_access;
-mod frame_bounded;
-mod frame_row;
-mod frame_construct;
-mod frame_index;
-mod frame_io;
-mod frame_reduce;
-mod frame_refresh;
-mod frame_repr;
-mod frame_reshape;
-mod frame_tf;
-mod frame_transform;
-mod frame_window;
+mod series_transform;
+mod window;
 
-pub(crate) use scalar::*;
-pub(crate) use convert::*;
 pub(crate) use coerce::*;
+pub(crate) use convert::*;
+pub(crate) use frame::*;
+pub(crate) use frame_bounded::{LookbackBound, WindowState};
+pub(crate) use frame_derive::{uncarried_cached, RowSel};
+pub(crate) use frame_index::*;
+pub(crate) use frame_row::*;
+pub(crate) use frame_tf::{TfState, TfWrite};
+pub(crate) use frame_window::{PyEwmFrame, PyExpandingFrame, PyRollingFrame};
+pub(crate) use scalar::*;
 pub(crate) use series::*;
 pub(crate) use series_support::*;
-pub(crate) use frame::*;
-pub(crate) use frame_tf::{TfState, TfWrite};
-pub(crate) use frame_bounded::{LookbackBound, WindowState};
-pub(crate) use frame_row::*;
-pub(crate) use frame_index::*;
-pub(crate) use frame_window::{PyEwmFrame, PyExpandingFrame, PyRollingFrame};
+pub(crate) use volas_directive::Replayer;
 
 /// Parse an optional printf-style `float_format` spec (shared by `to_csv` /
 /// `to_string`), raising a `ValueError` on an unsupported form.
@@ -233,17 +235,26 @@ fn directive_lookback(directive: &str) -> PyResult<usize> {
 /// `'rows'` / `'step'`), `position` (a row-position output) and `bare` (usable as a bare
 /// name). `directive` is one command, written explicitly or bare.
 #[pyfunction]
-fn _directive_facts<'py>(py: Python<'py>, directive: &str) -> PyResult<Bound<'py, pyo3::types::PyDict>> {
+fn _directive_facts<'py>(
+    py: Python<'py>,
+    directive: &str,
+) -> PyResult<Bound<'py, pyo3::types::PyDict>> {
     use volas_directive::spec::{History, Resume};
     use volas_directive::types::Node;
     let node = parse(directive).map_err(directive_err)?;
     let node = match node.node() {
-        Node::Name(name) => std::rc::Rc::new(volas_directive::bind_command(name, None, &[], &[]).map_err(value_err)?),
+        Node::Name(name) => std::rc::Rc::new(
+            volas_directive::bind_command(name, None, &[], &[]).map_err(value_err)?,
+        ),
         _ => node,
     };
     let cmd = match node.node() {
         Node::Command(c) => c,
-        _ => return Err(DirectiveValueError::new_err(format!("'{directive}' is not a command"))),
+        _ => {
+            return Err(DirectiveValueError::new_err(format!(
+                "'{directive}' is not a command"
+            )))
+        }
     };
     let spec = cmd.args.spec();
     let facts = pyo3::types::PyDict::new(py);
@@ -313,7 +324,10 @@ fn volas_rs(m: &Bound<'_, PyModule>) -> PyResult<()> {
             .map(|d| d.name().to_string())
             .collect::<Vec<_>>(),
     )?;
-    m.add("_directive_commands", volas_directive::spec::COMMANDS.to_vec())?;
+    m.add(
+        "_directive_commands",
+        volas_directive::spec::COMMANDS.to_vec(),
+    )?;
     // The commands usable as a bare name (the spec's fact the R17 ambiguity rule reads).
     m.add(
         "_directive_bare_commands",

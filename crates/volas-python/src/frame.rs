@@ -26,6 +26,14 @@ pub(crate) fn reduces(col: &Column) -> bool {
     col.require_numeric().is_ok()
 }
 
+/// The new series of the transformed `cols` of `df` (a [`PyDataFrame::data_view`]): its
+/// names and index, its row 0 at position 0.
+pub(crate) fn cells(df: &DataFrame, cols: Vec<Column>) -> PyResult<PyDataFrame> {
+    DataFrame::new(df.names().to_vec(), cols, Some((**df.index()).clone()))
+        .map(PyDataFrame::plain)
+        .map_err(pyerr)
+}
+
 /// A frame's values as a reader may see them: fresh (no cached directive column waits
 /// for a refresh) and only the visible rows. Only the read gate
 /// ([`PyDataFrame::read`]) makes one, so every helper that takes a `&Fresh` reads
@@ -46,7 +54,7 @@ impl std::ops::Deref for Fresh<'_> {
         if self.start == 0 && self.len == self.frame.height() {
             return self.frame;
         }
-        self.view.get_or_init(|| self.frame.slice(self.start, self.start + self.len))
+        self.view.get_or_init(|| self.frame.view_rows(self.start, self.start + self.len))
     }
 }
 
@@ -63,8 +71,20 @@ impl Fresh<'_> {
         match self.view.into_inner() {
             Some(view) => view,
             None if whole => self.frame.clone(),
-            None => self.frame.slice(self.start, self.start + self.len),
+            None => self.frame.view_rows(self.start, self.start + self.len),
         }
+    }
+
+    /// The physical frame the visible rows are part of (a windowed frame's hidden margin
+    /// included) — for a derivation, which maps the visible rows onto it so the margin
+    /// serves as the lead of its cached columns; never for reading values.
+    pub(crate) fn physical(&self) -> &DataFrame {
+        self.frame
+    }
+
+    /// The visible rows: `(start, len)` in the physical frame.
+    pub(crate) fn range(&self) -> (usize, usize) {
+        (self.start, self.len)
     }
 
     /// Column `j` as stored with the offset of visible row 0 in it: one cell read in
@@ -140,16 +160,23 @@ impl<'a> Meta<'a> {
 ///
 /// Args:
 ///     data (dict[str, Sequence] | DataFrame): a dict of column name -> equal-length
-///         values, or another volas DataFrame to copy (its index and tf-state are
-///         carried — like ``df.copy()``; re-labelled with ``index=`` or re-typed with
-///         ``dtype=``, a tf-aware source gives the tf-aware frame of its new rows, the
-///         last one the forming bar). A pandas DataFrame is not accepted; use
+///         values, or another volas DataFrame to copy (``DataFrame(df)`` is
+///         ``df.copy()``: its cached columns, window and tf-state are carried;
+///         re-labelled with ``index=`` or re-typed with ``dtype=`` it is a new series of
+///         its visible data columns, and a tf-aware source gives the tf-aware frame of
+///         its new rows, the last one the forming bar). A pandas DataFrame is not accepted; use
 ///         ``DataFrame.from_pandas``. Build a DatetimeIndex from a column with ``read_csv`` or
 ///         ``to_datetime`` + ``set_index`` (+ ``tz_localize`` / ``tz_convert``).
 ///     columns (list[str], optional): select and order the columns to keep (like
-///         ``df[[...]]``: a stale cached column is refreshed, a windowed source gives its
-///         visible rows); a name not present raises ``KeyError``. An empty list or a
-///         duplicate name is rejected, and an absent column is never NaN-filled.
+///         ``df[[...]]``: the same rows, a listed cached column as a data column of its
+///         values — refreshed if stale, never continued —, a windowed source gives its
+///         visible rows); a name not present
+///         raises ``KeyError`` (a cached one is found by any spelling). A duplicate name
+///         is rejected, an empty list keeps no column, and an absent column is never
+///         NaN-filled.
+///     index (Sequence, optional): row labels (int64, str or datetime), one per row,
+///         unique as ``set_index`` requires them: a repeated label raises (``NaT`` is no
+///         label).
 ///     time_frame (str | TimeFrame, optional): make this a tf-aware (cumulating) frame at
 ///         this bar interval. The given rows are bars at that frame, each labelled with its
 ///         period start; the last one is the forming bar, so a later ``append`` of a finer
@@ -232,19 +259,6 @@ impl PyDataFrame {
         Meta(self)
     }
 
-    /// The logical view a windowed frame presents — the last `window` rows, as an
-    /// owned sub-frame via `slice` (which carries the directive resume state, SP-9).
-    /// An unbounded frame borrows `inner`. Private: values leave through [`read`].
-    fn logical(&self) -> std::borrow::Cow<'_, DataFrame> {
-        match &self.window {
-            Some(_) => {
-                let (start, len) = self.logical_range();
-                std::borrow::Cow::Owned(self.inner.slice(start, start + len))
-            }
-            None => std::borrow::Cow::Borrowed(&self.inner),
-        }
-    }
-
     /// Present a full-length column as a Series sliced to the logical M view (with
     /// the matching sliced index) — identity (a plain `wrap_series`) when unbounded.
     /// Backs windowed `df[name]` so a column read never exposes the hidden margin.
@@ -270,11 +284,9 @@ impl PyDataFrame {
     pub(crate) fn compare(&self, other: &Bound<'_, PyAny>, op: CmpOp) -> PyResult<PyDataFrame> {
         // Compare the logical M views (zero-cost borrow when unbounded) so the
         // result and the operand both span only the visible window.
-        let view = self.read()?;
-        let df = view.as_ref();
+        let df = &self.data_view()?;
         let cols: Vec<Column> = if let Ok(o) = other.extract::<PyRef<PyDataFrame>>() {
-            let oview = o.read()?;
-            let odf = oview.as_ref();
+            let odf = &o.data_view()?;
             if df.names() != odf.names() {
                 return Err(PyValueError::new_err(
                     "cannot compare DataFrames with different columns",
@@ -295,43 +307,33 @@ impl PyDataFrame {
                 .map(|c| c.compare(&cmp_scalar_col(other, c.dtype(), c.len())?, op).map_err(pyerr))
                 .collect::<PyResult<_>>()?
         };
-        self.with_columns(cols)
+        cells(df, cols)
     }
 
-    /// Rebuild a plain frame from `cols`, reusing this frame's names and index (the
-    /// columns must be height-aligned). Backs `compare` / `fillna` / `mask_na`.
-    pub(crate) fn with_columns(&self, cols: Vec<Column>) -> PyResult<PyDataFrame> {
-        // Build over the logical M view's names + index (a zero-cost borrow when
-        // unbounded). Callers pass logical-length columns (iterating `logical()`),
-        // so a windowed frame's hidden margin never reaches a derived frame.
-        let view = self.logical();
-        let df = view.as_ref();
-        DataFrame::new(df.names().to_vec(), cols, Some((**df.index()).clone()))
-            .map(|d| PyDataFrame::plain(d.with_origin(df.origin())))
-            .map_err(pyerr)
-    }
-
-    /// Column-wise transform chokepoint: map every column of the logical M view
-    /// through `op` and rebuild over that view's index. The single windowed-safe
-    /// path behind `ffill`/`bfill`/`isna`/`round`/`clip`/… — one logical slice,
-    /// margin never leaks.
-    pub(crate) fn map_columns(&self, op: impl Fn(&Column) -> PyResult<Column>) -> PyResult<PyDataFrame> {
+    /// The cells every value transform reads (`compare`, `fillna`, `where` / `mask`, the
+    /// column-wise transforms): every column of the visible rows as data — a cached
+    /// directive column's values as plain data, never continued (R40), as a projection
+    /// gives them. Read through the gate; the hidden margin of a windowed frame never
+    /// reaches it.
+    pub(crate) fn data_view(&self) -> PyResult<DataFrame> {
         let view = self.read()?;
-        let df = view.as_ref();
+        view.select(view.names()).map_err(pyerr)
+    }
+
+    /// Column-wise transform chokepoint: map every data column of the visible rows
+    /// ([`data_view`](Self::data_view)) through `op` — a new series. Behind
+    /// `ffill`/`bfill`/`isna`/`round`/`clip`/….
+    pub(crate) fn map_columns(&self, op: impl Fn(&Column) -> PyResult<Column>) -> PyResult<PyDataFrame> {
+        let df = &self.data_view()?;
         let cols = df.columns().iter().map(&op).collect::<PyResult<Vec<_>>>()?;
-        DataFrame::new(df.names().to_vec(), cols, Some((**df.index()).clone()))
-            .map(|d| PyDataFrame::plain(d.with_origin(df.origin())))
-            .map_err(pyerr)
+        cells(df, cols)
     }
 
     /// Apply a Series transform to every column -> a new frame (pandas column-wise
     /// `df.cumsum()` etc.). Each column's own dtype rule applies; a column the op
     /// rejects (e.g. a string column under a numeric transform) propagates its error.
     pub(crate) fn map_cols(&self, op: impl Fn(&PySeries) -> PyResult<PySeries>) -> PyResult<PyDataFrame> {
-        // Windowed: derive from the logical M view (zero-cost borrow when unbounded),
-        // so the hidden margin never leaks into a column-wise transform.
-        let view = self.read()?;
-        let df = view.as_ref();
+        let df = &self.data_view()?;
         let idx = df.index();
         let cols = df
             .names()
@@ -344,9 +346,7 @@ impl PyDataFrame {
                 Ok(op(&s)?.inner.data)
             })
             .collect::<PyResult<Vec<_>>>()?;
-        DataFrame::new(df.names().to_vec(), cols, Some((**idx).clone()))
-            .map(|d| PyDataFrame::plain(d.with_origin(df.origin())))
-            .map_err(pyerr)
+        cells(df, cols)
     }
 
     /// Reduce each reducible column ([`reduces`]) to a float64 statistic -> a Series
@@ -412,10 +412,8 @@ impl PyDataFrame {
         // Operate on the logical M view (zero-cost borrow when unbounded) so a
         // windowed frame's `cond` is matched against — and the result built from —
         // the visible rows, never the hidden margin.
-        let view = self.read()?;
-        let base = view.as_ref();
-        let cview = cond.read()?;
-        let cond_df = cview.as_ref();
+        let base = &self.data_view()?;
+        let cond_df = &cond.data_view()?;
         if cond_df.width() != base.width() || cond_df.height() != base.height() {
             return Err(PyValueError::new_err(
                 "where/mask: `cond` must have the same shape as the frame",
@@ -491,7 +489,7 @@ impl PyDataFrame {
                 keep_col.select(&c, &other_col, target).map_err(pyerr)
             })
             .collect::<PyResult<Vec<_>>>()?;
-        self.with_columns(cols)
+        cells(base, cols)
     }
 
     /// THE cell write path — every positional, label and mask write (`iloc` / `loc` /

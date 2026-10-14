@@ -209,7 +209,7 @@ pub fn mama_pass(price: &[f64], fast_limit: f64, slow_limit: f64, want_fama: boo
             &mut fama,
             &mut prev_phase,
         );
-        states.record(i, n, || { let mut v = core.serialize(); v.extend([mama, fama, prev_phase]); v });
+        states.record(i, n, |out| { out.extend(core.serialize()); out.extend([mama, fama, prev_phase]); });
         if i >= LB_PERIOD {
             out[i] = if want_fama { fama } else { mama };
         }

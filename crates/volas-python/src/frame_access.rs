@@ -1,14 +1,11 @@
 //! `DataFrame` element access and the live-stream lifecycle
 //! (`__getitem__`/`__setitem__`, `append`, `fulfill`).
 
-
 use numpy::PyReadonlyArray1;
 use pyo3::exceptions::{PyIndexError, PyKeyError, PyTypeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::PySlice;
-use volas_core::{
-    Column, DataFrame,
-};
+use volas_core::{Column, DataFrame};
 use volas_directive::{execute, parse};
 
 #[allow(unused_imports)]
@@ -31,6 +28,8 @@ struct Computed {
     col: Column,
     state: Option<Vec<f64>>,
     before: Option<Vec<f64>>,
+    /// The checkpoints of its history at the anchor rows it passed.
+    anchors: Vec<volas_core::Checkpoint>,
 }
 
 /// A value assigned to a whole column as the one cell it names, when it is a scalar —
@@ -55,8 +54,11 @@ fn scalar_cell(value: &Bound<'_, PyAny>) -> PyResult<Option<Column>> {
     }
     if value.is_instance(&np.getattr("ndarray")?)? || value.is_instance(&np.getattr("generic")?)? {
         // one element of the value's own dtype
-        return pyany_to_column(&np.call_method1("asarray", (value,))?.call_method1("reshape", (1,))?)
-            .map(Some);
+        return pyany_to_column(
+            &np.call_method1("asarray", (value,))?
+                .call_method1("reshape", (1,))?,
+        )
+        .map(Some);
     }
     Ok(None)
 }
@@ -71,7 +73,11 @@ impl PyDataFrame {
     /// (`df[df['a'] > 0] = 0`), a boolean frame sets cells (`df[df.isna()] = 0`).
     /// On a bounded (`window=`) frame a column assignment writes the visible rows only:
     /// the hidden margin keeps its history. Copy-on-write: a prior `copy()` is unaffected.
-    pub(crate) fn __setitem__(&mut self, key: &Bound<'_, PyAny>, value: &Bound<'_, PyAny>) -> PyResult<()> {
+    pub(crate) fn __setitem__(
+        &mut self,
+        key: &Bound<'_, PyAny>,
+        value: &Bound<'_, PyAny>,
+    ) -> PyResult<()> {
         // Boolean-mask assignment with a scalar fill: df[mask] = v
         if let Some(mask) = bool_mask_key(key)? {
             return self.assign_row_mask(&mask, value);
@@ -89,7 +95,12 @@ impl PyDataFrame {
         let values = if let Ok(s) = value.extract::<PyRef<PySeries>>() {
             match &self.window {
                 None => require_aligned(self.inner.index(), &s.inner.index)?,
-                Some(_) => self.meta().labels().index().require_aligned(&s.inner.index).map_err(pyerr)?,
+                Some(_) => self
+                    .meta()
+                    .labels()
+                    .index()
+                    .require_aligned(&s.inner.index)
+                    .map_err(pyerr)?,
             }
             s.inner.data.clone()
         } else if let Some(one) = scalar_cell(value)? {
@@ -109,7 +120,10 @@ impl PyDataFrame {
             Some(tfs) => {
                 let mut next = self.inner.clone(); // shares every buffer the write keeps
                 next.set_column(&name, col).map_err(pyerr)?;
-                tfs.write(TfWrite::Frame { inner: &mut self.inner, next })?
+                tfs.write(TfWrite::Frame {
+                    inner: &mut self.inner,
+                    next,
+                })?
             }
             None => self.inner.set_column(&name, col).map_err(pyerr)?,
         }
@@ -119,7 +133,11 @@ impl PyDataFrame {
     // `df[key]` — column name / indicator directive / list / boolean mask /
     // slice. The user-facing usage lives in the class docstring (pyo3 implements
     // `__getitem__` as a type slot and does not surface its doc comment).
-    pub(crate) fn __getitem__(&mut self, py: Python<'_>, key: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
+    pub(crate) fn __getitem__(
+        &mut self,
+        py: Python<'_>,
+        key: &Bound<'_, PyAny>,
+    ) -> PyResult<Py<PyAny>> {
         // Row-selecting reads (mask / slice) operate on the logical M view, so a
         // windowed frame's hidden margin is never selectable (a zero-cost borrow
         // when unbounded).
@@ -128,13 +146,11 @@ impl PyDataFrame {
             if let Column::Bool(..) = &s.inner.data {
                 // O5: reject an NA-carrying mask (an unknown signal is not False).
                 let mask = bool_mask_vec(&s.inner.data)?;
-                let sub = self.read()?.filter_mask(&mask).map_err(pyerr)?;
-                return Ok(Py::new(py, PyDataFrame::plain(sub))?.into_any());
+                return Ok(Py::new(py, self.masked(&mask)?)?.into_any());
             }
         }
         if let Ok(arr) = key.extract::<PyReadonlyArray1<bool>>() {
-            let sub = self.read()?.filter_mask(&crate::coerce::numpy_values(&arr)).map_err(pyerr)?;
-            return Ok(Py::new(py, PyDataFrame::plain(sub))?.into_any());
+            return Ok(Py::new(py, self.masked(&crate::coerce::numpy_values(&arr))?)?.into_any());
         }
         // boolean mask as a plain Python list (df[[True, False, ...]]). An empty
         // list is an empty column projection, not a mask, so it falls through.
@@ -148,14 +164,14 @@ impl PyDataFrame {
                         height
                     )));
                 }
-                let sub = self.read()?.filter_mask(&mask).map_err(pyerr)?;
-                return Ok(Py::new(py, PyDataFrame::plain(sub))?.into_any());
+                return Ok(Py::new(py, self.masked(&mask)?)?.into_any());
             }
         }
         // label / positional slice: df[:'date'], df[1:5]
         if let Ok(slice) = key.downcast::<PySlice>() {
-            let sub = slice_frame(self.read()?.as_ref(), slice)?;
-            return Ok(Py::new(py, PyDataFrame::plain(sub))?.into_any());
+            let view = self.read()?;
+            let sel = slice_rows(&view, slice)?;
+            return Ok(Py::new(py, self.derive_rows(&view, &sel)?)?.into_any());
         }
         // column name or directive — materialize + auto-refresh a stale cached
         // directive (O(lookback), not O(n)) on the physical frame, then present the
@@ -168,7 +184,7 @@ impl PyDataFrame {
         // single-name form, so `df[['ma:3']]` and `df['ma:3']` stay consistent.
         if let Ok(list) = key.extract::<Vec<String>>() {
             let df = self.project(&list)?;
-            return Ok(Py::new(py, PyDataFrame::plain(df))?.into_any());
+            return Ok(Py::new(py, self.derive_projection(df)?)?.into_any());
         }
         Err(PyKeyError::new_err(
             "key must be a column name, directive, list, boolean mask, or slice",
@@ -220,7 +236,10 @@ impl PyDataFrame {
     ///
     /// Returns:
     ///     DataFrame: ``self`` (enabling chaining).
-    pub(crate) fn append<'py>(slf: Bound<'py, Self>, other: &Bound<'py, PyAny>) -> PyResult<Bound<'py, Self>> {
+    pub(crate) fn append<'py>(
+        slf: Bound<'py, Self>,
+        other: &Bound<'py, PyAny>,
+    ) -> PyResult<Bound<'py, Self>> {
         if let Ok(df) = other.extract::<PyRef<PyDataFrame>>() {
             // A source frame is read like any bulk read: its visible rows only, and never
             // while a cached column of it is stale (its placeholders are not data).
@@ -248,7 +267,9 @@ impl PyDataFrame {
             me.append_rows(&bar)?;
             return Ok(slf);
         }
-        Err(PyTypeError::new_err("append expects a DataFrame, a Row, or a bar dict"))
+        Err(PyTypeError::new_err(
+            "append expects a DataFrame, a Row, or a bar dict",
+        ))
     }
 
     /// Whether the column ``name`` is a cached **directive (computed)** column —
@@ -279,14 +300,41 @@ impl PyDataFrame {
 }
 
 impl PyDataFrame {
-    /// The column `name` names: a column of that exact name, or the cached directive a
-    /// directive spelled `name` is cached under (`'close * change'` names the column
-    /// `close*change`). Never computes; `None` when there is none.
+    /// An equivalent canonical spelling among the frame's data columns.
+    /// The stored label remains exact so bound data operands keep their owner.
+    fn canonical_column_name(frame: &DataFrame, canonical: &str) -> Option<String> {
+        frame.names().iter().find(|actual| {
+            !frame.is_computed(actual)
+                && volas_directive::canonical_data_name(actual).ok().as_deref() == Some(canonical)
+        }).cloned()
+    }
+
+    /// Resolve a data spelling to the physical label, including directive aliases.
+    /// Matching stays at bind/read time; cached trees keep the resulting exact label.
+    fn data_column_name(frame: &DataFrame, name: &str) -> Option<String> {
+        if frame.has_column(name) && !frame.is_computed(name) {
+            return Some(name.to_string());
+        }
+        let canonical = volas_directive::canonical_data_name(name).ok()?;
+        Self::canonical_column_name(frame, &canonical)
+    }
+
+    /// An existing physical column named by exact label or an equivalent directive.
+    /// Never computes; data columns take precedence over cached directives.
     pub(crate) fn column_name(&self, name: &str) -> Option<String> {
         if self.inner.has_column(name) {
             return Some(name.to_string());
         }
-        let canonical = volas_directive::stringify(&*parse(name).ok()?);
+        let canonical = volas_directive::canonical_data_name(name).ok()?;
+        if let Some(actual) = Self::canonical_column_name(&self.inner, &canonical) {
+            return Some(actual);
+        }
+        // A cached expression is named by its bound tree, whose data nodes carry
+        // physical labels. Resolve those through the same binder as computation;
+        // normalizing the requested text alone cannot find such a cache.
+        let node = parse(name).ok()?;
+        let bound = Self::bind(&self.inner, &node, name).ok()?;
+        let canonical = volas_directive::stringify(&bound);
         self.inner.is_computed(&canonical).then_some(canonical)
     }
 
@@ -320,7 +368,11 @@ impl PyDataFrame {
                 // a float narrowing rounds by design: every hidden value must survive it
                 if dtype.is_float() && hidden.require_numeric().is_ok() {
                     let (was, now) = (hidden.to_f64_vec(), kept.to_f64_vec());
-                    if was.iter().zip(&now).any(|(a, b)| a.to_bits() != b.to_bits() && !(a.is_nan() && b.is_nan())) {
+                    if was
+                        .iter()
+                        .zip(&now)
+                        .any(|(a, b)| a.to_bits() != b.to_bits() && !(a.is_nan() && b.is_nan()))
+                    {
                         return Err(inexact());
                     }
                 }
@@ -376,7 +428,11 @@ impl PyDataFrame {
 
     /// Compute the new directive `node` (spelled `text`) over the binding frame and cache
     /// it: its canonical name and values.
-    pub(crate) fn cache_new(&mut self, text: &str, node: &volas_directive::Ast) -> PyResult<(String, Column)> {
+    pub(crate) fn cache_new(
+        &mut self,
+        text: &str,
+        node: &volas_directive::Ast,
+    ) -> PyResult<(String, Column)> {
         let new = self.compute_new(&*self.binding_frame()?, node, text)?;
         let canonical = new.canonical.clone();
         Ok((canonical, self.cache(new)?))
@@ -385,28 +441,28 @@ impl PyDataFrame {
     /// What a requested name reads: an existing column (data, or a cached directive under
     /// its canonical name), or a new directive to compute. Writes nothing.
     fn resolve(&self, name: &str) -> PyResult<Resolved> {
-        if self.inner.has_column(name) {
-            return Ok(Resolved::Column(name.to_string()));
+        if let Some(actual) = self.column_name(name) {
+            return Ok(Resolved::Column(actual));
         }
-        let node = parse(name).map_err(directive_err)?;
-        let canonical = volas_directive::stringify(&*node);
-        if self.inner.is_computed(&canonical) {
-            // the directive as written is bound against this frame like any new one: a
-            // bare name that is both a data column and a command is ambiguous, whatever
-            // column it would name (R17)
-            let is_data = |n: &str| self.inner.has_column(n) && !self.inner.is_computed(n);
-            volas_directive::bind_frame(&node, &is_data, name).map_err(value_err)?;
-            return Ok(Resolved::Column(canonical));
-        }
-        Ok(Resolved::New(name.to_string(), node))
+        Ok(Resolved::New(
+            name.to_string(),
+            parse(name).map_err(directive_err)?,
+        ))
     }
 
     /// Compute a new directive over `frame` (the binding frame) — writing nothing — with
     /// the resume states as of its last row and the row before, so a later append
     /// continues in O(new rows) and a replaced last row recomputes in one step.
-    fn compute_new(&self, frame: &DataFrame, node: &volas_directive::Ast, text: &str) -> PyResult<Computed> {
+    fn compute_new(
+        &self,
+        frame: &DataFrame,
+        node: &volas_directive::Ast,
+        text: &str,
+    ) -> PyResult<Computed> {
         let bound = Self::bind(frame, node, text)?;
-        let (col, state, before) = volas_directive::exec::execute_with_states(frame, &bound).map_err(value_err)?;
+        let (col, state, before, anchors) =
+            volas_directive::exec::execute_for_cache(frame, &bound)
+                .map_err(value_err)?;
         Ok(Computed {
             canonical: volas_directive::stringify(&bound),
             reach: volas_directive::lookback::reach(&bound),
@@ -414,6 +470,7 @@ impl PyDataFrame {
             col,
             state,
             before,
+            anchors,
         })
     }
 
@@ -424,10 +481,20 @@ impl PyDataFrame {
         if self.inner.has_column(&new.canonical) {
             return Ok(new.col);
         }
-        let Computed { canonical, directive, reach, col, state, before } = new;
+        let Computed {
+            canonical,
+            directive,
+            reach,
+            col,
+            state,
+            before,
+            anchors,
+        } = new;
         self.inner.set_column(&canonical, col).map_err(pyerr)?;
         self.inner.set_computed(&canonical, directive, reach);
         self.inner.set_computed_states(&canonical, state, before);
+        // computed over the binding frame from its row 0: the anchors its history passed
+        self.inner.keep_computed_anchors(&canonical, anchors);
         Ok(self.inner.column(&canonical).map_err(pyerr)?.clone())
     }
 
@@ -436,7 +503,10 @@ impl PyDataFrame {
     /// directive computed before any is cached, so a bad entry caches nothing; cached
     /// entries are refreshed like single-column reads.
     pub(crate) fn project(&mut self, list: &[String]) -> PyResult<DataFrame> {
-        let resolved = list.iter().map(|n| self.resolve(n)).collect::<PyResult<Vec<_>>>()?;
+        let resolved = list
+            .iter()
+            .map(|n| self.resolve(n))
+            .collect::<PyResult<Vec<_>>>()?;
         for r in &resolved {
             if let Resolved::New(text, node) = r {
                 self.admit_new(node, text)?;
@@ -454,28 +524,38 @@ impl PyDataFrame {
                 }
             }
         }
-        let mut new_cols: Vec<(String, Column)> = Vec::with_capacity(computed.len());
         for c in computed {
-            let canonical = c.canonical.clone();
-            new_cols.push((canonical, self.cache(c)?));
+            self.cache(c)?;
         }
-        let mut cols = Vec::with_capacity(list.len());
+        let mut names = Vec::with_capacity(list.len());
         for r in &resolved {
-            cols.push(match r {
+            names.push(match r {
                 Resolved::Column(name) => {
                     self.refresh_computed(Some(name))?;
-                    self.inner.column(name).map_err(pyerr)?.clone()
+                    name.clone()
                 }
-                Resolved::New(_, node) => {
+                Resolved::New(text, node) => {
                     let canonical = volas_directive::stringify(node.as_ref());
-                    new_cols.iter().find(|(n, _)| *n == canonical).expect("computed above").1.clone()
+                    if !self.inner.is_computed(&canonical) {
+                        // not cached: a data column holds its name (see `cache`)
+                        return Err(PyValueError::new_err(format!(
+                            "cannot select '{text}' into a frame: it is named '{canonical}' like a \
+                             data column of this DataFrame, so it is not cached under that name. \
+                             Read it with df.exec('{text}'), or rename the data column."
+                        )));
+                    }
+                    canonical
                 }
             });
         }
-        let idx = (*self.inner.index().as_ref()).clone();
-        let df = DataFrame::new(list.to_vec(), cols, Some(idx)).map_err(pyerr)?.with_origin(self.inner.origin());
+        // the listed columns over the same rows, each as data (R40), its visible rows
+        let df = self.inner.select(&names).map_err(pyerr)?;
         let (start, len) = self.logical_range();
-        Ok(if self.window.is_some() { df.slice(start, start + len) } else { df })
+        Ok(if self.window.is_some() {
+            df.rows(start, start + len, &Replayer)
+        } else {
+            df
+        })
     }
 
     /// Bind a new directive (`directive` as written, parsed to `node`) against `frame` —
@@ -490,20 +570,26 @@ impl PyDataFrame {
     }
 
     /// Bind a new directive (`directive` as written, parsed to `node`) against `frame`:
-    /// each bare name reads the data column or the built-in command it names, and one
-    /// that is both is rejected.
-    fn bind(frame: &DataFrame, node: &volas_directive::Ast, directive: &str) -> PyResult<volas_directive::Ast> {
-        volas_directive::bind_frame(node, &|n| frame.has_column(n), directive).map_err(value_err)
+    /// a physical data column owns every equivalent directive spelling; otherwise
+    /// the name binds to its built-in command.
+    pub(crate) fn bind(
+        frame: &DataFrame,
+        node: &volas_directive::Ast,
+        directive: &str,
+    ) -> PyResult<volas_directive::Ast> {
+        volas_directive::bind_frame_resolved(node, &|n| Self::data_column_name(frame, n), directive)
+            .map_err(value_err)
     }
 
-    /// Refuse a data column `name` that a cached directive reads as the built-in
-    /// command of that name (a bare name in it): the column would change what the cached
-    /// directive refreshes. Off the hot path (a column add / overwrite).
+    /// Refuse data whose equivalent directive spelling shadows a computation within a
+    /// cached bound tree. Checking happens on schema changes, outside the refresh path.
     fn check_new_data_column(&self, name: &str) -> PyResult<()> {
+        let canonical =
+            volas_directive::canonical_data_name(name).unwrap_or_else(|_| name.to_string());
         let mut users = Vec::new();
         for cached in self.inner.names().iter().filter(|n| n.as_str() != name) {
             let reads = self.inner.computed_directive(cached).map(bound_directive);
-            if reads.is_some_and(|node| volas_directive::uses_bare_command(node, name)) {
+            if reads.is_some_and(|node| volas_directive::uses_command_shadow(node, &canonical)) {
                 users.push(format!("'{cached}'"));
             }
         }
@@ -511,15 +597,23 @@ impl PyDataFrame {
             return Ok(());
         }
         let (which, verb, them) = if users.len() == 1 {
-            (format!("the cached directive {}", users[0]), "uses", "the cached directive")
+            (
+                format!("the cached directive {}", users[0]),
+                "uses",
+                "the cached directive",
+            )
         } else {
-            (format!("the cached directives {}", users.join(", ")), "use", "the cached directives")
+            (
+                format!("the cached directives {}", users.join(", ")),
+                "use",
+                "the cached directives",
+            )
         };
         Err(PyValueError::new_err(format!(
             "cannot add column '{name}': {which} {verb} the built-in command '{command}' under \
              that name. Rename the new column, or drop {them} first — \
              df.drop([{list}], axis=1).",
-            command = volas_directive::spec::normalize(name),
+            command = canonical,
             list = users.join(", ")
         )))
     }

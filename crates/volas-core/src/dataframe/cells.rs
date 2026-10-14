@@ -127,6 +127,7 @@ impl DataFrame {
                 )));
             }
             let values = column.assignable(&values)?;
+            self.check_lead_values(&self.names[col], &values, 0, values.len())?;
             checked.push(CellWrite { col, rows, values });
         }
         Ok(CellWrites { frame: self, writes: checked })

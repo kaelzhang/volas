@@ -62,15 +62,15 @@ def test_slice_carries_correct_body_values():
     np.testing.assert_allclose(sl['kdj.j'].to_numpy(), full_j[40:], rtol=1e-12)
 
 
-def test_short_slice_drops_continuation_not_silently_wrong():
+def test_a_slice_shorter_than_the_lookback_continues_exactly():
     data = _ohlc(80, seed=3)
     df = DataFrame({k: v.copy() for k, v in data.items()})
     _ = df['kdj.j']                       # lookback 27
-    short = df.iloc[60:]                   # 20 rows < 27 -> not continuable
+    short = df.iloc[60:]                   # 20 rows < 27: the rows before are its lead
     body = short['kdj.j'].to_numpy().copy()
-    short.append(DataFrame({'high': [1.0], 'low': [1.0], 'close': [1.0]}))
+    bar = {'high': [1.0], 'low': [1.0], 'close': [1.0]}
+    short.append(DataFrame(bar))
     short.fulfill()
-    # the carried body values are unchanged (we did not corrupt them with a
-    # wrong-seed re-warmup); the new row is honest (NaN), not silent garbage.
-    np.testing.assert_allclose(short['kdj.j'].to_numpy()[:20], body, rtol=1e-12)
-    assert np.isnan(short['kdj.j'].to_numpy()[-1])
+    full = DataFrame({k: np.append(v, bar[k]) for k, v in data.items()})
+    np.testing.assert_array_equal(short['kdj.j'].to_numpy()[:20], body)
+    np.testing.assert_array_equal(short['kdj.j'].to_numpy(), full['kdj.j'].to_numpy()[60:])

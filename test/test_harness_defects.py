@@ -1,9 +1,8 @@
-"""Minimal reproductions of the open defects the differential harness steps around.
+"""Minimal regressions for defects discovered by the differential harness.
 
-Each test asserts the contract (see ``harness/contracts.py``) and is a strict xfail
-naming its defect: when a fix lands the test XPASSes, which fails the suite until the
-xfail and the matching ``OPEN_DEFECTS`` / ``DIVERGENT_FAMILIES`` entry are removed —
-so the machines start hunting that defect class again.
+Each test asserts the contract (see ``harness/contracts.py``). Resolved defects are
+ordinary passing tests, and the property machines exercise their operation classes
+again once the matching ``OPEN_DEFECTS`` entry is removed.
 """
 
 import numpy as np
@@ -17,10 +16,6 @@ from .harness.ledger import Ledger
 from .harness.schedules import OHLCV
 
 from test.exact import same_exact
-
-
-def _xfail(defect, why):
-    return pytest.mark.xfail(strict=True, reason=f'{defect}: {why}')
 
 
 def _walk(n, seed=1):
@@ -305,7 +300,7 @@ def test_trix_resume_matches_on_zero_prices():
 
 
 def test_a_recursive_composite_continues_across_a_slice():
-    # H19: each recursion in it carries its own state, so the slice keeps the column
+    # Each recursion carries its state and the slice continues the same history.
     cols = _walk(40, 3)
     df = _frame(cols, 0, 30)
     df['(close)+(kama:3@open)']
@@ -335,11 +330,7 @@ def test_ultosc_with_unordered_periods_refreshes_like_the_full_compute(directive
     assert _same(df[directive], _frame(cols, 0, 80)[directive])
 
 
-@pytest.mark.parametrize('directive', [
-    'roc:3',
-    *[pytest.param(d, marks=_xfail('slice-resend-short', 'the slice lacks the rows a resend reads'))
-      for d in ['ma:5', 'pivot_points.r1', 'llv:4']],
-])
+@pytest.mark.parametrize('directive', ['ma:5', 'roc:3', 'pivot_points.r1', 'llv:4'])
 def test_a_re_sent_last_row_of_a_lookback_long_slice_is_exact(directive):
     cols = _walk(40)
     keep = volas.directive_lookback(directive)

@@ -53,7 +53,7 @@ fn check(df: &DataFrame, node: &Ast, operands: usize) -> Vec<String> {
         // the same history kept from a carried state by a frame holding its last rows only
         if let Some(state) = cp.state.clone() {
             let part = df.slice_data(cut / 2, n);
-            if let Some(kept) = checkpoint(&part, node, Some(state), cut - cut / 2, false) {
+            if let Some(kept) = checkpoint(&part, node, Some(state.to_vec()), cut - cut / 2, false) {
                 FROM_STATE.with(|c| c.set(c.get() + 1));
                 match replay(&part, node, &kept, part.height()) {
                     Some((got, _)) => {
@@ -284,12 +284,14 @@ fn a_replay_that_cannot_run_declines() {
     let atr = parse("atr:5").unwrap();
     assert!(replay(&df, &atr, &cp, 40).is_none()); // reads high / low: no column
     let mut other = cp.clone();
-    other.state.as_mut().unwrap().push(0.0);
+    let mut malformed = other.state.take().unwrap().to_vec();
+    malformed.push(0.0);
+    other.state = Some(malformed.into());
     assert!(replay(&df, &ema, &other, 40).is_none()); // malformed serialized state
     assert!(capture(&df, &atr, 10).is_none());
     // A carried state includes its input tail; without a state, only whole history
     // can supply a warm-up checkpoint's raw rows.
-    let state = cp.state.clone();
+    let state = cp.state.as_ref().map(|state| state.to_vec());
     assert!(checkpoint(&df.slice_data(9, 40), &ema, state.clone(), 1, false).is_some());
     assert!(checkpoint(&df.slice_data(0, 40), &ema, None, 1, false).is_none());
     assert_eq!(checkpoint(&df, &ema, None, 1, true).unwrap().state, None);

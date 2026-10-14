@@ -8,7 +8,7 @@ use pyo3::exceptions::{PyKeyError, PyTypeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
 use volas_core::{
-    Column, DataFrame, Index, Label, Series,
+    Column, DataFrame, Label, Series,
 };
 use volas_time::Cumulator;
 
@@ -25,7 +25,7 @@ impl PyDataFrame {
     pub(crate) fn head(&self, n: isize) -> PyResult<PyDataFrame> {
         let view = self.read()?;
         let (a, b) = head_tail_window(n, view.height(), true);
-        Ok(PyDataFrame::plain(view.slice(a, b)))
+        self.derive_rows(&view, &RowSel::Range(a, b))
     }
 
     /// Last `n` rows (pandas `tail` = `iloc[-n:]`, so a negative `n` drops the
@@ -34,7 +34,7 @@ impl PyDataFrame {
     pub(crate) fn tail(&self, n: isize) -> PyResult<PyDataFrame> {
         let view = self.read()?;
         let (a, b) = head_tail_window(n, view.height(), false);
-        Ok(PyDataFrame::plain(view.slice(a, b)))
+        self.derive_rows(&view, &RowSel::Range(a, b))
     }
     /// The `n` rows with the largest values in `column` (pandas `nlargest`).
     pub(crate) fn nlargest(&self, n: i64, column: &str) -> PyResult<PyDataFrame> {
@@ -42,7 +42,7 @@ impl PyDataFrame {
         if n < 0 {
             return Err(PyValueError::new_err("n must be >= 0"));
         }
-        Self::extreme_rows(&view, n as usize, column, false)
+        self.extreme_rows(&view, n as usize, column, false)
     }
     /// The `n` rows with the smallest values in `column` (pandas `nsmallest`).
     pub(crate) fn nsmallest(&self, n: i64, column: &str) -> PyResult<PyDataFrame> {
@@ -50,7 +50,7 @@ impl PyDataFrame {
         if n < 0 {
             return Err(PyValueError::new_err("n must be >= 0"));
         }
-        Self::extreme_rows(&view, n as usize, column, true)
+        self.extreme_rows(&view, n as usize, column, true)
     }
     /// Drop later duplicate ROWS, keeping the first (pandas
     /// `drop_duplicates(keep='first')`, over all columns).
@@ -59,7 +59,7 @@ impl PyDataFrame {
         let df = self.read()?;
         let dup = Self::row_duplicated(&df, keep)?;
         let positions: Vec<usize> = (0..df.height()).filter(|&i| !dup[i]).collect();
-        Ok(PyDataFrame::plain(take_frame(&df, &positions)))
+        self.derive_rows(&df, &RowSel::Positions(positions))
     }
     /// True per row for a later duplicate of an earlier row (pandas `duplicated`).
     #[pyo3(signature = (keep = "first"))]
@@ -123,7 +123,7 @@ impl PyDataFrame {
         let view = self.read()?;
         let df = view.as_ref();
         let perm = df.index().argsort(ascending);
-        Ok(PyDataFrame::plain(take_frame(df, &perm)))
+        self.derive_rows(&view, &RowSel::Positions(perm))
     }
 
     /// Move the row index into an `'index'` column and restore a RangeIndex
@@ -131,30 +131,11 @@ impl PyDataFrame {
     #[pyo3(signature = (drop = false))]
     pub(crate) fn reset_index(&self, drop: bool) -> PyResult<PyDataFrame> {
         let view = self.read()?;
-        let df = view.as_ref();
-        let h = df.height();
-        let (names, columns): (Vec<String>, Vec<Column>) = if drop {
-            (df.names().to_vec(), df.columns().to_vec())
-        } else {
-            // Restore the index's name as the new column label (pandas parity);
-            // an unnamed index falls back to "index".
-            let label = df.index().name().unwrap_or("index").to_string();
-            // F39: the restored index label must not collide with an existing
-            // column — a duplicate column name violates the unique-name contract.
-            if df.names().iter().any(|n| n == &label) {
-                return Err(pyo3::exceptions::PyValueError::new_err(format!(
-                    "reset_index: column name {label:?} already exists (would duplicate)"
-                )));
-            }
-            let mut names = vec![label];
-            names.extend(df.names().iter().cloned());
-            let mut cols = vec![df.index().to_column()];
-            cols.extend(df.columns().iter().cloned());
-            (names, cols)
-        };
-        Ok(PyDataFrame::plain(
-            DataFrame::new(names, columns, Some(Index::range(h))).map_err(pyerr)?.with_origin(df.origin()),
-        ))
+        // Restore the index's name as the new column label (pandas parity); an unnamed
+        // index falls back to "index". A new series of the data columns.
+        let label = (!drop).then(|| view.index().name().unwrap_or("index").to_string());
+        let inner = view.reset_index(label.as_deref()).map_err(pyerr)?;
+        self.derive_relabelled(inner)
     }
 
     /// Drop rows by index label (`axis=0`) or columns by name (`axis=1`) —
@@ -191,12 +172,8 @@ impl PyDataFrame {
                     }
                 }
             }
-            let keep: Vec<String> = names
-                .iter()
-                .filter(|n| !drop_names.contains(n))
-                .cloned()
-                .collect();
-            return Ok(PyDataFrame::plain(df.select(&keep).map_err(pyerr)?));
+            // a column removal: every other column as it is, cached ones continuing
+            return self.derive_projection(df.drop_columns(&drop_names).map_err(pyerr)?);
         }
         let index = df.index();
         let targets: Vec<Label> = labels
@@ -216,7 +193,7 @@ impl PyDataFrame {
         let positions: Vec<usize> = (0..df.height())
             .filter(|&i| !targets.contains(&index.label_at(i)))
             .collect();
-        Ok(PyDataFrame::plain(take_frame(df, &positions)))
+        self.derive_rows(&view, &RowSel::Positions(positions))
     }
 
     /// Resample to a coarser timeframe (OHLCV cumulation / down-sampling),
@@ -284,16 +261,19 @@ impl PyDataFrame {
     pub(crate) fn rename(&self, columns: &Bound<'_, PyDict>) -> PyResult<PyDataFrame> {
         let view = self.read()?;
         let df = view.as_ref();
-        let mut mapping = HashMap::new();
+        let mut requested = HashMap::new();
         for (k, v) in columns.iter() {
-            mapping.insert(k.extract::<String>()?, v.extract::<String>()?);
+            requested.insert(k.extract::<String>()?, v.extract::<String>()?);
         }
+        // the one mapping the columns, the open period and the aggregators follow
+        let mapping = df.renaming(&requested);
         // F39: a rename must not collide two columns onto one name (duplicate
-        // column names violate the unique-name contract) — fail-loud (C4).
+        // column names violate the unique-name contract) — fail-loud (C4). A rename is a
+        // new series of the data columns (R15): the cached ones are not carried.
         let result: Vec<String> = df
-            .names()
-            .iter()
-            .map(|n| mapping.get(n).cloned().unwrap_or_else(|| n.clone()))
+            .data_names()
+            .into_iter()
+            .map(|n| mapping.get(&n).cloned().unwrap_or(n))
             .collect();
         let mut seen = std::collections::HashSet::new();
         for n in &result {
@@ -303,14 +283,16 @@ impl PyDataFrame {
                 )));
             }
         }
-        Ok(PyDataFrame::plain(df.rename(&mapping).map_err(pyerr)?))
+        let inner = df.rename(&mapping).map_err(pyerr)?;
+        self.derive_renamed(inner, &mapping)
     }
 
     /// Move a column into the row index (pandas `set_index(col)`), returning a
     /// new frame. A datetime / int / string column becomes the matching index.
     #[pyo3(signature = (keys))]
     pub(crate) fn set_index(&self, keys: &str) -> PyResult<PyDataFrame> {
-        Ok(PyDataFrame::plain(self.read()?.set_index(keys).map_err(pyerr)?))
+        let inner = self.read()?.set_index(keys).map_err(pyerr)?;
+        self.derive_relabelled(inner)
     }
 
     /// Cast columns to new dtypes (pandas `astype({col: dtype})`), returning a
@@ -318,8 +300,7 @@ impl PyDataFrame {
     /// recomputed from the cast columns when it is asked for again.
     pub(crate) fn astype(&self, dtypes: &Bound<'_, PyDict>) -> PyResult<PyDataFrame> {
         let view = self.read()?;
-        let data: Vec<String> = view.names().iter().filter(|n| !view.is_computed(n)).cloned().collect();
-        let mut df = view.select(&data).map_err(pyerr)?;
+        let mut df = view.select(&view.data_names()).map_err(pyerr)?;
         let mut mapping = HashMap::new();
         for (k, v) in dtypes.iter() {
             let name = k.extract::<String>()?;
@@ -338,24 +319,23 @@ impl PyDataFrame {
                 mapping.insert(name, parse_dtype(&dt)?);
             }
         }
-        if !mapping.is_empty() {
-            df = df.astype(&mapping).map_err(pyerr)?;
-        }
-        Ok(PyDataFrame::plain(df))
+        // a new series of the data columns, cast (none cast when only datetimes are)
+        let inner = df.astype(&mapping).map_err(pyerr)?;
+        self.derive_relabelled(inner)
     }
 }
 
 impl PyDataFrame {
 
     /// The `n` extreme rows by `column` (ascending for nsmallest).
-    fn extreme_rows(df: &Fresh<'_>, n: usize, column: &str, ascending: bool) -> PyResult<PyDataFrame> {
+    fn extreme_rows(&self, df: &Fresh<'_>, n: usize, column: &str, ascending: bool) -> PyResult<PyDataFrame> {
         let col = df.column(column).map_err(pyerr)?;
         col.require_numeric().map_err(pyerr)?;
         // the column's own typed, stable order (exact for int64, contract #26);
         // missing cells sort last and are dropped
         let mut order: Vec<usize> = col.argsort(ascending).into_iter().filter(|&i| col.is_valid(i)).collect();
         order.truncate(n);
-        Ok(PyDataFrame::plain(take_frame(df, &order)))
+        self.derive_rows(df, &RowSel::Positions(order))
     }
 
     /// Row-level duplicate mask over all columns, honoring `keep` ('first'|'last').

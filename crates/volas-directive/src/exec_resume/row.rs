@@ -17,7 +17,7 @@ pub(super) fn evaluate(
         Node::Scalar(Number::Int(i)) => Value::Int(*i),
         Node::Scalar(Number::Float(f)) => Value::Float(*f),
         Node::Name(n) if n.starts_with('\u{1}') => Value::Float(hidden(n, row)?),
-        Node::Name(n) => column(df, n, row)?,
+        Node::Data(n) | Node::Name(n) => column(df, n, row)?,
         Node::Unary { op, operand } => {
             let v = eval(operand, row)?;
             element::unary(*op, v)?

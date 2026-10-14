@@ -199,7 +199,9 @@ impl RecursiveKind {
         };
         let input = rows.gather(data);
         let input = &*input;
-        let mut raw = States::default();
+        let mut marks: Vec<_> = states.marks().iter().copied().map(|end| rows.before(end)).collect();
+        marks.sort_unstable(); marks.dedup();
+        let mut raw = States { marks, ..States::default() };
         let result = match self {
             Self::Ema => kernels::sma_seeded_pass(input, p, kernels::ema_step(p), &mut raw),
             Self::Dema => super::dema_pass(input, p, &mut raw),
@@ -209,13 +211,10 @@ impl RecursiveKind {
             Self::T3 => super::t3_pass(input, p, 0.7, &mut raw),
         };
         let seed = self.seed_len(p);
-        for end in data.len().saturating_sub(1).max(1)..=data.len() {
-            let count = match &rows {
-                CompleteRows::All => end,
-                CompleteRows::After(start) => end.saturating_sub(*start),
-                CompleteRows::Kept(rows) => rows.partition_point(|&i| i < end),
-            };
-            let kernel = if count == input.len() { raw.after.as_ref() } else { raw.before.as_ref() };
+        let mut kernels = raw.points.cursor();
+        for end in states.marks().to_vec().into_iter().filter(|&end| end + 1 < data.len()).chain(data.len().saturating_sub(1).max(1)..=data.len()) {
+            let count = rows.before(end);
+            let kernel = if count == input.len() { raw.after.as_deref() } else if count + 1 == input.len() { raw.before.as_deref() } else { kernels.seek(count) };
             let state = if count >= seed {
                 let kernel = kernel?;
                 let mut state = vec![seed as f64];
@@ -232,7 +231,7 @@ impl RecursiveKind {
                 }
                 state
             };
-            states.record(end - 1, data.len(), || state);
+            states.record(end - 1, data.len(), |out| out.extend_from_slice(&state));
         }
         Some(rows.scatter(data.len(), result))
     }

@@ -131,6 +131,13 @@ and composite averages (`apo`, `ppo`, `macdext`, `mavp`, `stoch`, `stochf.d`,
 is bounded by their configured windows and the new rows. `ma` at a recursive
 MA type continues as that average does. `ttm_squeeze` still recomputes its column.
 
+Cached recursions record a checkpoint every 512 rows during computation, including
+the states of finite-window children in a recursive expression. A purely finite-window
+expression keeps its terminal continuation states without these history checkpoints.
+Rust callers can use `volas_directive::exec::execute_for_cache` for this cache policy;
+`execute_with_states_and_anchors` explicitly requests checkpoints for either kind of
+expression. Both use the same continuation-state representation.
+
 
 ### Names: a data column or a built-in command
 
@@ -140,29 +147,25 @@ reads a cached directive column: a new directive (`df[d]`, `df.exec(d)`) compute
 the data columns, so `df['close - obv']` runs the `obv` command even when `obv` is also
 cached (and possibly stale after an `append`).
 
-A name that is **both** a data column and a built-in command usable bare is ambiguous
-and raises when the directive is bound:
+A data column owns every spelling of its directive-shaped name. If `atr:14` is a
+plain data column (for example, after `df[['close', 'atr:14']]`), `ATR:14`,
+`atr:14 + 0` and `ema:2@(atr:14)` all read that data; they never recompute ATR.
+This also applies to bare command names: with a data column `change`, both
+`close * change` and `close * change:` read that column. Rename or drop the data
+column to compute the built-in command on that frame.
 
-```text
-DirectiveValueError: ambiguous name 'change' in 'close * change': it is both a column of this DataFrame and the built-in command 'change'. Write 'change:' to use the command, or rename the column — df.rename(columns={'change': 'change_pct'}) — to use the data.
-```
-
-`close * change:` runs the command; renaming the column reads the data. For the same
-reason, once a cached directive reads a command through its bare name, a data column of
-its canonical command name cannot be added, regardless of the bare spelling:
-`close * CHANGE` and `close * ChAnGe` both prevent adding `change`. Column names
-remain case-sensitive, so a distinct column named `CHANGE` may still be added:
+A cached directive retains the data/command bindings chosen when it was cached.
+Adding a data column under any equivalent spelling of a computation it uses raises:
+`close * CHANGE`, `close * ChAnGe` and `close * change:` all prevent adding either
+`change` or `CHANGE`. Drop the cached directive first, then add the data column;
+every equivalent command spelling will read that data on subsequent binding:
 
 ```text
 ValueError: cannot add column 'change': the cached directive 'close*change' uses the built-in command 'change' under that name. Rename the new column, or drop the cached directive first — df.drop(['close*change'], axis=1).
 ```
 
-A plain column read, `df['change']`, is not a directive and returns the column. The
-command form of a name a data column holds, `df['change:']`, returns the command's
-values without caching them (the data column keeps the name). A directive spelled so
-that it names a cached column is bound against the frame all the same: once a data
-column `obv` exists, `df['close - obv']` is ambiguous even when `close - OBV:` was cached
-before it.
+`df.exec(d)` remains pure and reads only data columns; it never consumes a cached
+column's stale values.
 
 ### Cached column names
 

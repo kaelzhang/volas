@@ -14,22 +14,33 @@ pub fn dema(data: &[f64], period: usize) -> Vec<f64> {
 }
 
 /// Batch kernel publishing its terminal recurrence states.
-pub fn dema_pass(data: &[f64], period: usize, states: &mut impl crate::pass::StateSink) -> Vec<f64> {
+pub fn dema_pass<S: crate::pass::StateSink>(data: &[f64], period: usize, states: &mut S) -> Vec<f64> {
     let n = data.len();
-    let mut out = vec![f64::NAN; n];
+    let mut out = if S::CAPTURE { Vec::with_capacity(n) } else { vec![f64::NAN; n] };
     let k = ema_k(period);
     let step = |prev: f64, x: f64| smoothing::ema(prev, x, k);
     let Some((lookback, e)) = kernels::cascade_warmup::<2>(data, period, step) else {
-        return out;
+        return if S::CAPTURE { vec![f64::NAN; n] } else { out };
     };
-    out[lookback] = 2.0 * e[0] - e[1];
+    if S::CAPTURE { out.resize(lookback, f64::NAN); out.push(2.0 * e[0] - e[1]); }
+    else { out[lookback] = 2.0 * e[0] - e[1]; }
     let (mut e0, mut e1) = (e[0], e[1]);
-    states.record(lookback, n, || e.to_vec());
-    for i in (lookback + 1)..n {
-        e0 = step(e0, data[i]);
-        e1 = step(e1, e0);
-        out[i] = 2.0 * e0 - e1;
-        states.record(i, n, || vec![e0, e1]);
+    states.record(lookback, n, |out| out.extend_from_slice(&e));
+    macro_rules! cascade_value { ($input:expr) => {{ e0 = step(e0, $input); e1 = step(e1, e0); 2.0 * e0 - e1 }}; }
+    if !S::CAPTURE {
+        for i in (lookback + 1)..n {
+            out[i] = cascade_value!(data[i]);
+        }
+    } else {
+        // A span runs the numerical kernel without publication bookkeeping. Only
+        // requested anchors and the terminal rows serialize continuation state.
+        let mut start = lookback + 1;
+        while start < n {
+            let end = states.next_end(start + 1, n);
+            out.extend(data[start..end].iter().map(|&input| cascade_value!(input)));
+            states.record(end - 1, n, |out| out.extend_from_slice(&[e0, e1]));
+            start = end;
+        }
     }
     out
 }
@@ -42,23 +53,33 @@ pub fn tema(data: &[f64], period: usize) -> Vec<f64> {
 }
 
 /// Batch kernel publishing its terminal recurrence states.
-pub fn tema_pass(data: &[f64], period: usize, states: &mut impl crate::pass::StateSink) -> Vec<f64> {
+pub fn tema_pass<S: crate::pass::StateSink>(data: &[f64], period: usize, states: &mut S) -> Vec<f64> {
     let n = data.len();
-    let mut out = vec![f64::NAN; n];
+    let mut out = if S::CAPTURE { Vec::with_capacity(n) } else { vec![f64::NAN; n] };
     let k = ema_k(period);
     let step = |prev: f64, x: f64| smoothing::ema(prev, x, k);
     let Some((lookback, e)) = kernels::cascade_warmup::<3>(data, period, step) else {
-        return out;
+        return if S::CAPTURE { vec![f64::NAN; n] } else { out };
     };
-    out[lookback] = 3.0 * e[0] - 3.0 * e[1] + e[2];
+    if S::CAPTURE { out.resize(lookback, f64::NAN); out.push(3.0 * e[0] - 3.0 * e[1] + e[2]); }
+    else { out[lookback] = 3.0 * e[0] - 3.0 * e[1] + e[2]; }
     let (mut e0, mut e1, mut e2) = (e[0], e[1], e[2]);
-    states.record(lookback, n, || e.to_vec());
-    for i in (lookback + 1)..n {
-        e0 = step(e0, data[i]);
-        e1 = step(e1, e0);
-        e2 = step(e2, e1);
-        out[i] = 3.0 * e0 - 3.0 * e1 + e2;
-        states.record(i, n, || vec![e0, e1, e2]);
+    states.record(lookback, n, |out| out.extend_from_slice(&e));
+    macro_rules! cascade_value { ($input:expr) => {{ e0 = step(e0, $input); e1 = step(e1, e0); e2 = step(e2, e1); 3.0 * e0 - 3.0 * e1 + e2 }}; }
+    if !S::CAPTURE {
+        for i in (lookback + 1)..n {
+            out[i] = cascade_value!(data[i]);
+        }
+    } else {
+        // A span runs the numerical kernel without publication bookkeeping. Only
+        // requested anchors and the terminal rows serialize continuation state.
+        let mut start = lookback + 1;
+        while start < n {
+            let end = states.next_end(start + 1, n);
+            out.extend(data[start..end].iter().map(|&input| cascade_value!(input)));
+            states.record(end - 1, n, |out| out.extend_from_slice(&[e0, e1, e2]));
+            start = end;
+        }
     }
     out
 }
@@ -136,11 +157,10 @@ pub fn trima_pass<S: crate::pass::StateSink>(data: &[f64], period: usize, origin
                 out[i] = sum2.mean(bf);
             }
         }
-        states.record(i, n, || {
-            let mut v = Slide::state([sum1], 0, origin + i + 1);
-            v.extend(Slide::state([sum2], b.min(i + 1).saturating_sub(inner_cnt), origin + i + 1));
-            v.extend((0..b).map(|k| ring[(slot + k) % b]));
-            v
+        states.record(i, n, |out| {
+            Slide::append_components(out, [sum1], 0, origin + i + 1);
+            Slide::append_components(out, [sum2], b.min(i + 1).saturating_sub(inner_cnt), origin + i + 1);
+            out.extend((0..b).map(|k| ring[(slot + k) % b]));
         });
     }
     if clean && sum1.value().is_finite() && sum2.value().is_finite() {
@@ -154,7 +174,7 @@ pub fn trima_pass<S: crate::pass::StateSink>(data: &[f64], period: usize, origin
 
 fn trima_composed<S: crate::pass::StateSink>(data: &[f64], period: usize, origin: usize, states: &mut S) -> Vec<f64> {
     let (a, b) = trima_windows(period);
-    let (mut inner_state, mut outer_state) = (S::default(), S::default());
+    let (mut inner_state, mut outer_state) = (states.child(), states.child());
     let inner = kernels::sma_pass(data, a, origin, &mut inner_state);
     let out = kernels::sma_pass(&inner, b, origin, &mut outer_state);
     states.compose(data.len(), &[&inner_state, &outer_state], |end, state| {
@@ -227,10 +247,10 @@ pub fn t3_pass(data: &[f64], period: usize, vfactor: f64, states: &mut impl crat
         return out;
     };
     out[lookback] = t3.combine(&e);
-    states.record(lookback, n, || e.to_vec());
+    states.record(lookback, n, |out| out.extend_from_slice(&e));
     for i in (lookback + 1)..n {
         out[i] = t3.advance(&mut e, data[i]);
-        states.record(i, n, || e.to_vec());
+        states.record(i, n, |out| out.extend_from_slice(&e));
     }
     out
 }
@@ -442,4 +462,27 @@ pub fn trima_step(data: &[f64], period: usize, row: usize, state: &[f64], next: 
         return None;
     }
     super::MaStage::new(period, 5)?.step(row, |j| data[j], state, next)
+}
+
+#[cfg(test)]
+mod publication_tests {
+    use super::*;
+    use crate::pass::KernelPass;
+
+    #[test]
+    fn cascade_spans_publish_exact_anchor_and_terminal_states() {
+        let data: Vec<_> = (0..200).map(|i| 100.0 + (i as f64 / 7.0).sin()).collect();
+        for triple in [false, true] {
+            let pass = KernelPass::run_marked(&[33, 100], |states| {
+                if triple { tema_pass(&data, 5, states) } else { dema_pass(&data, 5, states) }
+            }).unwrap();
+            let values = if triple { tema(&data, 5) } else { dema(&data, 5) };
+            assert!(pass.values.iter().zip(values).all(|(a, b)| a.to_bits() == b.to_bits() || a.is_nan() && b.is_nan()));
+            let state = |end| if triple { tema_final_state(&data[..end], 5) } else { dema_final_state(&data[..end], 5) }.unwrap();
+            assert_eq!(pass.after, state(200));
+            assert_eq!(pass.before, state(199));
+            assert_eq!(pass.points.at(33), Some(state(33).as_slice()));
+            assert_eq!(pass.points.at(100), Some(state(100).as_slice()));
+        }
+    }
 }

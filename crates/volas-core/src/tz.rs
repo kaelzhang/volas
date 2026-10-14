@@ -194,8 +194,63 @@ impl Tz {
         self.localize(Civil::new(y as i64, mo as i64, d as i64, h as i64, mi as i64, s as i64, 0)?).ok()
     }
 
-    /// A calendar period starts at the earliest occurrence of a fold, or the
-    /// exact transition ending a midnight gap.
+    /// The period a partial date text names in this zone, pandas's partial-string
+    /// periods: a year (`2024`), a month (`2024-01`), a day (`2024-01-02`), an hour
+    /// (`2024-01-02 10`), a minute (`2024-01-02 10:30`) or a second
+    /// (`2024-01-02 10:30:15`), with `T` or a space between the date and the time — as
+    /// `[start, end)` instants and how many fields the text gives (1 for a year … 6 for a
+    /// second). A day or longer starts like a calendar period ([`Tz::day_start`]); an
+    /// hour, a minute or a second names a wall clock, which must be one real instant —
+    /// a DST gap or fold is no period. `None` for any other text (an exact label, a
+    /// fraction of a second, an offset, a gap / fold wall clock) and for a period outside
+    /// the datetime64[ns] range.
+    pub fn period_of_text(&self, text: &str) -> Option<(i64, i64, usize)> {
+        let text = text.trim();
+        let (date, time) = match text.split_once(['T', ' ']) {
+            Some((d, t)) => (d, Some(t)),
+            None => (text, None),
+        };
+        let digits = |t: &str, n: usize| -> Option<u32> {
+            (t.len() == n && t.bytes().all(|b| b.is_ascii_digit())).then(|| t.parse().ok()).flatten()
+        };
+        let mut fields: Vec<u32> = Vec::with_capacity(6);
+        for (i, part) in date.split('-').enumerate() {
+            fields.push(digits(part, if i == 0 { 4 } else { 2 })?);
+        }
+        if let Some(time) = time {
+            if fields.len() != 3 {
+                return None;
+            }
+            for part in time.split(':') {
+                fields.push(digits(part, 2)?);
+            }
+        }
+        let given = fields.len();
+        if given > 6 {
+            return None;
+        }
+        let at = |i: usize, default: u32| fields.get(i).copied().unwrap_or(default);
+        let start = Civil::new(at(0, 0) as i64, at(1, 1) as i64, at(2, 1) as i64,
+            at(3, 0) as i64, at(4, 0) as i64, at(5, 0) as i64, 0)?;
+        let end = match given {
+            1 => Civil::new(start.year() + 1, 1, 1, 0, 0, 0, 0)?,
+            2 => Civil::new(start.year() + i64::from(start.month() == 12), start.month() % 12 + 1, 1, 0, 0, 0, 0)?,
+            3 => start.checked_add_seconds(86_400)?,
+            4 => start.checked_add_seconds(3_600)?,
+            5 => start.checked_add_seconds(60)?,
+            _ => start.checked_add_seconds(1)?,
+        };
+        let first = match given {
+            1..=3 => self.localize_earliest(start).ok()?,
+            _ => self.localize(start).ok()?,
+        };
+        Some((first, self.localize_earliest(end).ok()?, given))
+    }
+
+    /// The first real instant of the local civil day `year-month-day` in this
+    /// zone — its midnight, resolved as [`Tz::localize_earliest`] (a midnight a
+    /// DST gap skips starts the day where the gap ends). An invalid date is a
+    /// `Value` error; a start outside the datetime64[ns] range an `Overflow` error.
     pub fn day_start(&self, year: i64, month: i64, day: i64) -> Result<i64> {
         let midnight = i32::try_from(year).ok().and_then(|_| Civil::new(year, month, day, 0, 0, 0, 0))
             .ok_or_else(|| VolasError::Value(format!("{year:04}-{month:02}-{day:02} is not a valid date")))?;

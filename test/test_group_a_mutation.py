@@ -84,8 +84,9 @@ def test_update_then_append(directive):
 
 @pytest.mark.parametrize('directive', DIRECTIVES)
 def test_slice_then_append(directive):
-    """Combination: cache, slice off the head, append, fulfill — the carried state continues
-    the recursion past the dropped head, matching a fresh recompute on A+bars."""
+    """Combination: cache, slice off the head, append, fulfill — the carried state (or, for
+    a recursion that carries none, the history the slice keeps) continues the recursion
+    past the dropped head, matching a fresh recompute on A+bars."""
     df = DataFrame(A)
     df[directive]
     sub = df.iloc[LO:]

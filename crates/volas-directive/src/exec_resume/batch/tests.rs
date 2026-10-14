@@ -10,7 +10,8 @@ fn short_passes(text: &str) {
         let cols = names.iter().map(|_| Column::f64(vec![3.0; n])).collect();
         let df = DataFrame::new(names.iter().map(|s| s.to_string()).collect(), cols, None).unwrap();
         let ops = Operands::new(&df, cmd.series);
-        if let Some(pass) = compute(&ops, &cmd) {
+        let marks: Vec<_> = (1..n).collect();
+        if let Some(pass) = compute(&ops, &cmd, &marks) {
             let want = crate::exec::execute(&df, &node).unwrap().to_f64_vec();
             assert_eq!(pass.values.len(), want.len());
             assert!(pass.values.iter().zip(want).all(|(a, b)| *a == b || a.is_nan() && b.is_nan()), "{text} n={n}");
@@ -44,6 +45,21 @@ fn terminal_tail_publication_requires_the_before_last_reach() {
                 assert_eq!(after.len(), reach);
                 assert_eq!(before.len(), reach);
             }
+        }
+    }
+}
+
+#[test]
+fn marked_tail_publications_keep_only_complete_input_rings() {
+    for reach in 0..=8 {
+        let values = vec![3.0; 10];
+        let mut points = volas_compute::pass::KernelPoints::default();
+        for end in 1..=10 { points.capture(end, |out| out.push(end as f64)); }
+        append_tail(&mut points, &values, reach);
+        for end in 1..=10 {
+            let state = points.at(end);
+            assert_eq!(state.is_some(), end >= reach);
+            if let Some(state) = state { assert_eq!(state.len(), 1 + reach); }
         }
     }
 }

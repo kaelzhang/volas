@@ -22,6 +22,7 @@ pub fn sum_pass(data: &[f64], period: usize, origin: usize, states: &mut impl cr
     if finite {
         out
     } else {
+        states.restart();
         sum_with::<NonFiniteRows>(data, period, origin, states).0
     }
 }
@@ -66,7 +67,7 @@ fn sum_with<G: RowGuard>(data: &[f64], period: usize, origin: usize, states: &mu
         if guard.leave(old.is_finite()) {
             total.sub(old);
         }
-        states.record(i, n, || crate::guard::Slide::state([total], guard.bad(), origin + i + 1));
+        states.record(i, n, |out| crate::guard::Slide::append_components(out, [total], guard.bad(), origin + i + 1));
         trailing += 1;
     }
     (out, finite && total.value().is_finite())

@@ -532,7 +532,7 @@ mod tests {
 
         let mut cum = Cumulator::new(TimeFrame::Min5, AggSpec::ohlcv());
         for i in 0..df.height() {
-            cum.append(&df.slice(i, i + 1)).unwrap();
+            cum.append(&df.slice_data(i, i + 1)).unwrap();
         }
         assert!(cum.frame().unwrap().equals(&one_shot));
     }
@@ -544,7 +544,7 @@ mod tests {
         assert_eq!(cum.frame().unwrap().height(), 0);
         assert!(cum.last().unwrap().is_none());
         // feed part of the first period: only an open period exists
-        cum.append(&sample().slice(0, 2)).unwrap();
+        cum.append(&sample().slice_data(0, 2)).unwrap();
         assert!(cum.last().unwrap().is_some());
         assert_eq!(cum.frame().unwrap().height(), 1);
     }
@@ -606,8 +606,8 @@ mod tests {
     fn closed_periods_accumulate_across_calls() {
         let df = sample();
         let mut cum = Cumulator::new(TimeFrame::Min1, AggSpec::ohlcv());
-        cum.append(&df.slice(0, 3)).unwrap();
-        cum.append(&df.slice(3, 6)).unwrap();
+        cum.append(&df.slice_data(0, 3)).unwrap();
+        cum.append(&df.slice_data(3, 6)).unwrap();
         assert!(cum.frame().unwrap().equals(&cumulate(&df, TimeFrame::Min1, &AggSpec::ohlcv()).unwrap()));
     }
 

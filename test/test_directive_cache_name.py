@@ -130,19 +130,33 @@ def test_a_bare_command_is_one_column_whatever_its_case():
     assert volas.directive_stringify('Close + RSI') == 'Close+RSI'
 
 
-def test_a_cached_name_does_not_bypass_the_ambiguity_rule():
-    """A directive spelled so that it names a cached column is still bound against the
-    frame: once a data column `obv` exists, `close - obv` is ambiguous (R17) — it does not
-    silently read the column cached as `close - OBV:` before that data column existed."""
+def test_a_cached_command_binding_is_protected_across_spellings():
+    df = _frame()
+    df['close - OBV']
+    held = np.asarray(df['close-obv']).copy()
+    with pytest.raises(ValueError, match="cannot add column 'obv'"):
+        df['obv'] = np.zeros(N)
+    np.testing.assert_array_equal(df['close-obv'], held)
+    df = df.drop(['close-obv'], axis=1)
+    df['obv'] = np.zeros(N)
+    for d in ('close - obv', 'close - OBV', 'close - obv:'):
+        np.testing.assert_array_equal(df[d], DATA['close'])
+
+
+def test_a_cached_name_does_not_bypass_the_data_shadow_rule():
+    """An explicit cached command protects its computation until it is dropped;
+    afterwards, every directive spelling resolves to the physical data column."""
     df = _frame()
     df['close - OBV:']
-    df['obv'] = np.zeros(N)  # an explicit command does not use a bare name
-    with pytest.raises(volas.DirectiveValueError, match=(
-            "ambiguous name 'obv' in 'close - obv': it is both a column of this DataFrame and the "
-            "built-in command 'obv'. Write 'obv:' to use the command")):
-        df['close - obv']
-    assert np.asarray(df['close-obv']).shape == (N,)  # the cached column by its own name
-    assert np.asarray(df['close - obv:']).shape == (N,)  # the command, explicitly
+    held = np.asarray(df['close-obv']).copy()
+    with pytest.raises(ValueError, match="cannot add column 'obv'"):
+        df['obv'] = np.zeros(N)
+    np.testing.assert_array_equal(df['close-obv'], held)
+    assert np.asarray(df['close - obv:']).shape == (N,)
+    df = df.drop(['close-obv'], axis=1)
+    df['obv'] = np.zeros(N)
+    for directive in ('close - obv', 'close - OBV:', 'close - obv:'):
+        np.testing.assert_array_equal(df[directive], DATA['close'])
 
 
 def _appended(directive, extra=None, rows=N - 1):
@@ -156,24 +170,18 @@ def _appended(directive, extra=None, rows=N - 1):
     return df
 
 
-def test_a_command_written_with_a_colon_beside_a_data_column_of_its_name():
-    """With a data column ``change``, ``change: * 2`` is the command: it caches as
-    ``change*2`` and keeps reading the command after an append (the column keeps the
-    directive it was bound to); ``change:`` alone returns the command's values without
-    caching them over the data column of that name."""
+def test_a_command_written_with_a_colon_beside_a_data_column_reads_the_data():
+    """A data column shadows the command under every spelling and keeps its values."""
     change = {'change': np.linspace(-1, 1, N)}
     df = _appended('change: * 2', change)
     assert 'change*2' in df.columns and df.is_computed('change*2')
-    want = _frame().exec('change:2 * 2', dtype='float64')
+    want = change['change'] * 2
     assert _same(df['change*2'], want)
     assert _same(df['change: * 2'], want)
-    # the bare name beside that data column is ambiguous (R17)
-    with pytest.raises(volas.DirectiveValueError, match="ambiguous name 'change'"):
-        df['close * change']
-    with pytest.raises(volas.DirectiveValueError, match="ambiguous name 'change'"):
-        df['change * 2']
+    assert _same(df['close * change'], DATA['close'] * change['change'])
+    assert _same(df['change * 2'], want)
     df = _frame(**change)
-    assert _same(df['change:'], _frame().exec('change', dtype='float64'))
+    assert _same(df['change:'], change['change'])
     assert not df.is_computed('change') and _same(df['change'], change['change'])
 
 

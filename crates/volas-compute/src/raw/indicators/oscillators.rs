@@ -1,3 +1,6 @@
+mod rsi_pair;
+pub(crate) use rsi_pair::rsi_pair_pass;
+
 use super::stochastic::{stoch_fastk, stochrsi_fastk};
 use crate::accum::{Accumulator, Csum};
 use crate::missing;
@@ -175,7 +178,7 @@ pub fn cmo(close: &[f64], period: usize) -> Vec<f64> {
 }
 
 /// The full RSI / CMO series: NaN before index `period`, then `value` of the averages.
-fn gain_loss_series(close: &[f64], period: usize, value: impl Fn(GainLoss) -> f64, states: &mut impl crate::pass::StateSink) -> Vec<f64> {
+fn gain_loss_series<S: crate::pass::StateSink>(close: &[f64], period: usize, value: impl Fn(GainLoss) -> f64, states: &mut S) -> Vec<f64> {
     let n = close.len();
     let mut out = vec![f64::NAN; n];
     if period == 0 || n <= period {
@@ -183,13 +186,31 @@ fn gain_loss_series(close: &[f64], period: usize, value: impl Fn(GainLoss) -> f6
     }
     let mut w = GainLoss::seed(close, period);
     out[period] = value(w);
-    states.record(period, n, || w.state());
+    states.record(period, n, |out| w.append_state(out));
     let avg = smoothing::Wilder::new(period);
-    for i in (period + 1)..n {
-        w.step(avg, close[i] - close[i - 1]);
-        out[i] = value(w);
-        states.record(i, n, || w.state());
+    macro_rules! average_value {
+        ($change:expr) => {{ w.step(avg, $change); value(w) }};
     }
+    macro_rules! average_rows {
+        ($from:expr, $end:expr) => {{
+            for i in $from..$end {
+                out[i] = average_value!(close[i] - close[i - 1]);
+            }
+        }};
+    }
+    if S::CAPTURE {
+        let mut from = period + 1;
+        let mut previous = close[period];
+        while from < n {
+            let end = states.next_end(from + 1, n);
+            for (&current, target) in close[from..end].iter().zip(&mut out[from..end]) {
+                *target = average_value!(current - previous);
+                previous = current;
+            }
+            states.record(end - 1, n, |out| w.append_state(out));
+            from = end;
+        }
+    } else { average_rows!(period + 1, n); }
     out
 }
 
@@ -218,8 +239,11 @@ impl GainLoss {
     }
 
     fn state(self) -> Vec<f64> {
-        vec![self.gain, self.loss]
+        let mut state = Vec::with_capacity(2);
+        self.append_state(&mut state);
+        state
     }
+    fn append_state(self, state: &mut Vec<f64>) { state.extend_from_slice(&[self.gain, self.loss]); }
 
     /// The seed from the first `period` changes (deltas `1..=period`).
     fn seed(close: &[f64], period: usize) -> Self {
@@ -436,7 +460,7 @@ pub fn cog_pass<S: crate::pass::StateSink>(close: &[f64], period: usize, _origin
     let mut state = [0.0; COG_STATE];
     for (i, o) in out.iter_mut().enumerate() {
         *o = cog_row(close, period, i, &mut state);
-        states.record(i, n, || state.to_vec());
+        states.record(i, n, |out| out.extend_from_slice(&state));
     }
     out
 }

@@ -271,11 +271,13 @@ impl Index {
     /// `NaT` and sorted last.
     pub fn from_column_tz(col: &Column, tz: Tz) -> Result<Index> {
         let kind = match col {
-            // Datetime is exempt from the unique-label rule (F34 refinement):
-            // real market data legitimately carries duplicate timestamps (resent
-            // forming bars, multiple ticks per ts, NaT batches) and cumulate /
-            // sort own the dedup semantics. int64/str labels stay strictly unique.
-            Column::Datetime(v) => IndexKind::Datetime(v.to_vec(), tz),
+            // Every index kind has unique labels (a label names one row); `NaT` is no
+            // label.
+            Column::Datetime(v) => {
+                let present: Vec<i64> = v.iter().copied().filter(|&ns| ns != crate::datetime::NAT).collect();
+                require_unique_labels(&present, "datetime")?;
+                IndexKind::Datetime(v.to_vec(), tz)
+            }
             Column::I64(v, _) => {
                 require_no_missing_labels(col, "int64")?;
                 require_unique_labels(v, "int64")?;
@@ -774,7 +776,10 @@ fn require_no_missing_labels(col: &Column, kind: &str) -> Result<()> {
 /// Label access assumes unique labels (F34, decision 1B): a duplicate-label
 /// index makes `.loc[label]` ill-defined (one row or many?), so it is rejected
 /// at creation — the same creation-time guard as the NA-label rule above.
-fn require_unique_labels<T: std::hash::Hash + Eq>(labels: &[T], kind: &str) -> Result<()> {
+fn require_unique_labels<T: std::hash::Hash + Ord>(labels: &[T], kind: &str) -> Result<()> {
+    if labels.windows(2).all(|w| w[0] < w[1]) {
+        return Ok(()); // increasing labels (the usual time series): unique in one pass
+    }
     let mut seen = std::collections::HashSet::with_capacity(labels.len());
     for l in labels {
         if !seen.insert(l) {

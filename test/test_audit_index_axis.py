@@ -57,15 +57,17 @@ def test_loc_datetime_partial_string():
 
 # F34 (decision 1B, FIXED with a refinement): set_index REJECTS a duplicate-label
 # int64/str column at creation (label access assumes unique labels — the same
-# creation-time guard as the NA-label rule V16). DATETIME is exempt: real market
-# data legitimately carries duplicate timestamps (resent forming bars, multiple
-# ticks per instant, NaT batches) and cumulate/sort own those semantics.
+# creation-time guard as the NA-label rule V16), a datetime one too — consecutive or
+# not; only the fine bars a cumulation is fed keep their re-send semantics.
 def test_set_index_rejects_duplicate_labels():
     with pytest.raises((ValueError, KeyError)):
         _indexed([1, 1, 2])              # int64 duplicate label -> rejected
 
 
-def test_set_index_allows_duplicate_datetime():
-    df = volas.DataFrame({"v": [1.0, 2.0]})
-    df["t"] = volas.to_datetime(volas.DataFrame({"t": ["2021-01-01", "2021-01-01"]})["t"])
-    assert df.set_index("t").shape == (2, 1)   # duplicate ts is market reality
+@pytest.mark.parametrize("stamps", [["2021-01-01", "2021-01-01", "2021-01-02"],
+                                    ["2021-01-01", "2021-01-02", "2021-01-01"]])
+def test_set_index_rejects_a_duplicate_datetime(stamps):
+    df = volas.DataFrame({"v": [1.0, 2.0, 3.0]})
+    df["t"] = volas.to_datetime(volas.DataFrame({"t": stamps})["t"])
+    with pytest.raises(ValueError, match="duplicate labels"):
+        df.set_index("t")

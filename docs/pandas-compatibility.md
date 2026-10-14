@@ -180,6 +180,18 @@ df.loc[0:1, 'x'] = 99  # writes those two rows only: x == [20, 99, 99]
 df.loc[0:5]            # KeyError: 5 is not a label of this unordered index
 ```
 
+On an increasing datetime index a bound written as a **partial date** names a whole
+period, as in pandas: a year (`'2024'`), a month (`'2024-01'`), a day, an hour
+(`'2024-01-02 10'`), a minute or a second; a start bound is the period's first instant
+and a stop bound its last, so `df.loc['2024-01':'2024-02']` holds both whole months. A
+single year or month key (`df.loc['2024-01']`) selects its period's rows the same way.
+Either is a contiguous selection, so cached directive columns continue on it (see
+[Derived frames](dataframe-api.md#derived-frames)). A **column** selection
+(`df[['close', 'ma:5']]`, `df.loc[:, cols]`) and a value transform (`fillna`, `abs`,
+`where`, …) give plain data columns, as pandas does: a cached directive column becomes
+its values and is never continued afterwards. `drop(axis=1)` only removes the columns it
+names: the remaining cached columns keep continuing.
+
 A datetime index holding `NaT` counts as unordered, as in pandas. On a datetime
 index that is not increasing (decreasing, unordered, or holding `NaT`), a bound
 written as a **string** raises `KeyError`: pandas reads it as a partial-date value
@@ -208,7 +220,9 @@ Relative to pandas, volas does **not** support:
   interval, period, timedelta, or mixed-type `object` index.
 - **Index algebra** — reindexing, index set operations (union / intersection),
   and automatic alignment-on-index when combining frames.
-- **Duplicate-label** lookups (label access assumes unique labels).
+- **Duplicate labels** — a label names one row: a frame built with repeated labels
+  (`index=`, `set_index`, `read_csv(index_col=...)`, `from_pandas`) raises `ValueError`.
+  A bar sent again is appended, where a row labelled like the last one replaces it.
 
 If your workflow needs any of these, keep using pandas; volas targets the
 single-level, OHLCV-shaped index that candlestick data uses.

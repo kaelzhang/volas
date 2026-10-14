@@ -24,7 +24,8 @@ def test_boll_stable_after_drop_and_readd():
     last_index = len(stock) - 1
     last_boll = stock['boll'].iloc[-1]
 
-    origin_last = stock.iloc[last_index]            # a Row carrying its label
+    # a Row carrying its label, of the data columns (a cached column is not appended)
+    origin_last = stock[['open', 'high', 'low', 'close']].iloc[last_index]
     dropped = stock.drop([last_index])
     assert len(dropped) == last_index
 

@@ -173,11 +173,16 @@ impl<const K: usize> Slide<K> {
         out[K * Csum::STATE + 1] = self.pos as f64;
     }
 
-    /// Serialize the running components of the batch loop in the same wire layout.
-    pub(crate) fn state(sums: [Csum; K], bad: usize, pos: usize) -> Vec<f64> {
-        let mut out = vec![0.0; Self::STATE];
-        Self { sums, bad, pos }.write_state(&mut out);
-        out
+    /// Append a publication to the kernel sink's existing buffer.
+    pub(crate) fn append_state(&self, out: &mut Vec<f64>) {
+        let at = out.len();
+        out.resize(at + Self::STATE, 0.0);
+        self.write_state(&mut out[at..]);
+    }
+
+    /// Append the batch loop's running components in this owner's wire layout.
+    pub(crate) fn append_components(out: &mut Vec<f64>, sums: [Csum; K], bad: usize, pos: usize) {
+        Self { sums, bad, pos }.append_state(out);
     }
 
     /// The absolute position of the next row to slide.
@@ -342,7 +347,7 @@ pub(crate) fn window_sums_pass<const K: usize>(
             Window::Sums(s) => emit(i, s.map(|c| c.value())),
             Window::Bad => emit(i, own_sums(i + 1 - period..=i, &term)),
         }
-        states.record(i, n, || { let mut v = vec![0.0; Slide::<K>::STATE]; slide.write_state(&mut v); v });
+        states.record(i, n, |out| slide.append_state(out));
     }
 }
 

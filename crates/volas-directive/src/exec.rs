@@ -27,6 +27,7 @@ pub(crate) fn execute_node(df: &DataFrame, node: &BoundNode) -> Result<Column> {
     match node {
         Node::Scalar(Number::Int(v)) => Ok(Column::i64(vec![*v; df.height()])),
         Node::Scalar(Number::Float(v)) => Ok(Column::f64(vec![*v; df.height()])),
+        Node::Data(name) => Ok(df.column(name)?.clone()),
         Node::Name(name) => {
             if name.is_empty() {
                 return Err(VolasError::Value("empty column / command name".into()));
@@ -144,7 +145,7 @@ pub(crate) fn execute_inputs(ops: &Operands, cmd: &crate::complete::BoundCommand
 }
 
 pub use crate::exec_resume::{
-    capture, capture_states, checkpoint, execute_resume, execute_resume_step, execute_with_states, initial_state, replay,
+    capture, capture_states, checkpoint, checkpoints, execute_resume, execute_resume_step, execute_with_states, execute_with_states_and_anchors, execute_for_cache, initial_state, replay,
     WithStates,
 };
 

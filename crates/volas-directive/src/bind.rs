@@ -12,7 +12,7 @@
 //!
 //! Binding has three forms: [`bind_node`] (frame-blind: a bare name stays a name),
 //! [`bind_frame`] (against a frame's data columns: a bare name becomes the column or the
-//! command it names, or is rejected as ambiguous) and [`bind_form`] (lenient on an absent
+//! command it names, with directive-shaped data references kept as data) and [`bind_form`] (lenient on an absent
 //! argument or operand, for `directive_stringify`).
 
 use crate::spec::{
@@ -28,6 +28,7 @@ use volas_time::Span;
 /// [`bind_frame`].
 pub(crate) fn bind_node(cst: &Cst) -> Result<BoundNode> {
     Ok(match cst {
+        Node::Data(s) => Node::Data(s.clone()),
         Node::Name(s) => Node::Name(s.clone()),
         Node::Scalar(v) => Node::Scalar(*v),
         Node::Command(c) => {
@@ -158,43 +159,49 @@ pub fn is_bare_command(name: &str) -> bool {
     command_spec(&normalize(name), None).is_some_and(|spec| spec.usable_bare())
 }
 
-/// The R17 error for a bare `name` in `directive` that is both a data column and a
-/// built-in command usable bare.
-fn ambiguous(name: &str, directive: &str) -> VolasError {
-    VolasError::Value(format!(
-        "ambiguous name '{name}' in '{directive}': it is both a column of this DataFrame \
-         and the built-in command '{command}'. Write '{name}:' to use the command, or \
-         rename the column — df.rename(columns={{'{name}': '{name}_pct'}}) — to use the \
-         data.",
-        command = normalize(name)
-    ))
+/// Canonical directive spelling of a physical data-column label. Invalid directive
+/// labels retain their ordinary exact-name semantics at the caller's lookup boundary.
+pub fn canonical_data_name(text: &str) -> Result<String> {
+    // Ordinary schema labels need neither a parsed tree nor its continuation facts.
+    // Keep the renderer's bare-name rule: only commands usable bare normalize.
+    let mut bytes = text.bytes();
+    if bytes.next().is_some_and(crate::parser::is_ident_start)
+        && bytes.all(crate::parser::is_ident_char)
+    {
+        return Ok(if is_bare_command(text) {
+            normalize(text).into_owned()
+        } else {
+            text.to_string()
+        });
+    }
+    crate::parse(text).map(|node| crate::stringify::stringify_node(node.node()))
 }
 
-/// Bind a directive against a frame whose data columns `is_column` names: each bare
-/// name becomes what it reads — a data column stays a name; a built-in command becomes
-/// that command (all defaults, its spelling kept, so it renders as written); anything
-/// else stays a name (an absent column, an error at execution). A name that is both a
-/// data column and a command usable bare is ambiguous, and `directive` (as written) is
-/// rejected, naming both ways out. The result reads no bare name as a command, so it
-/// executes the same on every later frame.
+/// Bind to data columns named by `is_column`. A data column owns every canonical
+/// spelling of its directive, including references nested inside expressions.
 pub fn bind_frame(node: &Ast, is_column: &impl Fn(&str) -> bool, directive: &str) -> Result<Ast> {
-    bind_frame_node(node.node(), is_column, directive).map(finish)
+    bind_frame_resolved(node, &|name| is_column(name).then(|| name.to_string()), directive)
+}
+
+/// Bind canonical directive references to their physical data-column names. All
+/// expression levels use this one resolver; a resolved data node never becomes a
+/// command again when continuation or lookback facts are selected.
+pub fn bind_frame_resolved(node: &Ast, resolve: &impl Fn(&str) -> Option<String>, _directive: &str) -> Result<Ast> {
+    bind_frame_node(node.node(), resolve).map(finish)
 }
 
 /// Seal a validated tree together with its continuation decision.
 pub(crate) fn finish(node: BoundNode) -> Ast { Ast::bound(node) }
 
-fn bind_frame_node(node: &BoundNode, is_column: &impl Fn(&str) -> bool, directive: &str) -> Result<BoundNode> {
+fn bind_frame_node(node: &BoundNode, resolve: &impl Fn(&str) -> Option<String>) -> Result<BoundNode> {
+    let canonical = crate::stringify::stringify_node(node);
+    if !canonical.is_empty() && !matches!(node, Node::Scalar(_)) {
+        if let Some(name) = resolve(&canonical) { return Ok(Node::Data(name)); }
+    }
     Ok(match node {
         Node::Name(name) if name.is_empty() => node.clone(),
-        Node::Name(name) if is_column(name) => {
-            if is_bare_command(name) {
-                return Err(ambiguous(name, directive));
-            }
-            node.clone()
-        }
         Node::Name(name) if is_command(&normalize(name)) => Node::Command(bind_bare(name)?),
-        Node::Name(_) | Node::Scalar(_) => node.clone(),
+        Node::Data(_) | Node::Name(_) | Node::Scalar(_) => node.clone(),
         Node::Command(c) => Node::Command(Command {
             name: c.name.clone(),
             sub: c.sub.clone(),
@@ -202,17 +209,17 @@ fn bind_frame_node(node: &BoundNode, is_column: &impl Fn(&str) -> bool, directiv
             series: c
                 .series
                 .iter()
-                .map(|s| bind_frame_node(s, is_column, directive))
+                .map(|s| bind_frame_node(s, resolve))
                 .collect::<Result<_>>()?,
         }),
         Node::Unary { op, operand } => Node::Unary {
             op: *op,
-            operand: Box::new(bind_frame_node(operand, is_column, directive)?),
+            operand: Box::new(bind_frame_node(operand, resolve)?),
         },
         Node::Binary { left, op, right } => Node::Binary {
-            left: Box::new(bind_frame_node(left, is_column, directive)?),
+            left: Box::new(bind_frame_node(left, resolve)?),
             op: *op,
-            right: Box::new(bind_frame_node(right, is_column, directive)?),
+            right: Box::new(bind_frame_node(right, resolve)?),
         },
     })
 }
@@ -226,13 +233,28 @@ pub fn uses_bare_command(node: &Ast, name: &str) -> bool {
 
 fn uses_bare_node(node: &BoundNode, name: &str) -> bool {
     match node {
-        Node::Name(_) | Node::Scalar(_) => false,
+        Node::Data(_) | Node::Name(_) | Node::Scalar(_) => false,
         Node::Command(c) => {
             (c.args.bare.is_some() && c.name == name) || c.series.iter().any(|s| uses_bare_node(s, name))
         }
         Node::Unary { operand, .. } => uses_bare_node(operand, name),
         Node::Binary { left, right, .. } => uses_bare_node(left, name) || uses_bare_node(right, name),
     }
+}
+
+/// Whether adding data under canonical `name` would shadow a computation inside an
+/// already-bound cached directive. Its stored Data references remain ordinary reads;
+/// command and formula references retain their computation until explicitly dropped.
+pub fn uses_command_shadow(node: &Ast, name: &str) -> bool {
+    fn reads(node: &BoundNode, name: &str) -> bool {
+        match node {
+            Node::Data(_) | Node::Name(_) | Node::Scalar(_) => false,
+            Node::Command(c) => crate::stringify::stringify_node(node) == name || c.series.iter().any(|s| reads(s, name)),
+            Node::Unary { operand, .. } => crate::stringify::stringify_node(node) == name || reads(operand, name),
+            Node::Binary { left, right, .. } => crate::stringify::stringify_node(node) == name || reads(left, name) || reads(right, name),
+        }
+    }
+    reads(node.node(), name)
 }
 
 /// The bare-name rule for `directive_lookback`: without a frame a bare name is taken
@@ -253,6 +275,7 @@ pub fn check_bare(node: &Ast) -> Result<()> { check_bare_node(node.node()) }
 
 pub(crate) fn check_bare_node(node: &BoundNode) -> Result<()> {
     match node {
+        Node::Data(_) => Ok(()),
         Node::Name(name) => check_bare_command(name),
         Node::Scalar(_) => Ok(()),
         Node::Command(c) => c.series.iter().try_for_each(check_bare_node),
@@ -273,6 +296,7 @@ pub(crate) fn check_bare_node(node: &BoundNode) -> Result<()> {
 /// as the column the directive caches under.
 pub fn bind_form(cst: &Cst) -> Result<Form> {
     Ok(match cst {
+        Node::Data(name) => Node::Data(name.clone()),
         Node::Name(name) => {
             let canonical = normalize(name);
             if is_command(&canonical) && command_spec(&canonical, None).is_none() {

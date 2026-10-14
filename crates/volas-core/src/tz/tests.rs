@@ -191,3 +191,24 @@ fn tz_edge_branches() {
     assert!(Tz::parse("+123").is_err());
     assert!(Tz::parse("+25:00").is_err());
 }
+
+/// A partial date text names its period; anything else names no period.
+#[test]
+fn a_partial_date_text_names_its_period() {
+    let ns = |s: &str| crate::datetime::parse_ns(s).unwrap();
+    let period = |t: &str| Tz::Utc.period_of_text(t);
+    assert_eq!(period("2024"), Some((ns("2024-01-01 00:00:00"), ns("2025-01-01 00:00:00"), 1)));
+    assert_eq!(period("2024-12"), Some((ns("2024-12-01 00:00:00"), ns("2025-01-01 00:00:00"), 2)));
+    assert_eq!(period("2024-02-29"), Some((ns("2024-02-29 00:00:00"), ns("2024-03-01 00:00:00"), 3)));
+    assert_eq!(period("2024-02-29T23"), Some((ns("2024-02-29 23:00:00"), ns("2024-03-01 00:00:00"), 4)));
+    assert_eq!(period("2024-02-29 23:59"), Some((ns("2024-02-29 23:59:00"), ns("2024-03-01 00:00:00"), 5)));
+    assert_eq!(period("2024-02-29 23:59:59"), Some((ns("2024-02-29 23:59:59"), ns("2024-03-01 00:00:00"), 6)));
+    for t in ["2024-02 10", "2024-01-02 10:00:00:00", "2024-13", "24-01", "2024-01-02 10:00:00.5", "x"] {
+        assert_eq!(period(t), None, "{t}");
+    }
+    // a wall clock in a DST gap or fold names no instant, so no period; a day does
+    let ny = Tz::parse("America/New_York").unwrap();
+    assert_eq!(ny.period_of_text("2024-03-10 02:30"), None);
+    assert_eq!(ny.period_of_text("2024-11-03 01:30"), None);
+    assert!(ny.period_of_text("2024-03-10").is_some());
+}

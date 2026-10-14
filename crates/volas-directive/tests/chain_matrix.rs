@@ -147,7 +147,7 @@ fn chains_replay_from_a_window_checkpoint() {
                 let start = cut.saturating_sub(span);
                 let frame = data.frame.slice_data(start, 120);
                 let cp = if cp.state.is_some() {
-                    checkpoint(&frame, &node, cp.state, cut - start, false).unwrap()
+                    checkpoint(&frame, &node, cp.state.map(|state| state.to_vec()), cut - start, false).unwrap()
                 } else { cp };
                 let (got, _) = replay(&frame, &node, &cp, frame.height()).unwrap_or_else(|| panic!("{text} [{}] {cut} replay declined", data.name));
                 assert!(values(&got).iter().zip(&whole[cut..]).all(|(a,b)| same(*a,*b)), "{text} [{}] {cut}", data.name);

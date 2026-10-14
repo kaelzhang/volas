@@ -34,7 +34,7 @@ use std::cell::{Cell, OnceCell};
 use volas_core::{Column, DataFrame, Result, VolasError};
 
 use crate::exec::{execute_node, operand, require_f64_input, require_numeric};
-use crate::types::BoundNode;
+use crate::types::{BoundNode, Node};
 
 /// How many input slots a command can read (every command reads at most five; an arm
 /// reading past this is a bug, caught by every command's test).
@@ -246,21 +246,26 @@ impl<'a> Operands<'a> {
     /// A numeric input: the operand filling `slot`, else the frame column `default`.
     fn resolve(&self, slot: usize, default: &str) -> Result<Read<'a>> {
         match operand(self.series, slot) {
+            Some(Node::Data(name)) => self.column_read(slot, name),
             Some(node) => {
                 let col = execute_node(self.operand_frame(), node)?;
                 require_f64_input(&col)?;
                 Ok(Read { values: Cow::Owned(col.to_f64_vec()), column: None, known_nan: None })
             }
-            None => {
-                let col = self.df.column(default)?;
-                self.fit(slot, col.len(), self.df.height())?;
-                let values = convert(col, self.start, self.end)?;
-                Ok(match self.whole() {
-                    true => Read { values, column: Some(col), known_nan: None },
-                    false => Read { values, column: None, known_nan: col.known_has_nan().filter(|has| !has) },
-                })
-            }
+            None => self.column_read(slot, default),
         }
+    }
+
+    /// A bound data reference shares the default-column read path: borrow float64
+    /// rows and retain the column's missing-value fact without evaluating a subtree.
+    fn column_read(&self, slot: usize, name: &str) -> Result<Read<'a>> {
+        let col = self.df.column(name)?;
+        self.fit(slot, col.len(), self.df.height())?;
+        let values = convert(col, self.start, self.end)?;
+        Ok(match self.whole() {
+            true => Read { values, column: Some(col), known_nan: None },
+            false => Read { values, column: None, known_nan: col.known_has_nan().filter(|has| !has) },
+        })
     }
 
     /// Hand `read` to the arm: empty while probing; note what is known of its NaNs.

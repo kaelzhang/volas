@@ -105,8 +105,11 @@ def test_cumulate_sorted_and_duplicate_ts_still_work():
     out = _bars(['2021-01-04T14:30', '2021-01-04T14:31', '2021-01-04T14:35'],
                 [1.0, 2.0, 5.0]).cumulate('5m')
     assert out.shape == (2, 1) and out['close'].to_list() == [2.0, 5.0]
-    # equal timestamps are non-decreasing (a re-sent bar), still accepted
-    dup = _bars(['2021-01-04T14:30', '2021-01-04T14:30'], [1.0, 2.0]).cumulate('5m')
+    # a re-sent bar (an equal timestamp) is fed by an append; a frame never repeats one
+    with pytest.raises(ValueError, match='duplicate labels'):
+        _bars(['2021-01-04T14:30', '2021-01-04T14:30'], [1.0, 2.0])
+    dup = _bars(['2021-01-04T14:30'], [1.0]).cumulate('5m')
+    dup.append(_bars(['2021-01-04T14:30'], [2.0]))
     assert dup['close'].to_list() == [2.0]
 
 

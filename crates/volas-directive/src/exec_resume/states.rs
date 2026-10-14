@@ -21,19 +21,51 @@ use crate::types::Ast;
 
 /// A column's values and its carried states `(state, state_before_last)`.
 pub type WithStates = (Column, Option<Vec<f64>>, Option<Vec<f64>>);
+/// Values, terminal states, and same-pass framed continuation snapshots.
+pub(super) type WithAnchors = (Column, Option<Vec<f64>>, Option<Vec<f64>>, Vec<(usize, volas_core::StateWords)>);
+/// Public result with checkpoints owned by the continuation representation.
+pub type WithCheckpoints = (Column, Option<Vec<f64>>, Option<Vec<f64>>, Vec<volas_core::Checkpoint>);
+
+pub(super) fn marks(df: &DataFrame) -> Vec<usize> {
+    let spacing = volas_core::dataframe::ANCHOR_SPACING;
+    (spacing - df.origin() % spacing..df.height()).step_by(spacing).collect()
+}
 
 /// The full computation of `node` over `df` and its carried states: the state as of the
 /// last row and the one before (`None` for a directive with no resume).
 pub fn execute_with_states(df: &DataFrame, node: &Ast) -> Result<WithStates> {
+    let (column, state, before, _) = execute_anchored(df, node)?;
+    Ok((column, state, before))
+}
+
+/// Compute values and capture anchor checkpoints in the producing pass.
+pub fn execute_with_states_and_anchors(df: &DataFrame, node: &Ast) -> Result<WithCheckpoints> {
+    let (column, state, before, points) = execute_anchored(df, node)?;
+    Ok((column, state, before, super::history::checkpoints(df, node, points)))
+}
+
+/// Cache execution requests anchors only for carried recursions. Every node in a
+/// chain shares that root request and the same continuation encoder.
+pub fn execute_for_cache(df: &DataFrame, node: &Ast) -> Result<WithCheckpoints> {
+    let requested = if matches!(crate::lookback::reach(node).history, volas_core::History::Carried { .. }) { marks(df) } else { Vec::new() };
+    let (column, state, before, points) = execute_marked(df, node, &requested)?;
+    Ok((column, state, before, super::history::checkpoints(df, node, points)))
+}
+
+pub(super) fn execute_anchored(df: &DataFrame, node: &Ast) -> Result<WithAnchors> {
+    execute_marked(df, node, &marks(df))
+}
+
+pub(super) fn execute_marked(df: &DataFrame, node: &Ast, requested: &[usize]) -> Result<WithAnchors> {
     if super::chain::chained(node) {
-        return super::chain::with_states(df, node);
+        return super::chain::with_marked(df, node, requested);
     }
-    if let Some(done) = one_pass(df, node) {
+    if let Some(done) = one_pass(df, node, requested) {
         return Ok(done);
     }
     let col = crate::exec::execute(df, node)?;
     let (state, before) = capture(df, node);
-    Ok((col, state, before))
+    Ok((col, state, before, Vec::new()))
 }
 
 /// The carried states of `node` over `df`'s rows: the state as of the row before the
@@ -56,7 +88,7 @@ pub fn capture(df: &DataFrame, node: &Ast) -> (Option<Vec<f64>>, Option<Vec<f64>
 
 /// The one-pass computation of a carried line: `None` when it has no batch/resume path, the
 /// frame is too short for a head past the warm-up, or a path declines.
-fn one_pass(df: &DataFrame, node: &Ast) -> Option<WithStates> {
+fn one_pass(df: &DataFrame, node: &Ast, marks: &[usize]) -> Option<WithAnchors> {
     if !matches!(node.continuation(), crate::types::Continuation::Own(_)) {
         return None;
     }
@@ -66,22 +98,37 @@ fn one_pass(df: &DataFrame, node: &Ast) -> Option<WithStates> {
     if h < head + 2 { return None; }
     let bc = super::bound(cmd);
     if bc.spec.history(bc.args) == crate::spec::History::Recursive {
-        if let Some(pass) = super::batch::recursive_pass(df, &bc) { return Some(pass); }
+        if let Some(pass) = super::batch::recursive_pass(df, &bc, marks) { return Some(pass); }
     } else {
         let ops = crate::operands::Operands::new(df, bc.series);
-        if let Some(pass) = super::batch::compute(&ops, &bc) {
-            let after = super::state::capture_read(&ops, &bc, h, pass.after, false)?;
-            let before = super::state::capture_read(&ops, &bc, h - 1, pass.before, false)?;
-            return Some((Column::f64(pass.values), Some(after), Some(before)));
+        if let Some(pass) = super::batch::compute(&ops, &bc, marks) {
+            let encoder = super::state::FrameEncoder::new(&ops, &bc, false, None).with_kernel(&pass.after);
+            let after = encoder.capture(h, &pass.after)?;
+            let before = encoder.capture(h - 1, &pass.before)?;
+            let mut points = super::state::FramedPoints::with_capacity(marks.len(), after.len());
+            for (end, kernel) in pass.points.iter() { points.capture(&encoder, end, kernel); }
+            if marks.contains(&(h - 1)) { points.push(h - 1, &before); }
+            let points = points.finish();
+            return Some((Column::f64(pass.values), Some(after), Some(before), points));
         }
     }
-    let state = super::initial_state(df, node, head)?;
+    let head = marks.first().copied().filter(|&mark| mark < head).unwrap_or(head);
+    let mut state = super::initial_state(df, node, head)?;
     let since = df.origin();
     // the head's values in front of the resumed rows, the last row after them
     let head_values = crate::exec::execute(&df.slice_data(0, head), node).ok()?;
     let mut values = Vec::with_capacity(h);
     values.extend(into_f64(head_values));
-    let before = super::resume::resume_into(df, node, &state, head, h - 1, since, &mut values)?;
+    let mut from = head;
+    let mut points = super::state::FramedPoints::with_capacity(marks.len(), state.len());
+    if marks.contains(&head) { points.push(head, &state); }
+    for end in marks.iter().copied().filter(|&end| end > head && end < h - 1) {
+        state = super::resume::resume_into(df, node, &state, from, end, since, &mut values)?;
+        points.push(end, &state);
+        from = end;
+    }
+    let before = super::resume::resume_into(df, node, &state, from, h - 1, since, &mut values)?;
+    if marks.contains(&(h - 1)) { points.push(h - 1, &before); }
     let after = super::resume::resume_into(df, node, &before, h - 1, h, since, &mut values)?;
-    Some((Column::f64(values), Some(after), Some(before)))
+    Some((Column::f64(values), Some(after), Some(before), points.finish()))
 }

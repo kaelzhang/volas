@@ -32,7 +32,7 @@ fn stateful<'a>(node: &'a BoundNode, out: &mut Vec<&'a BoundNode>) {
             stateful(left, out);
             stateful(right, out);
         }
-        Node::Name(_) | Node::Scalar(_) => {}
+        Node::Data(_) | Node::Name(_) | Node::Scalar(_) => {}
     }
     if keeps_state(node) {
         out.push(node);
@@ -98,7 +98,7 @@ fn substitute(node: &BoundNode, done: &[&BoundNode]) -> BoundNode {
             op: *op,
             right: Box::new(substitute(right, done)),
         },
-        Node::Name(_) | Node::Scalar(_) => node.clone(),
+        Node::Data(_) | Node::Name(_) | Node::Scalar(_) => node.clone(),
     }
 }
 
@@ -121,35 +121,59 @@ fn tail(values: &[f64], end: usize, l: usize) -> impl Iterator<Item = f64> + '_ 
 }
 
 /// Append one node's state and its last `l` values (of rows before `end`) to `chain`.
-fn keep(chain: &mut Vec<f64>, state: Vec<f64>, values: &[f64], end: usize, l: usize) {
-    super::state::push_chain(chain, &state, tail(values, end, l));
+fn keep(chain: &mut Vec<f64>, state: &[f64], values: &[f64], end: usize, l: usize) {
+    super::state::push_chain(chain, state, tail(values, end, l));
 }
 
 /// The full computation of the chained `node` over `df`, with its chain as of the last
 /// row and the one before (see the module docs): each `None` while a node has no state
 /// as of that row (still in its warm-up), independently of the other.
 pub(super) fn with_states(df: &DataFrame, node: &Ast) -> volas_core::Result<super::states::WithStates> {
+    let (column, state, before, _) = with_anchors(df, node)?;
+    Ok((column, state, before))
+}
+
+pub(super) fn with_anchors(df: &DataFrame, node: &Ast) -> volas_core::Result<super::states::WithAnchors> {
+    with_marked(df, node, &super::states::marks(df))
+}
+
+pub(super) fn with_marked(df: &DataFrame, node: &Ast, marks: &[usize]) -> volas_core::Result<super::states::WithAnchors> {
     let plan = chain_plan(node);
     let h = df.height();
     let l = h.min(plan.span);
     let prior_l = h.saturating_sub(1).min(plan.span);
     let mut frame = df.clone();
     let (mut after, mut before) = (Some(vec![l as f64]), Some(vec![prior_l as f64]));
+    let mut points = super::state::FramedPoints::with_capacity(marks.len(), 1);
+    for &end in marks { points.push(end, &[end.min(plan.span) as f64]); }
     for (k, own) in plan.nodes.iter().enumerate() {
-        let (col, a, b) = super::states::execute_with_states(&frame, own)?;
+        let (col, a, b, snapshots) = super::states::execute_marked(&frame, own, marks)?;
         let values = into_f64(col);
-        after = after.zip(a).map(|(mut chain, a)| {
-            keep(&mut chain, a, &values, h, l);
+        after = after.zip(a.clone()).map(|(mut chain, a)| {
+            keep(&mut chain, &a, &values, h, l);
             chain
         });
-        before = before.zip(b).map(|(mut chain, b)| {
-            keep(&mut chain, b, &values, h.saturating_sub(1), prior_l);
+        before = before.zip(b.clone()).map(|(mut chain, b)| {
+            keep(&mut chain, &b, &values, h.saturating_sub(1), prior_l);
             chain
+        });
+        let mut snapshot_at = 0;
+        points.transform(|end, chain, words| {
+            let state = if end == h - 1 { b.as_deref() }
+                else {
+                    while snapshots.get(snapshot_at).is_some_and(|(at, _)| *at < end) { snapshot_at += 1; }
+                    snapshots.get(snapshot_at).filter(|(at, _)| *at == end).map(|(_, state)| &**state)
+                };
+            if let Some(state) = state {
+                words.extend_from_slice(chain);
+                keep(words, state, &values, end, end.min(plan.span));
+                true
+            } else { false }
         });
         frame.set_column(&plan.names[k], Column::f64(values))?;
     }
     let top = crate::exec::execute_node(&frame, &plan.top)?;
-    Ok((top, after, before))
+    Ok((top, after, before, points.finish()))
 }
 
 /// The chain of `node` as of `df`'s row `end - 1`.

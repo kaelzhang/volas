@@ -11,6 +11,9 @@ fn supported(node: &Ast) -> bool {
 
 fn columns(node: &BoundNode, names: &mut Vec<String>) {
     match node {
+        Node::Data(n) => {
+            if !names.contains(n) { names.push(n.clone()); }
+        }
         Node::Name(n) if super::as_command(node).is_none() => {
             if !names.contains(n) { names.push(n.clone()); }
         }
@@ -42,7 +45,15 @@ pub fn checkpoint(df: &DataFrame, node: &Ast, state: Option<Vec<f64>>, end: usiz
         columns(node.node(), &mut names);
         names.into_iter().map(|n| Some((n.clone(), df.column(&n).ok()?.slice(0, end)))).collect::<Option<Vec<_>>>()?
     } else { Vec::new() };
-    Some(Checkpoint { at: df.origin() + end - 1, state, raw })
+    Some(Checkpoint { at: df.origin() + end - 1, state: state.map(volas_core::StateWords::from), raw })
+}
+
+/// Form checkpoints from states already published by the computing pass.
+pub fn checkpoints(df: &DataFrame, node: &Ast, states: Vec<(usize, volas_core::StateWords)>) -> Vec<Checkpoint> {
+    if !supported(node) { return Vec::new(); }
+    states.into_iter().filter(|(end, _)| *end > 0 && *end <= df.height()).map(|(end, state)| {
+        Checkpoint { at: df.origin() + end - 1, state: Some(state), raw: Vec::new() }
+    }).collect()
 }
 
 pub fn replay(df: &DataFrame, node: &Ast, cp: &Checkpoint, end: usize) -> Option<(Column, Checkpoint)> {
@@ -52,7 +63,7 @@ pub fn replay(df: &DataFrame, node: &Ast, cp: &Checkpoint, end: usize) -> Option
     if first == end { return Some((Column::f64(Vec::new()), cp.clone())); }
     if let Some(state) = &cp.state {
         let (values, state) = super::execute_resume(df, node, state, first, end, 0)?;
-        return Some((values, Checkpoint { at: df.origin() + end - 1, state: Some(state), raw: Vec::new() }));
+        return Some((values, Checkpoint { at: df.origin() + end - 1, state: Some(state.into()), raw: Vec::new() }));
     }
     let held = cp.raw.first()?.1.len();
     let names: Vec<String> = cp.raw.iter().map(|(n, _)| n.clone()).collect();

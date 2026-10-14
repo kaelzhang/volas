@@ -93,3 +93,20 @@ fn a_window_reads_only_its_rows() {
     assert!(Operands::window(&big, &[], 0).f64(0, "v").is_err());
     assert_eq!(&*Operands::window(&big, &[], 1).f64(0, "v").unwrap(), &[1.0, 2.0]);
 }
+
+#[test]
+fn bound_data_operand_borrows_the_column_and_preserves_missing_facts() {
+    let df = frame();
+    let bound = crate::bind_frame(&parse("ema:2@close").unwrap(), &|n| df.has_column(n), "ema:2@close").unwrap();
+    let crate::types::Node::Command(cmd) = bound.node() else { unreachable!() };
+    let ops = Operands::new(&df, &cmd.series);
+    assert_eq!(&*ops.f64(0, "close").unwrap(), df.column("close").unwrap().as_f64().unwrap());
+    let (_, read) = ops.reads().next().unwrap();
+    assert!(matches!(read.values, Cow::Borrowed(_)));
+    assert!(std::ptr::eq(read.column.unwrap(), df.column("close").unwrap()));
+    let window = Operands::window(&df, &cmd.series, 1);
+    assert_eq!(&*window.f64(0, "close").unwrap(), &[2.0, 3.0]);
+    let (_, read) = window.reads().next().unwrap();
+    assert!(matches!(read.values, Cow::Borrowed(_)));
+    assert!(read.column.is_none());
+}

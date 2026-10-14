@@ -10,7 +10,10 @@ use crate::guard::{NonFiniteRows, RowGuard, Unguarded};
 /// Compute only the requested regression line, using the shared exact sliding fit.
 fn linreg_fit_pass(data: &[f64], period: usize, origin: usize, states: &mut impl crate::pass::StateSink, project: impl Fn(f64, f64) -> f64) -> Vec<f64> {
     let (out, finite) = linreg_fit_with::<Unguarded>(data, period, origin, states, &project);
-    if finite { out } else { linreg_fit_with::<NonFiniteRows>(data, period, origin, states, &project).0 }
+    if finite { out } else {
+        states.restart();
+        linreg_fit_with::<NonFiniteRows>(data, period, origin, states, &project).0
+    }
 }
 
 /// The sliding fit under a row guard (row 0 at absolute position `origin`); also returns
@@ -59,10 +62,9 @@ fn linreg_fit_with<G: RowGuard>(data: &[f64], period: usize, origin: usize, stat
                 (sum_d, sum_ad) = linreg_sums(rows, |y| guard.counts(y.is_finite()));
             }
         }
-        states.record(i, n, || {
-            let mut v = Slide::state([sum_d, sum_ad], guard.bad(), (i + 1).min(period));
-            v.push((origin + i + 1) as f64);
-            v
+        states.record(i, n, |out| {
+            Slide::append_components(out, [sum_d, sum_ad], guard.bad(), (i + 1).min(period));
+            out.push((origin + i + 1) as f64);
         });
         if !full {
             continue;
@@ -192,6 +194,7 @@ pub fn var_pass(data: &[f64], period: usize, origin: usize, states: &mut impl cr
     if finite {
         out
     } else {
+        states.restart();
         rolling_var_with::<NonFiniteRows>(data, period, origin, states).0
     }
 }
@@ -244,7 +247,7 @@ fn rolling_var_with<G: RowGuard>(data: &[f64], period: usize, origin: usize, sta
                 s.sub(t);
             }
         }
-        states.record(i, n, || Slide::state(sums, guard.bad(), origin + i + 1));
+        states.record(i, n, |out| Slide::append_components(out, sums, guard.bad(), origin + i + 1));
         out.set(i, value);
     }
     (out.finish(), finite && sums.iter().all(|s| s.value().is_finite()))
@@ -345,16 +348,17 @@ pub fn correl_pass<S: crate::pass::StateSink>(x: &[f64], y: &[f64], period: usiz
         if full {
             out.set(i, correl_of_sums(&s, k, p));
         }
-        states.record(i, n, || Slide::state(s, 0, origin + i + 1));
+        states.record(i, n, |out| Slide::append_components(out, s, 0, origin + i + 1));
     }
     if clean && s.iter().all(|a| a.value().is_finite()) {
         return out.finish();
     }
+    states.restart();
     // A non-finite row entered: window-local careful path (see `crate::guard`).
     let mut slide = Slide::<5>::at(origin);
     (0..n).map(|i| {
         let v = correl_row(&mut slide, x, y, period, i);
-        states.record(i, n, || { let mut v = vec![0.0; Slide::<5>::STATE]; slide.write_state(&mut v); v });
+        states.record(i, n, |out| slide.append_state(out));
         v
     }).collect()
 }
@@ -449,17 +453,18 @@ pub fn beta_pass<S: crate::pass::StateSink>(x: &[f64], y: &[f64], period: usize,
         for (a, v) in s.iter_mut().zip(beta_terms(ring[(j + 1 - period) % period], k)) {
             a.sub(v);
         }
-        states.record(j + 1, n, || Slide::state(s, 0, origin + j + 1));
+        states.record(j + 1, n, |out| Slide::append_components(out, s, 0, origin + j + 1));
     }
     if clean && s.iter().all(|a| a.value().is_finite()) {
         return out.finish();
     }
+    states.restart();
     // A non-finite return entered: window-local careful path (see `crate::guard`).
     let mut out = crate::buf::OutBuf::warmup(n, period);
     let mut slide = Slide::<4>::at(origin);
     for j in 0..n - 1 {
         let v = beta_row(&mut slide, x, y, period, j);
-        states.record(j + 1, n, || { let mut v = vec![0.0; Slide::<4>::STATE]; slide.write_state(&mut v); v });
+        states.record(j + 1, n, |out| slide.append_state(out));
         if j + 1 >= period {
             out.set(j + 1, v);
         }

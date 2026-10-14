@@ -112,15 +112,81 @@ pub(crate) fn binary_column(op: Op, l: &Column, r: &Column) -> Result<Column> {
             }
         }
     }
+    let crossing = matches!(op, Op::Cross | Op::CrossUp | Op::CrossDown);
     let values = (0..l.len()).map(|i| {
         let a = at(l, i).expect("numeric operand");
         let b = at(r, i).expect("numeric operand");
-        let previous = i.checked_sub(1).and_then(|p| Some((at(l,p)?, at(r,p)?)));
+        let previous = if crossing { i.checked_sub(1).and_then(|p| Some((at(l,p)?, at(r,p)?))) } else { None };
         binary(op, a, b, previous).ok_or_else(|| VolasError::Value("invalid numeric operation".into()))
     });
     if arithmetic {
         Ok(Column::f64(values.map(|v| v.map(|v| v.float().expect("float"))).collect::<Result<_>>()?))
     } else {
         Ok(Column::bool_from_options(values.map(|v| v.map(Value::truth)).collect::<Result<Vec<_>>>()?))
+    }
+}
+
+#[cfg(test)]
+mod traversal_tests {
+    use super::*;
+
+    #[test]
+    fn batch_binary_matches_scalar_owner_for_every_op_and_numeric_type() {
+        let columns = [
+            Column::f64(vec![f64::NAN, -0.0, 0.0, -1.0, 2.0, f64::INFINITY]),
+            Column::f32(vec![f32::NAN, 0.0, 1.0, f32::NEG_INFINITY, 2.0, -0.0]),
+            Column::i64_from_options(vec![Some(i64::MAX), None, Some(9_007_199_254_740_993), Some(-9_007_199_254_740_993), Some(i64::MIN), Some(0)]),
+            Column::i64(vec![0, -1, 2, 1, 9_007_199_254_740_992, -9_007_199_254_740_992]),
+            Column::i32(vec![0, -1, 2, i32::MAX, i32::MIN, 1]),
+            Column::bool_from_options(vec![Some(true), None, Some(false), Some(true), Some(false), Some(true)]),
+        ];
+        for left in &columns {
+            for right in &columns {
+                for op in [Op::Lt, Op::Le, Op::Eq, Op::Ne, Op::Ge, Op::Gt, Op::CrossUp, Op::CrossDown,
+                    Op::Cross, Op::Add, Op::Sub, Op::Mul, Op::Div, Op::And, Op::Or, Op::Xor] {
+                    for (start, end) in [(0, 0), (0, 1), (0, 6), (2, 6)] {
+                        let l = left.slice(start, end);
+                        let r = right.slice(start, end);
+                        let expected: Vec<_> = (0..l.len()).map(|i| {
+                            let previous = i.checked_sub(1).and_then(|p| Some((at(&l, p)?, at(&r, p)?)));
+                            binary(op, at(&l, i).unwrap(), at(&r, i).unwrap(), previous)
+                        }).collect();
+                        let actual = binary_column(op, &l, &r);
+                        if expected.iter().any(Option::is_none) { assert!(actual.is_err()); continue; }
+                        let actual = actual.unwrap();
+                        for (i, expected) in expected.into_iter().enumerate() {
+                            let expected = expected.unwrap();
+                            if matches!(op, Op::Add | Op::Sub | Op::Mul | Op::Div) {
+                                assert_eq!(actual.get_f64(i).to_bits(), expected.float().unwrap().to_bits(), "{op:?}, row{i}, range{start}..{end}");
+                            } else {
+                                let truth = expected.truth();
+                                assert_eq!(actual.is_valid(i), truth.is_some());
+                                if let Some(truth) = truth { assert_eq!(actual.get_f64(i), f64::from(u8::from(truth))); }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn crossings_keep_the_prior_row_and_exact_integer_boundary() {
+        let l = Column::i64(vec![0, 9_007_199_254_740_993, 0]);
+        let r = Column::f64(vec![9_007_199_254_740_992.0; 3]);
+        for (op, middle, last) in [(Op::Cross, true, true), (Op::CrossUp, true, false), (Op::CrossDown, false, true)] {
+            let result = binary_column(op, &l, &r).unwrap();
+            assert_eq!(result.is_valid(0), op == Op::CrossUp);
+            if op == Op::CrossUp { assert_eq!(result.get_f64(0), 0.0); }
+            assert_eq!(result.get_f64(1), f64::from(u8::from(middle)));
+            assert_eq!(result.get_f64(2), f64::from(u8::from(last)));
+            let slice = binary_column(op, &l.slice(1, 3), &r.slice(1, 3)).unwrap();
+            // A slice starts a new traversal and must not read outside its boundary.
+            if op != Op::CrossDown { assert!(!slice.is_valid(0)); }
+        }
+        let missing = Column::f64(vec![f64::NAN; 3]);
+        for op in [Op::Add, Op::Sub, Op::Mul, Op::Div] {
+            assert!(binary_column(op, &l, &missing).is_err());
+        }
     }
 }

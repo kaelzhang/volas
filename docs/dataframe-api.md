@@ -64,10 +64,12 @@ Which gets the 2-period simple moving average on column `"close"`.
   - a **dict** mapping each column name to an equal-length list or NumPy array
     (`float`, `int`, `bool`, `datetime64`, or `string`); a NumPy **masked array**'s
     masked cells become `volas.NA`;
-  - another volas **`DataFrame`**, which is then copied (like `pandas.DataFrame(df)`).
-    A tf-aware source re-labelled (`index=`) or re-typed (`dtype=`) gives the tf-aware
-    frame of its new rows, the last one the forming bar (see
-    [Writing to a time-frame frame](cumulation.md#writing-to-a-time-frame-frame)).
+  - another volas **`DataFrame`**, which is then copied (like `pandas.DataFrame(df)`):
+    `DataFrame(df)` is `df.copy()` — its cached directive columns, a bounded window and
+    a time-frame state included. Re-labelled (`index=`) or re-typed (`dtype=`), it is a
+    new series of the source's visible data columns (see [Derived frames](#derived-frames));
+    a tf-aware source gives the tf-aware frame of its new rows, the last one the forming
+    bar (see [Writing to a time-frame frame](cumulation.md#writing-to-a-time-frame-frame)).
 
   The constructor does **not** accept a `pandas.DataFrame` or an Arrow object — bridge
   those with the dedicated [`DataFrame.from_pandas`](#dataframefrom_pandaspdf---dataframe) /
@@ -76,12 +78,20 @@ Which gets the 2-period simple moving average on column `"close"`.
   parse a column with `to_datetime`, promote it with `set_index`, then tag a zone with
   `tz_localize` / `tz_convert`. See [Timezones](cumulation.md#timezones).
 - **columns** `Optional[list[str]] = None` Select and order the columns to keep —
-  the same projection as `df[[...]]` (a stale cached directive column is refreshed
-  first; a bounded-window source gives its visible rows). A name not present raises
-  `KeyError` (a directive is never computed here); an empty list or a duplicate name
-  is rejected, and an absent column is never silently filled. With `index=`, `dtype=`
+  the same projection as `df[[...]]` (see [Derived frames](#derived-frames)): the same
+  rows, each listed cached directive column as a data column of its values (a stale one
+  is refreshed first), never continued; a bounded-window source gives its visible rows. A name not present raises
+  `KeyError` (a directive is never computed here; a cached one is found by any
+  spelling of its directive); a duplicate name is rejected, an empty list keeps no
+  column, and an absent column is never silently filled. With `index=`, `dtype=`
   or `window=`, a source `DataFrame` is read like any bulk read: it raises while one
   of its cached directive columns is stale.
+- **index** `Optional[list | np.ndarray] = None` Row labels (int64, string or datetime),
+  one per row. A label names one row: a repeated label raises `ValueError`, consecutive
+  or not (`NaT` is no label); `set_index`, `read_csv(index_col=...)` and
+  `DataFrame.from_pandas` label a frame the same way. Bars sent again (the same
+  timestamp twice) are fed to a frame with `append`, where a row labelled like the last
+  one replaces it, or to a time-frame frame, whose fold keeps the last of them.
 - **time_frame** `Optional[str | TimeFrame] = None` If set, makes this a
   **tf-aware** (cumulating) DataFrame at this bar interval: the given rows are bars
   at that frame, each labelled with its **period start**, and the last one is the
@@ -203,8 +213,7 @@ for a new column.
 
 A frame built from a tail of another (`DataFrame(df.iloc[-50:], window=..., ...)`) keeps a
 recursion that tail carries in a state, from that state: it is exact on append. Its
-history before the tail is not there, so after a write to a visible row the frame cannot
-recompute it and the read raises.
+checkpoint and lead retain the history needed to replay a visible write exactly.
 
 #### `ready` — has the window warmed up?
 
@@ -545,19 +554,74 @@ df.is_computed('close')                                 # False
 raw = [c for c in df.columns if not df.is_computed(c)]  # ['open', 'high', 'low', 'close', 'volume']
 ```
 
-A contiguous slice (`df.iloc[a:b]`, `df.loc[...]`, `head` / `tail`) keeps a cached column
-cached only when it can continue it exactly: the slice keeps the rows the column needs
-(its continuation reach), and a column with a recursion anywhere in its directive (EMA,
-Wilder smoothing, SAR, a cumulative line, …) either carries its resume state into the
-slice or the slice starts at the column's first row. Otherwise the slice keeps the
-column's values as plain data (`is_computed` is `False`), never a re-warmed recursion.
-This is the current behaviour; continuing such a column across a middle slice by
-replaying its history is planned. A slice that carried a recursion's state continues it
-on append, but cannot recompute it once a write discards that state (it does not hold
-the rows the history started on): its next refresh raises. A bounded window's own drop
-of its head is not a slice: its cached columns stay cached, a recursion with the
-checkpoint of its history (see
-[What a bounded window computes](#bounded-rolling-window)).
+How a derived frame keeps the cached columns of its source is stated in
+[Derived frames](#derived-frames).
+
+### Derived frames
+
+A frame derived from another either **continues its series** or **starts a new one**:
+
+- A **contiguous row selection** — the rows `[a, b)` in order, however it is written:
+  `df.iloc[a:b]`, `df[a:b]`, `df.loc[lo:hi]` (a partial date string too), `df.loc['2024-01']`
+  on an increasing index, `head` / `tail`, `iloc[a:b, :]` / `loc[lo:hi, cols]`, a boolean
+  mask or position list that selects consecutive rows, `drop` of the rows around them,
+  `dropna` removing a warm-up — continues the series. Every cached directive column stays
+  cached with its values, and an `append`, a re-sent last row or a `fulfill` continues it
+  bit for bit as the source would have — and so does a selection of a selection. For a
+  recursion carried by its state (EMA, Wilder smoothing, SAR, a cumulative line, …) the
+  selection keeps the nearest checkpoint of its history before its first row and the
+  state at its last (the source's own for a selection ending at its last row, else
+  computed the first time the column continues, from the nearest anchor before it); it
+  keeps the data rows before its
+  first row that its columns read — back to that checkpoint — however short it is (a
+  missing row there counts as the recursion skips it). After a write, every column is
+  recomputed from those, exactly as the source would recompute it. Every recursion,
+  including recursive moving-average types and expressions combining recursive nodes,
+  carries the continuation owner's state: kernel state, complete input tail, and any
+  node output rings. Slices retain their required checkpoint and input tail rather
+  than the entire raw prefix.
+
+  A recursion's checkpoints — its **anchors** — are kept every 512 rows of its history,
+  formed by the computation that passes them (caching or recomputing the column over its
+  whole history). A selection keeps the nearest one before its first row together with
+  the rows after it, so taking it replays nothing; the first `append` or `fulfill` of a
+  selection ending before its source's last row replays its last states from the
+  nearest anchor, at most 512 rows per recursive column.
+- A **column projection** — `df[[...]]`, `DataFrame(df, columns=[...])`, `df.loc[:, [...]]`
+  — keeps the rows and only the columns it lists, each a **data column**: a
+  listed cached directive column keeps its values exactly as the source shows them (under
+  its canonical name: `df[['close', 'ma:05']]` gives `['close', 'ma:5']`) and is never
+  continued afterwards — even when the projection also holds the directive's inputs. An
+  `append` treats it like any data column: a bar without it leaves it missing, a bar with
+  it gives that value. An unlisted cached column is dropped, and the projection keeps no
+  history before its rows.
+- A **column removal** — `drop(axis=1)` — removes the columns it names and keeps everything
+  else as it is: the remaining cached columns stay cached and continue, and the rows only
+  the removed ones read before the first row are released.
+- **Every other derivation is a new series**: a selection of rows that are not consecutive
+  or not in order (a mask with gaps, `iloc[[0, 2, 5]]`, `sort_index(ascending=False)`,
+  `nlargest`), `astype`, `rename`, `set_index` / `reset_index`, a new `index=` or `dtype=`,
+  `tz_localize` / `tz_convert`, and every **value transform** that builds a frame from
+  the cells (`fillna`, `ffill` / `bfill`, `isna` / `notna`, `round`, `abs`, `clip`,
+  `cumsum` / `cummax` / `cummin` / `cumprod`, `diff`, `shift`, `rank`, `isin`, `replace`,
+  `interpolate`, `where` / `mask`, `df == x` / `df != x`, the `rolling` / `expanding` /
+  `ewm` aggregations). A value transform reads every column as a projection gives it: a
+  cached column's transformed values are a plain data column under its name, never
+  continued. A cached column read as a Series (`df['ma:5']`) is its values: `to_frame()` /
+  `reset_index()` make it a data column. The other derivations above hold the source's
+  data columns only: a cached column is dropped, and requested again it is computed from
+  the new frame's own rows. A 2-D
+  selection of rows that are not consecutive (`df.loc[mask, cols]`) naming a cached column
+  raises `KeyError` — read its values as a Series, `df.loc[mask, 'ma:5']`.
+- `copy()` / `DataFrame(df)` copy everything.
+
+A derivation of a frame whose cached columns are stale raises, like any bulk read (call
+`fulfill()` first); `copy()` proceeds. A derived frame of a bounded window is an unbounded
+frame of its visible rows (its hidden margin serves as the rows before them); a
+time-frame frame's model is kept where the result is still a frame of its bars (see
+[Live cumulation](#live-cumulation--a-tf-aware-dataframe)). A bounded window's own drop of
+its head is not a derivation: its cached columns stay cached, a recursion with the
+checkpoint of its history (see [What a bounded window computes](#bounded-rolling-window)).
 
 ### df.to_numpy(dtype=None, na_value=...) -> np.ndarray
 
@@ -700,44 +764,8 @@ df.to_csv(index=False, columns=['open', 'high', 'low', 'close', 'volume'])
 
 ### Series
 
-`df[col]` and `df[directive]` return a `Series` — a named 1-D column whose API is
-pandas-compatible: arithmetic / comparison / logical operators, `.sum()` /
-`.mean()` / `.std()` / …, `.shift()` / `.diff()` / `.fillna()`, `.iloc` /
-`.loc`, `.to_numpy()` / `.to_list()`. See
-[the rest of the pandas-compatible API](pandas-compatibility.md#the-rest-of-the-pandas-compatible-api)
-for the full list. There is no public `Series` constructor — a `Series` is
-always obtained by indexing a `DataFrame`.
-
-```py
-s = df['close']
-s.name                 # 'close'
-(s - s.shift(1)).mean()
-df['ma:5 > ma:20']     # a directive likewise returns a Series (here a bool one)
-```
-
-Beyond pandas, a `Series` also exposes the 15 TA-Lib **Math Transform** functions
-as methods — `acos` `asin` `atan` `ceil` `cos` `cosh` `exp` `floor` `ln`
-`log10` `sin` `sinh` `sqrt` `tan` `tanh`:
-
-```py
-df['close'].ln()
-df['high'].sqrt()
-```
-
-A `datetime64[ns]` Series exposes the pandas `.dt` accessor: calendar
-components (`year` `month` `day` `hour` `minute` `second` `microsecond`
-`nanosecond` `quarter` `dayofweek` `dayofyear` `days_in_month`), calendar
-predicates (`is_month_start` … `is_year_end`, `is_leap_year`), names
-(`day_name()` / `month_name()`), formatting (`strftime(fmt)`), bar alignment
-(`floor(freq)` / `ceil(freq)` / `round(freq)` / `normalize()`), and
-`isocalendar()`. A missing element yields `NA` in every component:
-
-```py
-t = volas.to_datetime(df['time'])
-t.dt.hour                  # int64 Series, 0..23
-t.dt.dayofweek             # Monday=0 .. Sunday=6
-t.dt.floor('15min')        # datetime Series aligned to the 15-minute bar
-```
+`df[col]` and `df[directive]` return a named 1-D `Series`. See the
+[Series API](series-api.md) for operators, datetime access, and export methods.
 
 `dt.strftime(fmt)` applies the same format language as `Timestamp.strftime(fmt)`.
 `%f` writes six fractional digits; `%.f` writes the nonzero fraction in groups of
@@ -745,86 +773,15 @@ three digits, up to nanoseconds. Missing values stay `NA`. Format errors are
 reported when formatting the first present value; an empty or all-NaT Series
 returns its empty or missing result.
 
-### Series.from_arrow(data, name=None, copy=True) -> Series
-
-Builds a `Series` from the Arrow **C-Data** protocol (`__arrow_c_array__`):
-`pyarrow.Array`, polars `Series`, etc. Imports form owned snapshots with a fresh
-`RangeIndex`; malformed arrays raise `ValueError`, as in [`DataFrame.from_arrow`](#dataframefrom_arrowdata-copytrue---dataframe).
-
-- **data** the Arrow source — any object implementing `__arrow_c_array__`.
-- **name?** `str | None = None` the name for the resulting `Series`.
-- **copy** keyword-only `bool = True`. `False` opts into borrowing under the same producer-immutability precondition as `DataFrame.from_arrow`; conversion layouts still copy.
-
-```py
-s = Series.from_arrow(pa_array, name='close')   # pyarrow.Array -> Series
-```
+See {ref}`Series Arrow import <series-from-arrow>`.
 
 ### series.to_numpy(dtype=None, na_value=...) -> np.ndarray
 
-The column values as a 1-D NumPy array — `pandas.Series.to_numpy` semantics:
-
-- **dtype** `str | None` — an optional export cast. `None` (the default) gives the
-  column's native representation; otherwise any NumPy dtype string accepted by
-  `numpy.ndarray.astype`, the common values being:
-  - `'int64'`, `'int32'`, `'int16'`, `'int8'` (and the unsigned `'uint64'`, `'uint32'`,
-    `'uint16'`, `'uint8'`) — integer. Over a column with missing values this **raises**
-    unless `na_value` is given (an NA has no integer representation).
-  - `'float64'`, `'float32'`, `'float16'` — floating point; a missing cell is `NaN`.
-  - `'bool'` — boolean. Over a column with missing values this **raises** unless
-    `na_value` is given (an NA has no boolean representation).
-  - `'datetime64[ns]'` — datetime nanoseconds; a missing cell is `NaT`.
-  - `'object'` (or `'O'`) — Python objects, each cell its own typed value (lossless).
-- **na_value** `Any` — the value to substitute for each missing cell. Default: the
-  NA-model representation (`NaN` for the float export, `None` in an object array). With
-  an explicit integer `dtype`, the values stay **exact** (a large int is not funnelled
-  through `float64`) and the holes become `na_value`.
-
-```py
-series = DataFrame({'qty': [1, None, 3]})['qty']    # int64 with a missing value
-
-series.to_numpy()                          # -> array([ 1., nan,  3.])   (float64; a missing int -> NaN)
-series.to_numpy(dtype='int64', na_value=0) # -> array([1, 0, 3])         (int64; NA filled, dtype kept)
-series.to_numpy(na_value=-1)               # -> array([ 1., -1.,  3.])   (default float export, NA -> -1)
-
-# without na_value, an integer dtype over a missing value raises
-series.to_numpy(dtype='int64')
-# ValueError: cannot convert a column with missing values to integer NumPy dtype 'int64' ...
-```
-
-Notes:
-- The default (no `dtype`, no `na_value`) is the dtype-specific export: a missing
-  int / datetime cell collapses to `NaN` / `NaT` (NumPy has no `NA`), while a dense
-  column keeps its native dtype. A **bool** column with a missing cell has no default
-  export and **raises** — a `nan` / `None` placeholder would be read as `True` /
-  `False` by `np.where` or boolean indexing; pass `na_value=` (e.g. `False`, a bool
-  array), `dtype='float64'` (`NaN`) or `dtype='object'` (`volas.NA`). The same rule
-  covers `np.asarray(series)` and `df.exec(directive, dtype=..., na_value=...)`. A float `NaN` is in-band, so a float column
-  cast to an integer dtype likewise raises when any value is `NaN` (pass `na_value`).
-- Like pandas, `na_value` only changes the missing cells — without an explicit `dtype`
-  an int column with NA still exports `float64` (the default), and `na_value` simply
-  fills the `NaN` slots.
-- For a **lossless** NA round-trip that keeps the native dtype *and* the missing
-  positions (no fill, no float collapse), use the Arrow path (`series.to_arrow()` carries
-  the null bitmap) or `series.to_pandas(dtype_backend='numpy_nullable')`; the NA mask
-  alone is `series.isna().to_numpy()`.
+See {ref}`Series NumPy export <series-to-numpy>`.
 
 ### series.to_arrow() -> pyarrow.Array
 
-A **volas-specific** export of the column to a `pyarrow.Array`, **zero-copy** where
-the dtype matches (the numeric / string / datetime buffer is shared; `bool` and the
-null bitmap are repacked). Requires `pyarrow` (imported lazily). It is a convenience
-over volas's Arrow **C-Data** bridge: any Arrow consumer can read the series directly
-through the standard `__arrow_c_array__` PyCapsule protocol.
-
-```py
-import pyarrow as pa
-arr = series.to_arrow()    # -> pyarrow.Array (shares the buffer)
-arr = pa.array(series)     # identical, via the __arrow_c_array__ protocol
-```
-
-Returns a `pyarrow.Array`. The column also exports zero-copy to NumPy / PyTorch / JAX
-via DLPack (`np.from_dlpack(series)`) — see
-[Arrow & DLPack interop](interop.md#arrow--dlpack-interop-zero-copy).
+See {ref}`Series Arrow export <series-to-arrow>`.
 
 ### Row
 
@@ -876,6 +833,16 @@ its last row is their cumulation. On a tf-aware frame:
   `5m→15m`, not `5m→7m`; a week or 3-day bar does not nest into a month/year);
   at the same time frame it re-aggregates the current data rows with the requested
   cumulators (see [Cumulation](cumulation.md)).
+- **A derived frame of the same bars stays tf-aware.** A selection ending at the forming
+  row (`df.iloc[a:]`, `df.tail(n)`, `df.loc[t:]`) keeps the open period, so the next finer
+  bar still folds into it; a projection and `rename` (each column keeps its aggregator)
+  keep it too; `tz_localize` / `tz_convert` keep it while every bar is still a period of
+  the grid in the new zone. Any other selection of bars in time order (one ending before
+  the forming row, a mask), `astype`, `set_index` and a new `index=` / `dtype=` give the
+  tf-aware frame of the resulting bars, the last one forming, as
+  `DataFrame(bars, time_frame=...)` builds it. Rows out of time order, a
+  non-datetime index, or bars that are no longer periods of the grid in the new zone (day
+  bars of `Asia/Shanghai` seen in `UTC`) give a plain frame.
 
 ```py
 df = history.cumulate('5m')   # a tf-aware 5m frame (history is finer, e.g. 1m)

@@ -139,7 +139,7 @@ fn set_column_replacing_with_a_nan_column() {
 fn slicing_and_selecting_keep_the_fact_right() {
     let df = known_clean();
     assert_eq!(x(&df.slice_data(0, 2)).known_has_nan(), Some(false));
-    assert_eq!(x(&df.slice(1, 3)).known_has_nan(), Some(false));
+    assert_eq!(x(&df.rows(1, 3, &super::derive::NoReplay)).known_has_nan(), Some(false));
     assert_eq!(
         x(&df.select(&["x".into()]).unwrap()).known_has_nan(),
         Some(false)

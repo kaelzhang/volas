@@ -7,9 +7,7 @@ use numpy::PyReadonlyArray1;
 use pyo3::exceptions::{PyKeyError, PyOverflowError, PyTypeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::{PyList, PySlice, PySliceIndices, PyString, PyTuple};
-use volas_core::{
-    Column, DType, DataFrame, Index, IndexKind, Label, Series, SliceBound,
-};
+use volas_core::{Column, DType, DataFrame, Index, IndexKind, Label, Series, SliceBound};
 
 #[allow(unused_imports)]
 use crate::*;
@@ -46,10 +44,16 @@ pub(crate) fn is_array(v: &Bound<'_, PyAny>) -> bool {
     {
         return false; // the live bar cells: no attribute lookup
     }
-    if v.is_instance_of::<PyList>() || v.is_instance_of::<PyTuple>() || v.extract::<PyRef<PySeries>>().is_ok() {
+    if v.is_instance_of::<PyList>()
+        || v.is_instance_of::<PyTuple>()
+        || v.extract::<PyRef<PySeries>>().is_ok()
+    {
         return true;
     }
-    v.getattr("ndim").ok().and_then(|n| n.extract::<usize>().ok()).is_some_and(|n| n >= 1)
+    v.getattr("ndim")
+        .ok()
+        .and_then(|n| n.extract::<usize>().ok())
+        .is_some_and(|n| n >= 1)
 }
 
 /// Build a length-1 [`Column`] of EXACTLY the `target` dtype from a Python scalar
@@ -74,9 +78,9 @@ pub(crate) fn scalar_to_column(v: &Bound<'_, PyAny>, target: DType) -> PyResult<
         )));
     }
     match target {
-        DType::F64 | DType::F32 | DType::I64 | DType::I32 => {
-            number_column(v, target)?.convert_lossless(target).map_err(pyerr)
-        }
+        DType::F64 | DType::F32 | DType::I64 | DType::I32 => number_column(v, target)?
+            .convert_lossless(target)
+            .map_err(pyerr),
         DType::Bool => {
             let b = v
                 .extract::<bool>()
@@ -117,7 +121,9 @@ fn number_column(v: &Bound<'_, PyAny>, target: DType) -> PyResult<Column> {
             return Ok(Column::i64(vec![i]));
         }
         if !target.is_float() {
-            return Err(PyOverflowError::new_err(format!("{idx} is out of the {target} range")));
+            return Err(PyOverflowError::new_err(format!(
+                "{idx} is out of the {target} range"
+            )));
         }
         let f = idx
             .extract::<f64>()
@@ -166,7 +172,11 @@ pub(crate) fn value_to_column(v: &Bound<'_, PyAny>) -> PyResult<Column> {
 
 /// Resolve a `df[...] = value` right-hand side for `n` selected rows: a scalar is
 /// broadcast (length-1 column), an array-like must match `n`.
-pub(crate) fn resolve_assignment(v: &Bound<'_, PyAny>, target: DType, n: usize) -> PyResult<Column> {
+pub(crate) fn resolve_assignment(
+    v: &Bound<'_, PyAny>,
+    target: DType,
+    n: usize,
+) -> PyResult<Column> {
     if is_array(v) {
         let col = value_to_column(v)?;
         if col.len() != n {
@@ -183,10 +193,7 @@ pub(crate) fn resolve_assignment(v: &Bound<'_, PyAny>, target: DType, n: usize) 
 
 /// If `sel` is a boolean mask of length `height` (NumPy bool array, bool `Series`,
 /// or `list[bool]`), return the selected row positions; else `None`.
-pub(crate) fn as_bool_mask(
-    sel: &Bound<'_, PyAny>,
-    height: usize,
-) -> PyResult<Option<Vec<usize>>> {
+pub(crate) fn as_bool_mask(sel: &Bound<'_, PyAny>, height: usize) -> PyResult<Option<Vec<usize>>> {
     let collect = |bits: &[bool]| -> Option<Vec<usize>> {
         (bits.len() == height).then(|| {
             bits.iter()
@@ -275,7 +282,11 @@ impl<'a> Labels<'a> {
 
 /// Resolve a `loc` row selector (bool-mask / label-slice / label / label-list) to
 /// row positions.
-pub(crate) fn loc_positions(sel: &Bound<'_, PyAny>, labels: &Labels<'_>, height: usize) -> PyResult<Vec<usize>> {
+pub(crate) fn loc_positions(
+    sel: &Bound<'_, PyAny>,
+    labels: &Labels<'_>,
+    height: usize,
+) -> PyResult<Vec<usize>> {
     if let Some(pos) = as_bool_mask(sel, height)? {
         return Ok(pos);
     }
@@ -300,11 +311,26 @@ pub(crate) enum AxisSel {
 
 /// Resolve an `iloc` row axis: a bare int reduces the axis (`AxisSel::One`); a
 /// slice / int-list / boolean mask keeps it (`AxisSel::Many`).
-pub(crate) fn iloc_row_axis(sel: &Bound<'_, PyAny>, height: usize) -> PyResult<AxisSel> {
+pub(crate) fn iloc_row_axis(sel: &Bound<'_, PyAny>, height: usize) -> PyResult<RowAxis> {
     if let Ok(i) = sel.extract::<isize>() {
-        return Ok(AxisSel::One(norm_idx(i, height)?));
+        return Ok(RowAxis::One(norm_idx(i, height)?));
     }
-    Ok(AxisSel::Many(iloc_positions(sel, height)?))
+    if let Ok(slice) = sel.downcast::<PySlice>() {
+        return Ok(RowAxis::Rows(positional_slice(
+            &slice.indices(height as isize)?,
+        )));
+    }
+    Ok(RowAxis::Rows(RowSel::Positions(iloc_positions(
+        sel, height,
+    )?)))
+}
+
+/// The row axis of a 2-D `iloc` / `loc` get: a single row (the axis is reduced away,
+/// pandas-style) or a selection of rows (the axis is kept) — a range staying a range,
+/// so the one derivation decides it as the 1-D forms do.
+pub(crate) enum RowAxis {
+    One(usize),
+    Rows(RowSel),
 }
 
 /// Resolve an `iloc` column axis (int / slice / int-list) to column positions.
@@ -328,16 +354,52 @@ pub(crate) fn iloc_col_axis(sel: &Bound<'_, PyAny>, width: usize) -> PyResult<Ax
     ))
 }
 
-/// Resolve a `loc` row axis: a single label reduces the axis (`AxisSel::One`); a
-/// label-slice / label-list / boolean mask keeps it (`AxisSel::Many`).
-pub(crate) fn loc_row_axis(sel: &Bound<'_, PyAny>, labels: &Labels<'_>, height: usize) -> PyResult<AxisSel> {
-    if as_bool_mask(sel, height)?.is_some()
-        || sel.downcast::<PySlice>().is_ok()
-        || sel.downcast::<PyList>().is_ok()
-    {
-        return Ok(AxisSel::Many(loc_positions(sel, labels, height)?));
+/// Resolve a `loc` row axis over `index`: a single label reduces the axis
+/// (`RowAxis::One`); a label slice, a year / month string (its period), a label list or
+/// a boolean mask keeps it (`RowAxis::Rows`).
+pub(crate) fn loc_row_axis(
+    sel: &Bound<'_, PyAny>,
+    index: &Index,
+    height: usize,
+) -> PyResult<RowAxis> {
+    if let Ok(slice) = sel.downcast::<PySlice>() {
+        return Ok(RowAxis::Rows(label_rows(index, slice)?));
     }
-    Ok(AxisSel::One(labels.locate(sel)?))
+    let labels = Labels::whole(index);
+    if as_bool_mask(sel, height)?.is_some() || sel.downcast::<PyList>().is_ok() {
+        return Ok(RowAxis::Rows(RowSel::Positions(loc_positions(
+            sel, &labels, height,
+        )?)));
+    }
+    if let Some(period) = period_rows(sel, index)? {
+        return Ok(RowAxis::Rows(period));
+    }
+    Ok(RowAxis::One(labels.locate(sel)?))
+}
+
+/// The rows a year or a month string selects on a datetime index — its whole period
+/// (pandas partial-string indexing); `None` for any other key. A period no row falls in
+/// is a `KeyError`.
+pub(crate) fn period_rows(key: &Bound<'_, PyAny>, index: &Index) -> PyResult<Option<RowSel>> {
+    let (IndexKind::Datetime(_, tz), Ok(text)) = (index.kind(), key.extract::<String>()) else {
+        return Ok(None);
+    };
+    let Some((lo, hi, _)) = tz.period_of_text(&text).filter(|p| p.2 <= 2) else {
+        return Ok(None);
+    };
+    let positions: Vec<usize> = (0..index.len())
+        .filter(|&i| {
+            index
+                .label_at(i)
+                .as_i64()
+                .is_some_and(|ns| ns >= lo && ns < hi)
+        })
+        .collect();
+    if positions.is_empty() {
+        return Err(PyKeyError::new_err(format!("label {text:?} not found")));
+    }
+    // contiguous on an increasing index: the selection continues
+    Ok(Some(RowSel::Positions(positions)))
 }
 
 /// Resolve a `loc` column axis (name / name-list / inclusive name-slice) to
@@ -385,14 +447,23 @@ pub(crate) fn project_cols(df: &DataFrame, cols: &[usize]) -> PyResult<DataFrame
 }
 
 /// Build a 2-D `iloc` / `loc` get result from already-resolved row & column
-/// positions, reproducing pandas's shape rules: scalar×scalar -> cell,
-/// rows×col -> a column Series, row×cols -> the row (volas's 1-row frame), and
-/// rows×cols -> a sub-frame.
-pub(crate) fn select_2d(py: Python<'_>, df: &DataFrame, rows: AxisSel, cols: AxisSel) -> PyResult<Py<PyAny>> {
+/// positions of the visible rows of `pf` (`view`), reproducing pandas's shape rules:
+/// scalar×scalar -> cell, rows×col -> a column Series, row×cols -> the row (volas's
+/// 1-row frame) — reads of values — and rows×cols -> a sub-frame: the derived frame of
+/// those rows ([`PyDataFrame::derive_rows`]) projected onto those columns. Rows that are
+/// not contiguous are a new series, which carries no cached column: naming one raises.
+pub(crate) fn select_2d(
+    py: Python<'_>,
+    pf: &PyDataFrame,
+    view: &Fresh<'_>,
+    rows: RowAxis,
+    cols: AxisSel,
+) -> PyResult<Py<PyAny>> {
+    let df: &DataFrame = view;
     match (rows, cols) {
-        (AxisSel::One(i), AxisSel::One(j)) => Ok(np_scalar_to_py(py, &df.columns()[j], i)),
-        (AxisSel::Many(r), AxisSel::One(j)) => {
-            let sub = project_cols(df, &[j])?.take(&r);
+        (RowAxis::One(i), AxisSel::One(j)) => Ok(np_scalar_to_py(py, &df.columns()[j], i)),
+        (RowAxis::Rows(r), AxisSel::One(j)) => {
+            let sub = project_cols(df, &[j])?.take(&r.positions());
             let name = sub.names()[0].clone();
             let col = sub.columns()[0].clone();
             let series = PySeries {
@@ -400,13 +471,24 @@ pub(crate) fn select_2d(py: Python<'_>, df: &DataFrame, rows: AxisSel, cols: Axi
             };
             Ok(Py::new(py, series)?.into_any())
         }
-        (AxisSel::One(i), AxisSel::Many(c)) => {
+        (RowAxis::One(i), AxisSel::Many(c)) => {
             let sub = project_cols(df, &c)?.take(&[i]);
             Ok(Py::new(py, PyRow { inner: sub })?.into_any())
         }
-        (AxisSel::Many(r), AxisSel::Many(c)) => {
-            let sub = project_cols(df, &c)?.take(&r);
-            Ok(Py::new(py, PyDataFrame::plain(sub))?.into_any())
+        (RowAxis::Rows(sel), AxisSel::Many(c)) => {
+            let names: Vec<String> = c.iter().map(|&j| df.names()[j].clone()).collect();
+            let rows = pf.derive_rows(view, &sel)?;
+            if let Some(cached) = names
+                .iter()
+                .find(|n| df.is_computed(n) && !rows.inner.has_column(n))
+            {
+                return Err(uncarried_cached(cached));
+            }
+            if names.as_slice() == rows.inner.names() {
+                return Ok(Py::new(py, rows)?.into_any());
+            }
+            let inner = rows.inner.select(&names).map_err(pyerr)?;
+            Ok(Py::new(py, rows.derive_projection(inner)?)?.into_any())
         }
     }
 }
@@ -448,21 +530,19 @@ impl DataFrameILoc {
             if tup.len() == 2 {
                 let rows = iloc_row_axis(&tup.get_item(0)?, df.height())?;
                 let cols = iloc_col_axis(&tup.get_item(1)?, df.width())?;
-                return select_2d(py, df, rows, cols);
+                return select_2d(py, &pf, &view, rows, cols);
             }
         }
         if let Ok(i) = key.extract::<isize>() {
             let i = norm_idx(i, df.height())?;
             return Ok(Py::new(py, row_at(df, i))?.into_any());
         }
-        if let Ok(slice) = key.downcast::<PySlice>() {
-            let info = slice.indices(df.height() as isize)?;
-            let sub = positional_slice(df, &info);
-            return Ok(Py::new(py, PyDataFrame::plain(sub))?.into_any());
-        }
-        // int-list / boolean-mask row selection -> sub-frame.
-        let positions = iloc_positions(key, df.height())?;
-        Ok(Py::new(py, PyDataFrame::plain(take_frame(df, &positions)))?.into_any())
+        let sel = match key.downcast::<PySlice>() {
+            Ok(slice) => positional_slice(&slice.indices(df.height() as isize)?),
+            // int-list / boolean-mask row selection
+            Err(_) => RowSel::Positions(iloc_positions(key, df.height())?),
+        };
+        Ok(Py::new(py, pf.derive_rows(&view, &sel)?)?.into_any())
     }
 
     /// `df.iloc[i, j] = scalar` or `df.iloc[rows, j] = scalar | array` (positional;
@@ -494,33 +574,32 @@ pub(crate) fn row_at(df: &DataFrame, i: usize) -> PyRow {
     }
 }
 
-pub(crate) fn take_frame(df: &DataFrame, positions: &[usize]) -> DataFrame {
-    df.take(positions)
-}
-
-/// A positional slice: a contiguous `step == 1` slice uses `DataFrame::slice` (a
-/// contiguous copy); a strided slice gathers the individual positions.
-pub(crate) fn positional_slice(df: &DataFrame, info: &PySliceIndices) -> DataFrame {
+/// A positional slice of the visible rows: a contiguous `step == 1` slice is a range;
+/// a strided one the individual positions.
+pub(crate) fn positional_slice(info: &PySliceIndices) -> RowSel {
     if info.step == 1 {
-        df.slice(info.start.max(0) as usize, info.stop.max(0) as usize)
+        RowSel::Range(info.start.max(0) as usize, info.stop.max(0) as usize)
     } else {
-        take_frame(df, &strided(info.start, info.stop, info.step))
+        RowSel::Positions(strided(info.start, info.stop, info.step))
     }
 }
 
-/// Slice a frame by a Python slice — label-based when either bound is a string
+/// The rows a Python slice selects — label-based when either bound is a string
 /// (`df['a':'b']`), positional otherwise.
-pub(crate) fn slice_frame(df: &DataFrame, slice: &Bound<'_, PySlice>) -> PyResult<DataFrame> {
+pub(crate) fn slice_rows(df: &DataFrame, slice: &Bound<'_, PySlice>) -> PyResult<RowSel> {
     let is_text = |o: &Bound<'_, PyAny>| o.is_instance_of::<PyString>();
     if is_text(&slice.getattr("start")?) || is_text(&slice.getattr("stop")?) {
-        let index = df.index();
-        let (lo, hi) = label_bounds(slice, index)?;
-        let (a, b) = index.label_slice(lo.as_ref(), hi.as_ref()).map_err(pyerr)?;
-        Ok(df.slice(a, b))
+        label_rows(df.index(), slice)
     } else {
-        let info = slice.indices(df.height() as isize)?;
-        Ok(positional_slice(df, &info))
+        Ok(positional_slice(&slice.indices(df.height() as isize)?))
     }
+}
+
+/// The rows a label slice (`df.loc[lo:hi]`, both bounds inclusive) selects.
+pub(crate) fn label_rows(index: &Index, slice: &Bound<'_, PySlice>) -> PyResult<RowSel> {
+    let (lo, hi) = label_bounds(slice, index)?;
+    let (a, b) = index.label_slice(lo.as_ref(), hi.as_ref()).map_err(pyerr)?;
+    Ok(RowSel::Range(a, b))
 }
 
 /// The two bounds of a label slice (`None` for an open end), each tagged with
@@ -528,11 +607,16 @@ pub(crate) fn slice_frame(df: &DataFrame, slice: &Bound<'_, PySlice>) -> PyResul
 /// becomes a [`SliceBound`]. A bound of the other label kind (a string against a
 /// numeric index, an integer against a string index) is kept as written, so
 /// [`Index::label_slice`] rejects it with a `TypeError`.
+///
+/// A string bound on a `DatetimeIndex` written as a partial date (`'2024-01'`,
+/// `'2024-01-02 10'`, …) names a period, as pandas reads it: a start bound is the
+/// period's first instant and a stop bound its last, so `df.loc['2024-01':'2024-02']`
+/// holds both whole months ([`Tz::period_of_text`](volas_core::Tz::period_of_text)).
 pub(crate) fn label_bounds(
     slice: &Bound<'_, PySlice>,
     index: &Index,
 ) -> PyResult<(Option<SliceBound>, Option<SliceBound>)> {
-    let bound = |obj: Bound<'_, PyAny>| -> PyResult<Option<SliceBound>> {
+    let bound = |obj: Bound<'_, PyAny>, stop: bool| -> PyResult<Option<SliceBound>> {
         if obj.is_none() {
             return Ok(None);
         }
@@ -543,6 +627,15 @@ pub(crate) fn label_bounds(
                 Ok(x) => Label::I64(x),
                 Err(_) => parse_label(&obj, index)?,
             },
+            // a partial date names a period: its first instant starts, its last stops
+            IndexKind::Datetime(_, tz)
+                if text && tz.period_of_text(&obj.extract::<String>()?).is_some() =>
+            {
+                let (start, end, _) = tz
+                    .period_of_text(&obj.extract::<String>()?)
+                    .expect("checked above");
+                Label::I64(if stop { end - 1 } else { start })
+            }
             // text naming no instant (not a datetime, a DST gap / fold wall clock) cannot
             // bound a datetime slice: a TypeError with the reason, as pandas raises
             IndexKind::Datetime(_, tz) if text => {
@@ -551,7 +644,8 @@ pub(crate) fn label_bounds(
                     if e.is_instance_of::<pyo3::exceptions::PyValueError>(py) {
                         PyTypeError::new_err(format!(
                             "cannot slice a DatetimeIndex with {}: {}",
-                            obj.repr().map_or_else(|_| "?".to_string(), |r| r.to_string()),
+                            obj.repr()
+                                .map_or_else(|_| "?".to_string(), |r| r.to_string()),
                             e.value(py)
                         ))
                     } else {
@@ -561,9 +655,16 @@ pub(crate) fn label_bounds(
             }
             _ => parse_label(&obj, index)?,
         };
-        Ok(Some(if text { SliceBound::text(label) } else { SliceBound::exact(label) }))
+        Ok(Some(if text {
+            SliceBound::text(label)
+        } else {
+            SliceBound::exact(label)
+        }))
     };
-    Ok((bound(slice.getattr("start")?)?, bound(slice.getattr("stop")?)?))
+    Ok((
+        bound(slice.getattr("start")?, false)?,
+        bound(slice.getattr("stop")?, true)?,
+    ))
 }
 
 /// `df.loc[...]` label indexer.
@@ -584,46 +685,24 @@ impl DataFrameLoc {
         // 2-D label get: df.loc[rows, col], symmetric with __setitem__.
         if let Ok(tup) = key.downcast::<PyTuple>() {
             if tup.len() == 2 {
-                let rows = loc_row_axis(&tup.get_item(0)?, &Labels::whole(index), df.height())?;
+                let rows = loc_row_axis(&tup.get_item(0)?, index, df.height())?;
                 let cols = loc_col_axis(&tup.get_item(1)?, df)?;
-                return select_2d(py, df, rows, cols);
+                return select_2d(py, &pf, &view, rows, cols);
             }
         }
         if let Ok(slice) = key.downcast::<PySlice>() {
-            let (lo, hi) = label_bounds(slice, index)?;
-            let (a, b) = index.label_slice(lo.as_ref(), hi.as_ref()).map_err(pyerr)?;
-            return Ok(Py::new(py, PyDataFrame::plain(df.slice(a, b)))?.into_any());
+            let sel = label_rows(index, slice)?;
+            return Ok(Py::new(py, pf.derive_rows(&view, &sel)?)?.into_any());
         }
         // boolean-mask / label-list row selection -> sub-frame.
         if as_bool_mask(key, df.height())?.is_some() || key.downcast::<PyList>().is_ok() {
-            let positions = loc_positions(key, &Labels::whole(index), df.height())?;
-            return Ok(
-                Py::new(py, PyDataFrame::plain(take_frame(df, &positions)))?.into_any(),
-            );
+            let sel = RowSel::Positions(loc_positions(key, &Labels::whole(index), df.height())?);
+            return Ok(Py::new(py, pf.derive_rows(&view, &sel)?)?.into_any());
         }
         // F28: partial-string datetime indexing — a year ("2021") or month
         // ("2021-02") string selects the whole period's rows (pandas parity).
-        if let volas_core::IndexKind::Datetime(_, tz) = index.kind() {
-            if let Ok(sk) = key.extract::<String>() {
-                if let Some((lo, hi)) = partial_period_bounds(&sk, tz) {
-                    let positions: Vec<usize> = (0..df.height())
-                        .filter(|&i| {
-                            index
-                                .label_at(i)
-                                .as_i64()
-                                .is_some_and(|ns| ns >= lo && ns < hi)
-                        })
-                        .collect();
-                    if positions.is_empty() {
-                        return Err(PyKeyError::new_err(format!("label {sk:?} not found")));
-                    }
-                    return Ok(Py::new(
-                        py,
-                        PyDataFrame::plain(take_frame(df, &positions)),
-                    )?
-                    .into_any());
-                }
-            }
+        if let Some(sel) = period_rows(key, index)? {
+            return Ok(Py::new(py, pf.derive_rows(&view, &sel)?)?.into_any());
         }
         let pos = Labels::whole(index).locate(key)?;
         Ok(Py::new(py, row_at(df, pos))?.into_any())
@@ -700,9 +779,9 @@ impl DataFrameAt {
         let pf = self.parent.borrow(py);
         let view = pf.read()?;
         let i = pf.meta().labels().locate(key.0.bind(py))?;
-        let j = view.column_pos(&key.1).ok_or_else(|| {
-            PyKeyError::new_err(format!("column \"{}\" not found", key.1))
-        })?;
+        let j = view
+            .column_pos(&key.1)
+            .ok_or_else(|| PyKeyError::new_err(format!("column \"{}\" not found", key.1)))?;
         let (col, at) = view.cells(j);
         Ok(np_scalar_to_py(py, col, at + i))
     }
@@ -738,7 +817,11 @@ impl SeriesLoc {
     fn __getitem__(&self, py: Python<'_>, key: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
         if let Ok(slice) = key.downcast::<PySlice>() {
             let (lo, hi) = label_bounds(slice, &self.inner.index)?;
-            let (a, b) = self.inner.index.label_slice(lo.as_ref(), hi.as_ref()).map_err(pyerr)?;
+            let (a, b) = self
+                .inner
+                .index
+                .label_slice(lo.as_ref(), hi.as_ref())
+                .map_err(pyerr)?;
             let positions: Vec<usize> = (a..b).collect();
             let data = self.inner.data.take(&positions);
             let index = Arc::new(self.inner.index.take(&positions));
@@ -758,32 +841,4 @@ impl SeriesLoc {
             .ok_or_else(|| PyKeyError::new_err("label not found"))?;
         Ok(np_scalar_to_py(py, &self.inner.data, pos))
     }
-}
-
-/// The `[start, end)` UTC-ns bounds of a partial datetime label: `"2021"` (the
-/// year) or `"2021-02"` (the month) — pandas partial-string indexing (F28). A
-/// full date / datetime string is NOT partial (it resolves as an exact label).
-fn partial_period_bounds(s: &str, tz: &volas_core::Tz) -> Option<(i64, i64)> {
-    let b = s.trim().as_bytes();
-    let all_digits = |x: &[u8]| x.iter().all(u8::is_ascii_digit);
-    if b.len() == 4 && all_digits(b) {
-        let y: i32 = s.trim().parse().ok()?;
-        return Some((
-            tz.wall_to_utc_ns(y, 1, 1, 0, 0, 0)?,
-            tz.wall_to_utc_ns(y + 1, 1, 1, 0, 0, 0)?,
-        ));
-    }
-    if b.len() == 7 && b[4] == b'-' && all_digits(&b[..4]) && all_digits(&b[5..]) {
-        let y: i32 = s[..4].parse().ok()?;
-        let m: u32 = s[5..7].parse().ok()?;
-        if !(1..=12).contains(&m) {
-            return None;
-        }
-        let (ny, nm) = if m == 12 { (y + 1, 1) } else { (y, m + 1) };
-        return Some((
-            tz.wall_to_utc_ns(y, m, 1, 0, 0, 0)?,
-            tz.wall_to_utc_ns(ny, nm, 1, 0, 0, 0)?,
-        ));
-    }
-    None
 }

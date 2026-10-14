@@ -149,7 +149,7 @@ pub fn wma_pass<S: crate::pass::StateSink>(data: &[f64], period: usize, _origin:
             let mut next = prev.clone();
             for i in 0..n {
                 wma_row(period, i, &|j| data[j], &prev, &mut next);
-                states.record(i, n, || next.clone());
+                states.record(i, n, |out| out.extend_from_slice(&next));
                 std::mem::swap(&mut prev, &mut next);
             }
         }
@@ -158,28 +158,51 @@ pub fn wma_pass<S: crate::pass::StateSink>(data: &[f64], period: usize, _origin:
     // Skip a leading-NaN warm-up prefix (derived inputs — e.g. the stochastic %K line —
     // warm up with NaN): compute from the first finite value onward, mirroring sma/ema.
     let start = data.iter().position(|x| !x.is_nan()).unwrap_or(n);
-    if start > 0 {
-        let mut out = vec![f64::NAN; n];
-        if n >= 2 && start >= n - 1 {
-            states.record(n - 2, n, wma_initial);
-            states.record(n - 1, n, wma_initial);
+    wma_publish_prefix(states, start, n);
+    if period > n - start {
+        if S::CAPTURE {
+            let mut prev = wma_initial();
+            let mut next = prev.clone();
+            for i in start..n {
+                wma_row(period, i, &|j| data[j], &prev, &mut next);
+                states.record(i, n, |out| out.extend_from_slice(&next));
+                std::mem::swap(&mut prev, &mut next);
+            }
         }
-        let sub = wma_pass(&data[start..], period, 0, states);
-        out[start..].copy_from_slice(&sub);
-        return out;
+        return vec![f64::NAN; n];
     }
-    let (out, finite) = wma_with::<Unguarded>(data, period, states);
-    if finite {
-        out
+    let (values, finite) = wma_with::<Unguarded>(&data[start..], period, states, start, n);
+    let values = if finite {
+        values
     } else {
-        wma_with::<NonFiniteRows>(data, period, states).0
+        states.restart();
+        wma_publish_prefix(states, start, n);
+        wma_with::<NonFiniteRows>(&data[start..], period, states, start, n).0
+    };
+    if start == 0 { values } else {
+        let mut out = vec![f64::NAN; n];
+        out[start..].copy_from_slice(&values);
+        out
+    }
+}
+
+/// Skipped leading NaNs carry the initial WMA state, including requested anchors.
+/// Keep them in the same arena as the suffix, in the caller's row coordinates.
+fn wma_publish_prefix<S: crate::pass::StateSink>(states: &mut S, start: usize, len: usize) {
+    if !S::CAPTURE { return; }
+    let mut from = 0;
+    while from < start {
+        let end = states.next_end(from + 1, len);
+        if end > start { break; }
+        states.record(end - 1, len, |out| out.extend_from_slice(&WMA_INITIAL));
+        from = end;
     }
 }
 
 /// The sliding WMA under a row guard (`period <= data.len()`); also returns whether
 /// the running sums stayed finite. A window holding a non-finite row is weighted
 /// directly on its own rows.
-fn wma_with<G: RowGuard>(data: &[f64], period: usize, states: &mut impl crate::pass::StateSink) -> (Vec<f64>, bool) {
+fn wma_with<G: RowGuard>(data: &[f64], period: usize, states: &mut impl crate::pass::StateSink, start: usize, len: usize) -> (Vec<f64>, bool) {
     let n = data.len();
     let mut out = vec![f64::NAN; n];
     let denom = wma_weight_sum(period);
@@ -215,7 +238,7 @@ fn wma_with<G: RowGuard>(data: &[f64], period: usize, states: &mut impl crate::p
             reanchor(&guard, &mut sum, &mut wsum, j);
         }
     }
-    states.record(period - 1, n, || Slide::state([sum, wsum], guard.bad(), period));
+    states.record(start + period - 1, len, |out| Slide::append_components(out, [sum, wsum], guard.bad(), period));
     out[period - 1] = if guard.clean() { wsum.mean(denom) } else { window(period - 1) };
     // Slide: dropping the oldest (weight 1) raises every retained weight by one.
     for i in period..n {
@@ -228,7 +251,7 @@ fn wma_with<G: RowGuard>(data: &[f64], period: usize, states: &mut impl crate::p
             reanchor(&guard, &mut sum, &mut wsum, i);
         }
         out[i] = if guard.clean() { wsum.mean(denom) } else { window(i) };
-        states.record(i, n, || Slide::state([sum, wsum], guard.bad(), period));
+        states.record(start + i, len, |out| Slide::append_components(out, [sum, wsum], guard.bad(), period));
     }
     (out, finite && sum.value().is_finite() && wsum.value().is_finite())
 }
@@ -320,11 +343,12 @@ pub fn vwma_pass(close: &[f64], volume: &[f64], period: usize, origin: usize, st
         if i >= period - 1 {
             out[i] = vwma_value([pv.value(), vv.value()]);
         }
-        states.record(i, n, || Slide::state([pv, vv], 0, origin + i + 1));
+        states.record(i, n, |out| Slide::append_components(out, [pv, vv], 0, origin + i + 1));
     }
     if clean && pv.value().is_finite() && vv.value().is_finite() {
         return out;
     }
+    states.restart();
     // A non-finite bar entered: window-local careful path (see `crate::guard`).
     crate::guard::window_sums_pass(n, period, Order::AddDrop, origin, |i| [close[i] * volume[i], volume[i]], |i, s| {
         out[i] = vwma_value(s);
@@ -390,7 +414,7 @@ pub fn hma_pass<S: crate::pass::StateSink>(close: &[f64], period: usize, origin:
     }
     let half = period / 2;
     let sq = (period as f64).sqrt().round() as usize;
-    let (mut a, mut b, mut c) = (S::default(), S::default(), S::default());
+    let (mut a, mut b, mut c) = (states.child(), states.child(), states.child());
     let wma_half = wma_pass(close, half, origin, &mut a);
     let wma_full = wma_pass(close, period, origin, &mut b);
     let raw: Vec<f64> = (0..n).map(|i| 2.0 * wma_half[i] - wma_full[i]).collect();
@@ -422,7 +446,7 @@ pub fn bbi(close: &[f64], a: usize, b: usize, c: usize, d: usize, origin: usize)
 /// Batch computation with terminal-state publication.
 pub fn bbi_pass<S: crate::pass::StateSink>(close: &[f64], a: usize, b: usize, c: usize, d: usize, origin: usize, states: &mut S) -> Vec<f64> {
     let data = close;
-    let (mut sa, mut sb, mut sc, mut sd) = (S::default(), S::default(), S::default(), S::default());
+    let (mut sa, mut sb, mut sc, mut sd) = (states.child(), states.child(), states.child(), states.child());
     let ma_a = kernels::sma_pass(data, a, origin, &mut sa);
     let ma_b = kernels::sma_pass(data, b, origin, &mut sb);
     let ma_c = kernels::sma_pass(data, c, origin, &mut sc);
@@ -444,10 +468,11 @@ pub fn bbi_pass<S: crate::pass::StateSink>(close: &[f64], a: usize, b: usize, c:
 /// in the window, the rows since the first non-NaN value (the seed of the first window,
 /// then the slide).
 pub(crate) const WMA_STATE: usize = 2 * Csum::STATE + 2;
+const WMA_INITIAL: [f64; WMA_STATE] = [0.0; WMA_STATE];
 
 /// The state of a WMA before its first row.
 pub(crate) fn wma_initial() -> Vec<f64> {
-    vec![0.0; WMA_STATE]
+    WMA_INITIAL.to_vec()
 }
 
 /// One row of [`wma`] over the series `term` (the careful [`wma_with`] loop, its
@@ -662,6 +687,41 @@ pub fn bbi_step(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn wma_leading_nan_terminal_states_match_the_row_owner() {
+        for data in [vec![f64::NAN; 3], vec![f64::NAN, f64::NAN, 2.0]] {
+            let mut expected_after = wma_initial();
+            let mut expected_before = expected_after.clone();
+            for row in 0..data.len() {
+                let mut next = wma_initial();
+                wma_row(2, row, &|j| data[j], &expected_after, &mut next).unwrap();
+                expected_before = expected_after;
+                expected_after = next;
+            }
+            let mut states = crate::pass::States::default();
+            let values = wma_pass(&data, 2, 0, &mut states);
+            assert!(values.iter().all(|value| value.is_nan()));
+            assert_eq!(states.before, Some(expected_before));
+            assert_eq!(states.after, Some(expected_after));
+        }
+    }
+
+    #[test]
+    fn wma_prefix_anchors_and_fallback_states_match_the_row_owner() {
+        for data in [vec![f64::NAN; 8], vec![f64::NAN, f64::NAN, f64::NAN, f64::NAN, 2.0, 3.0, f64::INFINITY, 4.0]] {
+            let mut states = crate::pass::States { marks: vec![2, 4, 6], ..Default::default() };
+            wma_pass(&data, 2, 0, &mut states);
+            let expected = |end| state_after(wma_initial(), end, |row, prev, next| {
+                wma_row(2, row, &|j| data[j], prev, next)
+            }).unwrap();
+            for end in [2, 4, 6] {
+                assert_eq!(states.points.at(end), Some(expected(end).as_slice()));
+            }
+            assert_eq!(states.before, Some(expected(7)));
+            assert_eq!(states.after, Some(expected(8)));
+        }
+    }
 
     /// `hma:1` is degenerate (`half = period / 2 = 0`); like every other MA at period 1
     /// (`sma` / `ema` / `wma` / `vwma` / `alma`), it returns the source rather than the

@@ -41,3 +41,11 @@ def test_raw_column_named_like_a_command_requiring_arguments_can_be_declared(col
     assert frame.exec(column).tolist() == [4.]
     assert not frame.is_computed(column)
 
+
+@pytest.mark.parametrize('name', ['change', 'ema:2'])
+def test_window_admission_uses_physical_directive_data_bindings(name):
+    frame = volas.DataFrame({name: [1., 2., 3.]}, window=1, max_lookback=0)
+    for spelling in (name, name.upper()):
+        assert frame.exec(spelling).tolist() == [3.]
+        assert frame[f'{spelling}+0'].to_list() == [3.]
+        assert frame.exec(f'hhv:1@({spelling})').tolist() == [3.]

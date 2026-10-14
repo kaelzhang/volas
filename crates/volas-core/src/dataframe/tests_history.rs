@@ -1,6 +1,7 @@
 //! The checkpoint of a cached column's history: where it lives and how it moves.
 
 use super::*;
+use super::derive::NoReplay;
 
 fn frame(rows: usize) -> DataFrame {
     let mut df = DataFrame::new(
@@ -15,7 +16,7 @@ fn frame(rows: usize) -> DataFrame {
 }
 
 fn checkpoint(at: usize) -> Checkpoint {
-    Checkpoint { at, state: Some(vec![at as f64]), raw: vec![("close".into(), Column::f64(vec![1.0, 2.0]))] }
+    Checkpoint { at, state: Some(vec![at as f64].into()), raw: vec![("close".into(), Column::f64(vec![1.0, 2.0]))] }
 }
 
 #[test]
@@ -33,10 +34,16 @@ fn a_checkpoint_moves_with_the_window_drop_only() {
     assert_eq!(df.computed_checkpoint("ema"), None);
     df.set_computed_checkpoint("ema", Ok(checkpoint(5)));
     df.set_computed_checkpoint("close", Ok(checkpoint(5))); // not cached: no-op
+    df.keep_computed_anchors("close", vec![checkpoint(5)]); // likewise
     assert_eq!(df.computed_checkpoint("close"), None);
     assert_eq!(df.computed_checkpoint("ema"), Some(&checkpoint(5)));
-    assert_eq!(df.retain_tail(4).computed_checkpoint("ema"), Some(&checkpoint(5)));
-    assert_eq!(df.slice(6, 10).computed_checkpoint("ema"), None);
+    assert_eq!(df.retain_tail(4, &NoReplay).computed_checkpoint("ema"), Some(&checkpoint(5)));
+    // any selection holding the row after it keeps it; one starting later keeps it too,
+    // with the rows after it in its lead (within ANCHOR_SPACING rows)
+    assert_eq!(df.rows(6, 10, &NoReplay).computed_checkpoint("ema"), Some(&checkpoint(5)));
+    let later = df.rows(7, 10, &NoReplay);
+    assert_eq!(later.computed_checkpoint("ema"), Some(&checkpoint(5)));
+    assert_eq!(later.lead_rows(), 1); // row 6; the checkpoint owns its kernel tails
     assert_eq!(df.clone().computed_checkpoint("ema"), Some(&checkpoint(5)));
     // a write stales the column but keeps its history's checkpoint
     df.invalidate_computed_on_write("close");
@@ -45,8 +52,8 @@ fn a_checkpoint_moves_with_the_window_drop_only() {
     assert_eq!((df.computed_checkpoint("ema"), df.computed_history_lost("ema")), (None, None));
     let why = VolasError::Value("an input past 2^53".into());
     df.set_computed_checkpoint("ema", Err(Some(why.clone())));
-    assert_eq!(df.retain_tail(4).computed_history_lost("ema"), Some(&why));
-    assert_eq!(df.slice(6, 10).computed_history_lost("ema"), None);
+    assert_eq!(df.retain_tail(4, &NoReplay).computed_history_lost("ema"), Some(&why));
+    assert_eq!(df.rows(6, 10, &NoReplay).computed_history_lost("ema"), Some(&why));
     assert_eq!(df.computed_history_lost("close"), None);
 }
 
@@ -55,20 +62,20 @@ fn a_checkpoint_moves_with_the_window_drop_only() {
 /// still starts where it did.
 #[test]
 fn a_replay_continues_the_column() {
-    let mut df = frame(10).retain_tail(6); // rows 4..10, origin 4
+    let mut df = frame(10).retain_tail(6, &NoReplay); // rows 4..10, origin 4
     df.invalidate_computed_on_write("close"); // stale from row 0, no state
     let since = df.computed_columns()[0].1.since;
     df.continue_computed("ema", 2, &Column::f64(vec![7.0, 8.0, 9.0, 10.0]), Some(vec![10.0]), Some(vec![9.0]))
         .unwrap();
     let meta = df.computed_columns().into_iter().find(|(n, _)| n == "ema").unwrap().1;
     assert_eq!((meta.valid_rows, meta.since), (6, since));
-    assert_eq!((meta.state, meta.state_before_last), (Some(vec![10.0]), Some(vec![9.0])));
+    assert_eq!((meta.state.as_ref().map(|words| words.to_vec()), meta.state_before_last.as_ref().map(|words| words.to_vec())), (Some(vec![10.0]), Some(vec![9.0])));
     assert_eq!(df.computed_resume_state("ema"), Some((&[10.0][..], 4)));
     assert_eq!(df.column("ema").unwrap().to_f64_vec(), vec![4.0, 5.0, 7.0, 8.0, 9.0, 10.0]);
     // a replay ending inside the warm-up carries no state
     df.continue_computed("ema", 5, &Column::f64(vec![1.0]), None, Some(vec![0.5])).unwrap();
     let meta = df.computed_columns().into_iter().find(|(n, _)| n == "ema").unwrap().1;
-    assert_eq!((meta.state, meta.state_before_last), (None, None));
+    assert_eq!((meta.state.as_ref().map(|words| words.to_vec()), meta.state_before_last.as_ref().map(|words| words.to_vec())), (None, None));
 }
 
 /// A replay must end on the last row of a cached column; anything else writes nothing.
@@ -87,7 +94,7 @@ fn a_replay_that_does_not_reach_the_last_row_is_refused() {
     let mut one = frame(1);
     one.continue_computed("ema", 0, &Column::f64(vec![3.0]), Some(vec![3.0]), Some(vec![2.0])).unwrap();
     let meta = one.computed_columns()[0].1.clone();
-    assert_eq!((meta.state, meta.state_before_last), (Some(vec![3.0]), None));
+    assert_eq!((meta.state.as_ref().map(|words| words.to_vec()), meta.state_before_last.as_ref().map(|words| words.to_vec())), (Some(vec![3.0]), None));
 }
 
 /// Scalar truth writes preserve the Boolean dtype and move its validity cursor,

@@ -118,12 +118,12 @@ fn on_complete_rows<T>(
         }
     }
     let recorded = recorded(&ops, true);
-    let rows = CompleteRows::of(&inputs(&recorded, usize::MAX));
+    let rows = CompleteRows::of(&inputs(&recorded, end));
     if rows == CompleteRows::All {
         // The inputs turned out complete: the in-place run stands — unless it stopped at
         // a column whose remembered fact claimed a NaN the values no longer hold. Then
         // it runs in place again, never stopping: a stale fact is never the answer.
-        return if ops.missing() { run(&Operands::new(df, series)) } else { first };
+        return if ops.missing() { run(&Operands::rows(df, series, 0, end)) } else { first };
     }
     let out = run(&over(&ops, df, series, &recorded, |v| rows.gather(v)));
     finish(out, &rows, ops.len())

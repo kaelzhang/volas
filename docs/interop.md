@@ -92,8 +92,8 @@ np.from_dlpack(df['close'])        # zero-copy ndarray view
 
 The high-level entry points — [`df.to_arrow`](dataframe-api.md#dfto_arrow---pyarrowtable) /
 [`DataFrame.from_arrow`](dataframe-api.md#dataframefrom_arrowdata-copytrue---dataframe),
-[`series.to_arrow`](dataframe-api.md#seriesto_arrow---pyarrowarray) /
-[`Series.from_arrow`](dataframe-api.md#seriesfrom_arrowdata-namenone-copytrue---series) — are documented under
+{ref}`series.to_arrow <series-to-arrow>` /
+{ref}`Series.from_arrow <series-from-arrow>` — are documented under
 Usage. They sit on these **standard protocol methods**, which Arrow / array consumers
 call automatically (so you rarely call them yourself):
 

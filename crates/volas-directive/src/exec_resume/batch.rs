@@ -3,7 +3,7 @@ use crate::{complete::BoundCommand, exec::{arg_f64, arg_usize}, operands::Operan
 use volas_compute::{pass::KernelPass, raw::{indicators as ind, kernels}};
 
 /// Run recursive batch kernels once, over exactly the recorded complete inputs.
-pub(super) fn recursive_pass(df: &volas_core::DataFrame, cmd: &BoundCommand) -> Option<super::states::WithStates> {
+pub(super) fn recursive_pass(df: &volas_core::DataFrame, cmd: &BoundCommand, marks: &[usize]) -> Option<super::states::WithAnchors> {
     use std::borrow::Cow;
     use volas_compute::missing::{CompleteRows, Input};
     let ops = Operands::new(df, cmd.series);
@@ -17,22 +17,38 @@ pub(super) fn recursive_pass(df: &volas_core::DataFrame, cmd: &BoundCommand) -> 
     for (slot, r) in &reads { views[*slot] = Some(rows.gather(r.view())); }
     let complete = Operands::over(df, cmd.series, 0, views);
     if complete.len() < 2 { return None; }
-    let pass = compute(&complete, cmd)?;
+    let mut counts: Vec<_> = marks.iter().copied().map(|end| rows.before(end)).collect();
+    counts.sort_unstable(); counts.dedup();
+    let pass = compute(&complete, cmd, &counts)?;
+    let encoder = super::state::FrameEncoder::new(&ops, cmd, true, Some(&rows)).with_kernel(&pass.after);
     let n = df.height();
-    let before = if reads.iter().any(|(_, r)| r.view()[n - 1].is_nan()) { pass.after.clone() } else { pass.before };
-    let after = super::state::capture_read(&ops, cmd, n, pass.after, true)?;
-    let before = super::state::capture_read(&ops, cmd, n - 1, before, true)?;
-    Some((volas_core::Column::f64(rows.scatter(n, pass.values)), Some(after), Some(before)))
+    let before_kernel = if reads.iter().any(|(_, r)| r.view()[n - 1].is_nan()) { &pass.after } else { &pass.before };
+    let after = encoder.capture(n, &pass.after)?;
+    let before = encoder.capture(n - 1, before_kernel)?;
+    let mut points = super::state::FramedPoints::with_capacity(marks.len(), after.len());
+    let mut kernels = pass.points.cursor();
+    for &end in marks {
+        let count = encoder.count_at(end);
+        let kernel = if count == complete.len() { Some(pass.after.as_slice()) }
+            else if count + 1 == complete.len() { Some(pass.before.as_slice()) }
+            else { kernels.seek(count) };
+        let kernel = kernel.or_else(|| encoder.unseeded_kernel(end))?;
+        points.capture(&encoder, end, kernel);
+    }
+    let points = points.finish();
+    Some((volas_core::Column::f64(rows.scatter(n, pass.values)), Some(after), Some(before), points))
 }
 
-pub(super) fn compute(ops: &Operands, cmd: &BoundCommand) -> Option<KernelPass> {
+// Keep pass framing and its input layout outside the numerical dispatch frame.
+#[inline(never)]
+pub(super) fn compute(ops: &Operands, cmd: &BoundCommand, marks: &[usize]) -> Option<KernelPass> {
     let p = |i| arg_usize(cmd.args, i);
     let close = || ops.f64(0, "close").ok();
     let origin = ops.origin();
     match (cmd.name, cmd.sub) {
         ("ema" | "dema" | "tema" | "kama" | "t3" | "mama" | "rsi", _) => {
             let x = close()?;
-            KernelPass::run(|s| match cmd.name {
+            KernelPass::run_marked(marks, |s| match cmd.name {
                 "ema" => ind::ema_pass(&x, p(0), s),
                 "dema" => ind::dema_pass(&x, p(0), s),
                 "tema" => ind::tema_pass(&x, p(0), s),
@@ -44,23 +60,23 @@ pub(super) fn compute(ops: &Operands, cmd: &BoundCommand) -> Option<KernelPass> 
         }
         ("crsi", _) => {
             let x = close()?;
-            KernelPass::run(|s| ind::crsi_pass(&x, p(0), p(1), p(2), s))
+            KernelPass::run_marked(marks, |s| ind::crsi_pass(&x, p(0), p(1), p(2), s))
         }
-        ("stochrsi", _) => stochrsi(ops, cmd),
+        ("stochrsi", _) => stochrsi(ops, cmd, marks),
         ("stoch_momentum", _) => {
             let h = ops.f64(0, "high").ok()?;
             let l = ops.f64(1, "low").ok()?;
             let c = ops.f64(2, "close").ok()?;
-            KernelPass::run(|s| ind::stoch_momentum_pass(&h, &l, &c, p(0), p(1), cmd.sub.map(|_| p(2)), s))
+            KernelPass::run_marked(marks, |s| ind::stoch_momentum_pass(&h, &l, &c, p(0), p(1), cmd.sub.map(|_| p(2)), s))
         }
         ("ma", _) if ind::generic_ma_type(p(0), p(1)) == 0 => {
             let x = close()?;
-            KernelPass::run(|s| kernels::sma_pass(&x, p(0), origin, s))
+            KernelPass::run_marked(marks, |s| kernels::sma_pass(&x, p(0), origin, s))
         }
         ("ma", _) | ("wma" | "trima" | "sum", _) => {
             let x = close()?;
             let kind = if cmd.name == "ma" { p(1) } else if cmd.name == "wma" { 2 } else { 5 };
-            KernelPass::run(|s| {
+            KernelPass::run_marked(marks, |s| {
                 if cmd.name == "sum" { ind::sum_pass(&x, p(0), origin, s) }
                 else if kind == 2 { ind::wma_pass(&x, p(0), origin, s) }
                 else { ind::trima_pass(&x, p(0), origin, s) }
@@ -70,15 +86,15 @@ pub(super) fn compute(ops: &Operands, cmd: &BoundCommand) -> Option<KernelPass> 
             let h = ops.f64(0, "high").ok()?;
             let l = ops.f64(1, "low").ok()?;
             let c = ops.f64(2, "close").ok()?;
-            KernelPass::run(|s| ind::cci_pass(&h, &l, &c, p(0), origin, s))
+            KernelPass::run_marked(marks, |s| ind::cci_pass(&h, &l, &c, p(0), origin, s))
         }
         ("boll" | "accbands", None) => {
             let x = close()?;
-            KernelPass::run(|s| kernels::sma_pass(&x, p(0), origin, s))
+            KernelPass::run_marked(marks, |s| kernels::sma_pass(&x, p(0), origin, s))
         }
         ("boll", Some(_)) | ("bbw", _) => {
             let x = close()?;
-            KernelPass::run(|s| {
+            KernelPass::run_marked(marks, |s| {
                 kernels::rolling_dispersion_pass(&x, p(0), 0, origin, s, |m, d| match cmd.sub {
                     Some("upper") => m + arg_f64(cmd.args, 1) * d,
                     Some(_) => m - arg_f64(cmd.args, 1) * d,
@@ -89,11 +105,11 @@ pub(super) fn compute(ops: &Operands, cmd: &BoundCommand) -> Option<KernelPass> 
         ("vwma", _) => {
             let x = close()?;
             let v = ops.f64(1, "volume").ok()?;
-            KernelPass::run(|s| ind::vwma_pass(&x, &v, p(0), origin, s))
+            KernelPass::run_marked(marks, |s| ind::vwma_pass(&x, &v, p(0), origin, s))
         }
         ("var" | "stddev", _) => {
             let x = close()?;
-            KernelPass::run(|s| {
+            KernelPass::run_marked(marks, |s| {
                 let mut v = ind::var_pass(&x, p(0), origin, s);
                 if cmd.name == "stddev" {
                     for x in &mut v { *x = if x.is_nan() { f64::NAN } else if *x > 0.0 { x.sqrt() * arg_f64(cmd.args, 1) } else { 0.0 }; }
@@ -110,23 +126,23 @@ pub(super) fn compute(ops: &Operands, cmd: &BoundCommand) -> Option<KernelPass> 
                 "linearreg_angle" => ind::LinregLine::Angle,
                 _ => ind::LinregLine::Forecast,
             };
-            KernelPass::run(|s| ind::linreg_pass(&x, p(0), line, origin, s))
+            KernelPass::run_marked(marks, |s| ind::linreg_pass(&x, p(0), line, origin, s))
         }
         ("mfi", _) => {
             let h = ops.f64(0, "high").ok()?;
             let l = ops.f64(1, "low").ok()?;
             let c = ops.f64(2, "close").ok()?;
             let v = ops.f64(3, "volume").ok()?;
-            KernelPass::run(|s| ind::mfi_pass(&h, &l, &c, &v, p(0), origin, s))
+            KernelPass::run_marked(marks, |s| ind::mfi_pass(&h, &l, &c, &v, p(0), origin, s))
         }
         ("accbands", Some(band)) => {
             let h = ops.f64(0, "high").ok()?;
             let l = ops.f64(1, "low").ok()?;
-            KernelPass::run(|s| if band == "upper" { ind::accbands_upper_pass(&h, &l, p(0), origin, s) } else { ind::accbands_lower_pass(&h, &l, p(0), origin, s) })
+            KernelPass::run_marked(marks, |s| if band == "upper" { ind::accbands_upper_pass(&h, &l, p(0), origin, s) } else { ind::accbands_lower_pass(&h, &l, p(0), origin, s) })
         }
         ("hv" | "hma" | "bbi" | "dpo" | "kst" | "coppock" | "cog", _) => {
             let x = close()?;
-            KernelPass::run(|s| match cmd.name {
+            KernelPass::run_marked(marks, |s| match cmd.name {
                 "hv" => ind::hv_pass(&x, p(0), crate::exec::hv_annualization(cmd.args), origin, s),
                 "hma" => ind::hma_pass(&x, p(0), origin, s),
                 "bbi" => ind::bbi_pass(&x, p(0), p(1), p(2), p(3), origin, s),
@@ -139,7 +155,7 @@ pub(super) fn compute(ops: &Operands, cmd: &BoundCommand) -> Option<KernelPass> 
         ("correl" | "beta" | "vr", _) => {
             let x = close()?;
             let y = if cmd.name == "vr" { ops.f64(1, "volume").ok()? } else { ops.f64_required(1).ok()? };
-            KernelPass::run(|s| match cmd.name {
+            KernelPass::run_marked(marks, |s| match cmd.name {
                 "correl" => ind::correl_pass(&x, &y, p(0), origin, s),
                 "beta" => ind::beta_pass(&x, &y, p(0), origin, s),
                 _ => ind::vr_pass(&x, &y, p(0), origin, s),
@@ -148,23 +164,23 @@ pub(super) fn compute(ops: &Operands, cmd: &BoundCommand) -> Option<KernelPass> 
         ("imi", _) => {
             let o = ops.f64(0, "open").ok()?;
             let c = ops.f64(1, "close").ok()?;
-            KernelPass::run(|s| ind::imi_pass(&o, &c, p(0), origin, s))
+            KernelPass::run_marked(marks, |s| ind::imi_pass(&o, &c, p(0), origin, s))
         }
         ("emv", _) => {
             let h = ops.f64(0, "high").ok()?;
             let l = ops.f64(1, "low").ok()?;
             let v = ops.f64(2, "volume").ok()?;
-            KernelPass::run(|s| ind::emv_pass(&h, &l, &v, p(0), origin, s))
+            KernelPass::run_marked(marks, |s| ind::emv_pass(&h, &l, &v, p(0), origin, s))
         }
         ("cmf" | "ultosc", _) => {
             let h = ops.f64(0, "high").ok()?;
             let l = ops.f64(1, "low").ok()?;
             let c = ops.f64(2, "close").ok()?;
             if cmd.name == "ultosc" {
-                KernelPass::run(|s| ind::ultosc_pass(&h, &l, &c, p(0), p(1), p(2), origin, s))
+                KernelPass::run_marked(marks, |s| ind::ultosc_pass(&h, &l, &c, p(0), p(1), p(2), origin, s))
             } else {
                 let v = ops.f64(3, "volume").ok()?;
-                KernelPass::run(|s| ind::cmf_pass(&h, &l, &c, &v, p(0), origin, s))
+                KernelPass::run_marked(marks, |s| ind::cmf_pass(&h, &l, &c, &v, p(0), origin, s))
             }
         }
         ("relative_vigor" | "dkx" | "wvad", sub) => {
@@ -174,9 +190,9 @@ pub(super) fn compute(ops: &Operands, cmd: &BoundCommand) -> Option<KernelPass> 
             let c = ops.f64(3, "close").ok()?;
             if cmd.name == "wvad" {
                 let v = ops.f64(4, "volume").ok()?;
-                KernelPass::run(|s| ind::wvad_pass(&o, &h, &l, &c, &v, p(0), origin, s))
+                KernelPass::run_marked(marks, |s| ind::wvad_pass(&o, &h, &l, &c, &v, p(0), origin, s))
             } else {
-                KernelPass::run(|s| match (cmd.name, sub) {
+                KernelPass::run_marked(marks, |s| match (cmd.name, sub) {
                     ("relative_vigor", None) => ind::relative_vigor_pass(&o, &h, &l, &c, p(0), origin, s),
                     ("relative_vigor", _) => ind::relative_vigor_signal_pass(&o, &h, &l, &c, p(0), origin, s),
                     ("dkx", None) => ind::dkx_pass(&o, &h, &l, &c, origin, s),
@@ -184,9 +200,9 @@ pub(super) fn compute(ops: &Operands, cmd: &BoundCommand) -> Option<KernelPass> 
                 })
             }
         }
-        ("apo" | "ppo" | "bias" | "dma" | "macdext", _) => averages(ops, cmd),
-        ("mavp", _) => mavp(ops, cmd),
-        ("stoch" | "stochf", _) => stochastic(ops, cmd),
+        ("apo" | "ppo" | "bias" | "dma" | "macdext", _) => averages(ops, cmd, marks),
+        ("mavp", _) => mavp(ops, cmd, marks),
+        ("stoch" | "stochf", _) => stochastic(ops, cmd, marks),
         _ => None,
     }
 }
@@ -203,28 +219,31 @@ fn append_tails(pass: &mut KernelPass, values: &[f64], reach: usize) -> Option<(
     let (after, before) = tails(values, reach)?;
     pass.after.extend_from_slice(after);
     pass.before.extend_from_slice(before);
+    append_tail(&mut pass.points, values, reach);
     Some(())
 }
 
-fn stage(stage: ind::MaStage, data: &[f64], origin: usize) -> Option<KernelPass> {
-    let mut states = volas_compute::pass::States::default();
+fn stage(stage: ind::MaStage, data: &[f64], origin: usize, marks: &[usize]) -> Option<KernelPass> {
+    let mut states = volas_compute::pass::States { marks: marks.iter().copied().filter(|&end| end > 0).collect(), points: volas_compute::pass::KernelPoints::with_capacity(marks.len()), ..Default::default() };
     let values = stage.pass(data, origin, &mut states)?;
-    Some(KernelPass { values, after: states.after?, before: states.before? })
+    Some(KernelPass { values, after: states.after?, before: states.before?, points: states.points })
 }
 
-fn averages(ops: &Operands, cmd: &BoundCommand) -> Option<KernelPass> {
+fn averages(ops: &Operands, cmd: &BoundCommand, marks: &[usize]) -> Option<KernelPass> {
     let data = ops.f64(0, "close").ok()?;
     let a = super::window::averages(cmd.name, cmd.sub, cmd.args)?;
-    let mut fast = stage(a.fast, &data, ops.origin())?;
-    let slow = stage(a.slow, &data, ops.origin())?;
+    let mut fast = stage(a.fast, &data, ops.origin(), marks)?;
+    let slow = stage(a.slow, &data, ops.origin(), marks)?;
+    merge_points(&mut fast.points, &slow.points, 0);
     fast.after.extend(slow.after);
     fast.before.extend(slow.before);
     for (f, s) in fast.values.iter_mut().zip(slow.values) {
         *f = if matches!(cmd.name, "ppo" | "bias") { crate::exec::percent_oscillator(*f, s) } else { *f - s };
     }
     if let Some(smooth) = a.smooth {
-        let mut signal = stage(smooth, &fast.values, ops.origin())?;
+        let mut signal = stage(smooth, &fast.values, ops.origin(), marks)?;
         append_tails(&mut signal, &fast.values, smooth.reach())?;
+        merge_points(&mut fast.points, &signal.points, 0);
         fast.after.extend(signal.after);
         fast.before.extend(signal.before);
         if cmd.sub == Some("histogram") {
@@ -234,14 +253,14 @@ fn averages(ops: &Operands, cmd: &BoundCommand) -> Option<KernelPass> {
     Some(fast)
 }
 
-fn mavp(ops: &Operands, cmd: &BoundCommand) -> Option<KernelPass> {
+fn mavp(ops: &Operands, cmd: &BoundCommand, marks: &[usize]) -> Option<KernelPass> {
     let data = ops.f64(0, "close").ok()?;
     let periods = ops.f64_required(1).ok()?;
     let p = |i| arg_usize(cmd.args, i);
     let (lo, hi, mt) = (p(0), p(1), p(2));
     let lb = ind::generic_ma_lookback(hi, mt);
     let n = data.len();
-    let mut result = KernelPass { values: vec![f64::NAN; n], after: vec![n as f64], before: vec![n.checked_sub(1)? as f64] };
+    let mut result = KernelPass { values: vec![f64::NAN; n], after: vec![n as f64], before: vec![n.checked_sub(1)? as f64], points: { let mut points = volas_compute::pass::KernelPoints::with_capacity(marks.len()); for &end in marks { points.capture(end, |words| words.push(end as f64)); } points } };
     // Classify the output rows once. Each stage writes only its selected rows,
     // rather than re-reading and clamping every period for every stage.
     let mut selected = vec![Vec::new(); hi - lo + 1];
@@ -250,7 +269,8 @@ fn mavp(ops: &Operands, cmd: &BoundCommand) -> Option<KernelPass> {
     }
     for q in lo..=hi {
         let start = lb - ind::generic_ma_lookback(q, mt);
-        let pass = stage(ind::MaStage::new(q, mt)?, data.get(start..)?, ops.origin() + start)?;
+        let pass = stage(ind::MaStage::new(q, mt)?, data.get(start..)?, ops.origin() + start, &marks.iter().filter_map(|&end| end.checked_sub(start).filter(|&end| end > 0)).collect::<Vec<_>>())?;
+        merge_points(&mut result.points, &pass.points, start);
         result.after.extend(pass.after);
         result.before.extend(pass.before);
         for &i in &selected[q - lo] { result.values[i] = pass.values[i - start]; }
@@ -258,17 +278,18 @@ fn mavp(ops: &Operands, cmd: &BoundCommand) -> Option<KernelPass> {
     Some(result)
 }
 
-fn stochastic(ops: &Operands, cmd: &BoundCommand) -> Option<KernelPass> {
+fn stochastic(ops: &Operands, cmd: &BoundCommand, marks: &[usize]) -> Option<KernelPass> {
     let h = ops.f64(0, "high").ok()?;
     let l = ops.f64(1, "low").ok()?;
     let c = ops.f64(2, "close").ok()?;
     let raw = ind::stoch_fastk(&h, &l, &c, arg_usize(cmd.args, 0));
     let (stages, count) = super::window::stoch_stages(cmd.name, cmd.sub, cmd.args);
-    let mut result = stage(ind::MaStage::new(stages[0].0, stages[0].1)?, &raw, ops.origin())?;
+    let mut result = stage(ind::MaStage::new(stages[0].0, stages[0].1)?, &raw, ops.origin(), marks)?;
     if count == 2 {
         let smooth = ind::MaStage::new(stages[1].0, stages[1].1)?;
-        let mut pass = stage(smooth, &result.values, ops.origin())?;
+        let mut pass = stage(smooth, &result.values, ops.origin(), marks)?;
         append_tails(&mut pass, &result.values, smooth.reach())?;
+        merge_points(&mut result.points, &pass.points, 0);
         result.after.extend(pass.after);
         result.before.extend(pass.before);
         result.values = pass.values;
@@ -276,20 +297,22 @@ fn stochastic(ops: &Operands, cmd: &BoundCommand) -> Option<KernelPass> {
     Some(result)
 }
 
-fn stochrsi(ops: &Operands, cmd: &BoundCommand) -> Option<KernelPass> {
+fn stochrsi(ops: &Operands, cmd: &BoundCommand, marks: &[usize]) -> Option<KernelPass> {
     let x = ops.f64(0, "close").ok()?;
     let p = |i| arg_usize(cmd.args, i);
-    let mut rsi = KernelPass::run(|s| ind::rsi_pass(&x, p(0), s))?;
+    let mut rsi = KernelPass::run_marked(marks, |s| ind::rsi_pass(&x, p(0), s))?;
     let c = p(1) - 1;
     // The RSI kernel can seed before the stochastic input ring is complete.
     let (after, before) = tails(&rsi.values, c)?;
     rsi.after.extend_from_slice(after);
     rsi.before.extend_from_slice(before);
+    append_tail(&mut rsi.points, &rsi.values, c);
     let raw = ind::stochrsi_from_rsi(&rsi.values, p(1));
     if cmd.sub == Some("d") {
         let ma = ind::MaStage::new(p(2), p(3))?;
-        let mut pass = stage(ma, &raw, ops.origin())?;
+        let mut pass = stage(ma, &raw, ops.origin(), marks)?;
         append_tails(&mut pass, &raw, ma.reach())?;
+        merge_points(&mut rsi.points, &pass.points, 0);
         rsi.after.extend(pass.after);
         rsi.before.extend(pass.before);
         rsi.values = pass.values;
@@ -297,5 +320,24 @@ fn stochrsi(ops: &Operands, cmd: &BoundCommand) -> Option<KernelPass> {
     Some(rsi)
 }
 
+/// Join component snapshots at their corresponding row counts.
+fn merge_points(points: &mut volas_compute::pass::KernelPoints, part: &volas_compute::pass::KernelPoints, offset: usize) {
+    let mut cursor = part.cursor();
+    points.transform(|end, state, out| {
+        let Some(words) = end.checked_sub(offset).and_then(|end| cursor.seek(end)) else { return false; };
+        out.extend_from_slice(state);
+        out.extend_from_slice(words);
+        true
+    });
+}
+
+fn append_tail(points: &mut volas_compute::pass::KernelPoints, values: &[f64], reach: usize) {
+    points.transform(|end, state, out| {
+        let Some(start) = end.checked_sub(reach) else { return false; };
+        out.extend_from_slice(state);
+        out.extend_from_slice(&values[start..end]);
+        true
+    });
+}
 #[cfg(test)]
 mod tests;

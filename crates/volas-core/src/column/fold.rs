@@ -272,6 +272,16 @@ impl Column {
         restart: bool,
         cells: impl IntoIterator<Item = (&'c Column, usize)>,
     ) -> Result<()> {
+        self.checked_fold_value(row, op, restart, cells).map(|_| ())
+    }
+
+    /// The integer aggregate already calculated while checking a fold. Frame
+    /// admission reuses it to validate historical dtype compatibility before writing.
+    #[inline(never)]
+    pub(crate) fn checked_fold_value<'c>(
+        &self, row: usize, op: CombineOp, restart: bool,
+        cells: impl IntoIterator<Item = (&'c Column, usize)>,
+    ) -> Result<Option<i64>> {
         let dtype = self.dtype();
         if !op.supports(dtype) {
             return Err(op.unsupported(dtype));
@@ -312,7 +322,7 @@ impl Column {
             }
             first = false;
         }
-        Ok(())
+        Ok(acc)
     }
 
     /// Reduce `src`'s `rows` (a whole period, in order) into cell `row` under `op`

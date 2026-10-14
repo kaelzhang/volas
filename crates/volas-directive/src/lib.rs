@@ -4,6 +4,7 @@
 mod bind;
 mod complete;
 mod operands;
+mod replay;
 pub mod exec;
 mod exec_resume;
 mod element;
@@ -13,8 +14,9 @@ pub mod spec;
 pub mod stringify;
 pub mod types;
 
-pub use bind::{bind_command, bind_form, bind_frame, check_bare, is_bare_command, uses_bare_command};
+pub use bind::{bind_command, bind_form, bind_frame, bind_frame_resolved, canonical_data_name, check_bare, is_bare_command, uses_bare_command, uses_command_shadow};
 pub use exec::execute;
 pub use parser::{parse, parse_cst};
+pub use replay::{checkpoint_at, refresh_frame, resume_states, states_at, uses_default_series, Replayer, ResumeStates};
 pub use stringify::stringify;
 pub use types::{Ast, ChainPlan, Continuation, Op};

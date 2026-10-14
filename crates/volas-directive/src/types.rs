@@ -279,6 +279,8 @@ pub struct Command<A> {
 /// A node in the directive AST, generic over its command argument payload `A`.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Node<A> {
+    /// A frame-bound data column; never interpreted as a command.
+    Data(String),
     /// A bare identifier: a column name, or a no-argument command.
     Name(String),
     /// A numeric literal.

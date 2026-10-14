@@ -1,7 +1,8 @@
 """Every command's continuation reach (`spec::reads_past_lookback`, the one per-command
 fact behind `lookback::reach`, and a recursion anywhere in a command): a tail slice of
-any length either keeps a cached column it can continue exactly or no longer caches it
-— an append never produces a number the full history does not."""
+any length keeps every cached column and continues it exactly — from its carried state
+and the rows before it the slice keeps (its lead), including each recursive node in
+a composite."""
 
 import numpy as np
 import pytest
@@ -31,7 +32,7 @@ def frame(a, b):
 
 
 @pytest.mark.parametrize('line', LINES, ids=lambda ln: ln.form + ln.series_suffix)
-def test_a_tail_slice_continues_exactly_or_not_at_all(line):
+def test_a_tail_slice_of_any_length_continues_exactly(line):
     d = line.form + line.series_suffix
     lb = volas.directive_lookback(d)
     if lb > 60:
@@ -41,11 +42,23 @@ def test_a_tail_slice_continues_exactly_or_not_at_all(line):
     want = frame(0, N + 2).exec(d, dtype='object')[-2:]  # a bool line may be missing
     for keep in sorted({max(lb - 1, 1), max(lb, 1), lb + 1, lb + 2, N}):
         tail = base.iloc[N - keep:]
-        cached = tail.is_computed(volas.directive_stringify(d))
+        assert tail.is_computed(volas.directive_stringify(d))
         tail.append(frame(N, N + 2))
-        if cached:
-            got = tail[d].to_numpy(dtype='object')[-2:]
-            assert _same(got, want), (d, keep, got, want)
+        got = tail[d].to_numpy(dtype='object')[-2:]
+        assert _same(got, want), (d, keep, got, want)
+
+
+@pytest.mark.parametrize('d', ['kcw:5', 'stoch_momentum:5', 'close+ema:3@open'])
+@pytest.mark.parametrize('start', [0, 1, 37, N - 1])
+def test_a_recursion_continues_from_the_history_a_slice_keeps(d, start):
+    # Every recursion carries continuation state; the slice retains its history boundary.
+    base = frame(0, N)
+    base[d]
+    name = volas.directive_stringify(d)
+    sliced = base.iloc[start:]
+    assert sliced.is_computed(name)
+    sliced.append(frame(N, N + 2))
+    assert _same(sliced[d].to_numpy(dtype='object'), frame(0, N + 2).exec(d, dtype='object')[start:])
 
 
 @pytest.mark.parametrize('d', ['crsi:3,2,5', 'stoch_momentum:5', 'close+crsi:3,2,5'])
@@ -104,9 +117,9 @@ def test_a_new_column_on_a_slice_keeps_its_recursions(d):
 
 @pytest.mark.parametrize('d', ['ema:3', 'ema:5@(ema:3)', 'close>ema:5', 'close-ma:5+obv'])
 @pytest.mark.parametrize('read', ['item', 'fulfill', 'get_column'])
-def test_an_input_write_on_a_slice_loses_its_recursions(d, read):
-    # the write discards the carried states and the slice lacks the history's start:
-    # every refresh of the recursion raises, and a window column beside it stays exact
+def test_an_input_write_on_a_slice_replays_its_recursions(d, read):
+    # The write invalidates terminal states; the retained checkpoint and lead replay
+    # the original history for both recursive and window columns.
     base = frame(0, N)
     base[d]
     base['ma:3']
@@ -114,9 +127,10 @@ def test_an_input_write_on_a_slice_loses_its_recursions(d, read):
     s.iat[3, 3] = 1.0
     reader = {'item': lambda: s[d], 'fulfill': s.fulfill,
               'get_column': lambda: s.get_column(volas.directive_stringify(d))}[read]
-    with pytest.raises(ValueError, match='cannot recompute'):
-        reader()
-    want = {k: v[5:N].copy() for k, v in COLS.items()}
-    want['close'][3] = 1.0
+    reader()
+    want = {k: v[:N].copy() for k, v in COLS.items()}
+    want['close'][8] = 1.0
+    oracle = volas.DataFrame(want)
+    assert _same(s[d].to_numpy(dtype='object'), oracle.exec(d, dtype='object')[5:])
     got = s.get_column('ma:3').to_numpy()
-    assert same_exact(got, volas.DataFrame(want).exec('ma:3'))
+    assert same_exact(got, oracle.exec('ma:3')[5:])

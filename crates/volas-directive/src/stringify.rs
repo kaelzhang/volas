@@ -18,9 +18,9 @@ use crate::types::{Command, Node, Payload, UnaryOp};
 pub(crate) fn stringify_node<A: Payload>(node: &Node<A>) -> String {
     match node {
         // a bare name that is a command usable bare names that command (a frame-bound
-        // tree holds none: there it is a command node, or an ambiguous name rejected)
+        // tree holds none: there it is a command node, or a resolved Data reference)
         Node::Name(s) if is_bare_command(s) => normalize(s).into_owned(),
-        Node::Name(s) => s.clone(),
+        Node::Data(s) | Node::Name(s) => s.clone(),
         Node::Scalar(v) => v.token(),
         Node::Command(cmd) => stringify_command(cmd),
         Node::Unary { op, operand } => {
@@ -86,7 +86,7 @@ fn stringify_command<A: Payload>(cmd: &Command<A>) -> String {
         .iter()
         .enumerate()
         .map(|(i, node)| match node {
-            Node::Name(s) if s.is_empty() || spec.series.get(i) == Some(&s.as_str()) => String::new(),
+            Node::Data(s) | Node::Name(s) if s.is_empty() || spec.series.get(i) == Some(&s.as_str()) => String::new(),
             other => stringify_series(other),
         })
         .collect();

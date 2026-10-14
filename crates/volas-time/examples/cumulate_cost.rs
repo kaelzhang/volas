@@ -70,7 +70,7 @@ fn main() {
     }
     for n in [10, 100, 1_000, 10_000] {
         let fine = bars(n, 1_000_000_000);
-        let bar = fine.slice(n - 1, n);
+        let bar = fine.slice_data(n - 1, n);
         let mut live = Cumulator::new(TimeFrame::Day1, AggSpec::ohlcv());
         live.append(&fine).unwrap();
         measure("resend", n, 100, || live.append(&bar).unwrap());

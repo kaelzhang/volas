@@ -1,4 +1,6 @@
     use super::*;
+    use super::derive::NoReplay;
+    use crate::index::IndexKind;
     use crate::CombineOp;
     use crate::DType;
 
@@ -25,6 +27,15 @@
     }
 
     #[test]
+    fn duplicate_names_report_the_first_repeated_encounter() {
+        for (names, repeated) in [(["b", "a", "a", "b"], "a"), (["a", "b", "b", "a"], "b")] {
+            let error = DataFrame::new(names.map(str::to_owned).to_vec(), vec![Column::f64(vec![1.0]); 4], None).unwrap_err();
+            let VolasError::Value(message) = error else { panic!("duplicate name must be a value error") };
+            assert_eq!(message, format!("duplicate column name \"{repeated}\""));
+        }
+    }
+
+    #[test]
     fn select_shares_index() {
         let df = sample();
         let sub = df.select(&["b".into()]).unwrap();
@@ -36,11 +47,11 @@
     #[test]
     fn slice_and_filter() {
         let df = sample();
-        let s = df.slice(1, 3);
+        let s = df.rows(1, 3, &NoReplay);
         assert_eq!(s.height(), 2);
         assert_eq!(s.column("a").unwrap().as_f64().unwrap(), &[2.0, 3.0]);
 
-        let f = df.filter_mask(&[true, false, true]).unwrap();
+        let f = df.filter_mask(&[true, false, true], &NoReplay).unwrap();
         assert_eq!(f.height(), 2);
         assert_eq!(f.column("b").unwrap().as_i64().unwrap(), &[10, 30]);
     }
@@ -196,7 +207,7 @@
 
     #[test]
     fn filter_mask_rejects_wrong_length() {
-        assert!(sample().filter_mask(&[true, false]).is_err());
+        assert!(sample().filter_mask(&[true, false], &NoReplay).is_err());
     }
 
     #[test]
@@ -257,7 +268,7 @@
     }
 
     #[test]
-    fn slice_carries_computed_only_with_enough_warmup() {
+    fn slice_keeps_computed_with_history_before_short_selections() {
         // a frame with a cached recursive directive of lookback 11 (ema:12)
         let mut df = DataFrame::new(
             vec!["close".into()],
@@ -270,23 +281,25 @@
         df.set_computed_states("close", Some(vec![42.0]), None);
         // A slice keeping >= lookback rows AND ending at `valid_rows` carries the column
         // as continuable, threading the recursive state through (the `Some` branch).
-        let keep = df.slice(40, 60); // 20 rows >= 11, end == valid_rows (60)
+        let keep = df.rows(40, 60, &NoReplay); // 20 rows >= 11, end == valid_rows (60)
         assert_eq!(keep.computed_columns().len(), 1);
         assert_eq!(keep.computed_columns()[0].1.valid_rows, 20);
-        assert_eq!(keep.computed_columns()[0].1.state, Some(vec![42.0]));
+        assert_eq!(keep.computed_columns()[0].1.state.as_ref().map(|words| words.to_vec()), Some(vec![42.0]));
         // a TAIL slice keeps >= lookback rows but ends BEFORE `valid_rows`, so the carried
         // state (attached to a row this sub-frame no longer ends on) is dropped — the column
         // stays computed but state-less, continuable only via the full-recompute fallback.
-        let tail = df.slice(0, 50); // 50 rows >= 11, end (50) < valid_rows (60)
+        let tail = df.rows(0, 50, &NoReplay); // 50 rows >= 11, end (50) < valid_rows (60)
         assert_eq!(tail.computed_columns().len(), 1);
-        assert_eq!(tail.computed_columns()[0].1.state, None);
-        // a slice keeping < lookback rows drops the computed status entirely (not continuable).
-        let too_short = df.slice(55, 60); // 5 rows < 11
-        assert!(too_short.computed_columns().is_empty());
-        // a column that needs one row past its lookback is kept only with that row
+        assert_eq!(tail.computed_columns()[0].1.state.as_ref().map(|words| words.to_vec()), None);
+        // A short selection keeps its cached identity and the lead its recompute reads.
+        let too_short = df.rows(55, 60, &NoReplay); // 5 rows < 11
+        assert_eq!(too_short.computed_columns().len(), 1);
+        assert_eq!(too_short.lead_rows(), 12);
+        // A column needing one row past its lookback retains that row in its lead
         df.set_computed("close", std::sync::Arc::new(()), Reach { lookback: 11, resume: 0, continuation: 12, history: History::Window });
-        assert!(df.slice(49, 60).computed_columns().is_empty()); // 11 rows < 12
-        assert_eq!(df.slice(48, 60).computed_columns()[0].1.reach.continuation, 12);
+        assert_eq!(df.rows(49, 60, &NoReplay).computed_columns().len(), 1);
+        assert_eq!(df.rows(49, 60, &NoReplay).lead_rows(), 12);
+        assert_eq!(df.rows(48, 60, &NoReplay).computed_columns()[0].1.reach.continuation, 12);
     }
 
     fn meta(df: &DataFrame) -> ComputedMeta {
@@ -336,23 +349,23 @@
         });
         assert_eq!(got, Some(9.0));
         df2.update_computed_value("close", 9, 9.0).unwrap();
-        assert_eq!((meta(&df2).state, meta(&df2).state_before_last), (Some(vec![9.0]), Some(vec![8.0])));
+        assert_eq!((meta(&df2).state.as_ref().map(|words| words.to_vec()), meta(&df2).state_before_last.as_ref().map(|words| words.to_vec())), (Some(vec![9.0]), Some(vec![8.0])));
         // declined: untouched
         assert_eq!(df2.step_computed_state("close", |_, _, _, _| None), None);
-        assert_eq!((meta(&df2).state, meta(&df2).state_before_last), (Some(vec![9.0]), Some(vec![8.0])));
+        assert_eq!((meta(&df2).state.as_ref().map(|words| words.to_vec()), meta(&df2).state_before_last.as_ref().map(|words| words.to_vec())), (Some(vec![9.0]), Some(vec![8.0])));
         // a Vec resume of one row advances the same way
         let mut df3 = stale_last_row();
         df3.update_computed_value("close", 9, 9.0).unwrap();
         df3.advance_computed_state("close", vec![9.0]);
-        assert_eq!((meta(&df3).state, meta(&df3).state_before_last), (Some(vec![9.0]), Some(vec![8.0])));
+        assert_eq!((meta(&df3).state.as_ref().map(|words| words.to_vec()), meta(&df3).state_before_last.as_ref().map(|words| words.to_vec())), (Some(vec![9.0]), Some(vec![8.0])));
         df3.advance_computed_state("missing", vec![1.0]); // no-op
         df3.set_computed_states("close", Some(vec![1.0]), None);
-        assert_eq!(meta(&df3).state_before_last, None);
+        assert_eq!(meta(&df3).state_before_last.as_ref().map(|words| words.to_vec()), None);
         df3.set_computed_states("missing", None, None); // no-op
         // a column with no valid row carries no state
         df3.invalidate_computed_on_write("x");
         df3.set_computed_states("close", Some(vec![1.0]), Some(vec![0.0]));
-        assert_eq!((meta(&df3).state, meta(&df3).state_before_last), (None, None));
+        assert_eq!((meta(&df3).state.as_ref().map(|words| words.to_vec()), meta(&df3).state_before_last.as_ref().map(|words| words.to_vec())), (None, None));
     }
 
     /// A state is resumed only from the row it describes: one left on a row that is no
@@ -379,25 +392,25 @@
         df.set_computed_states("close", Some(vec![9.0]), Some(vec![8.0]));
         df.invalidate_computed_forming_row(9);
         assert_eq!(meta(&df).valid_rows, 9);
-        assert_eq!((meta(&df).state, meta(&df).state_before_last), (Some(vec![8.0]), None));
+        assert_eq!((meta(&df).state.as_ref().map(|words| words.to_vec()), meta(&df).state_before_last.as_ref().map(|words| words.to_vec())), (Some(vec![8.0]), None));
         assert_eq!(df.computed_resume_state("close"), Some((&[8.0][..], 0)));
         df.invalidate_computed_forming_row(9); // already stale there: unchanged
-        assert_eq!(meta(&df).state, Some(vec![8.0]));
+        assert_eq!(meta(&df).state.as_ref().map(|words| words.to_vec()), Some(vec![8.0]));
         // the step after the replacement recycles the dropped buffer
         df.step_computed_state("close", |_, _, _, next| {
             next[0] = 9.5;
             Some(9.5)
         });
         df.update_computed_value("close", 9, 9.5).unwrap();
-        assert_eq!((meta(&df).state, meta(&df).state_before_last), (Some(vec![9.5]), Some(vec![8.0])));
+        assert_eq!((meta(&df).state.as_ref().map(|words| words.to_vec()), meta(&df).state_before_last.as_ref().map(|words| words.to_vec())), (Some(vec![9.5]), Some(vec![8.0])));
         // a replacement without a state before it leaves none
         df.set_computed_states("close", Some(vec![9.5]), None);
         df.invalidate_computed_forming_row(9);
-        assert_eq!(meta(&df).state, None);
+        assert_eq!(meta(&df).state.as_ref().map(|words| words.to_vec()), None);
         df.set_column("x", Column::f64(vec![0.0; 10])).unwrap();
         df.set_computed("x", std::sync::Arc::new(()), Reach { lookback: 0, resume: 0, continuation: 0, history: History::Window });
         df.invalidate_computed_on_write("x");
-        assert_eq!((meta(&df).state, meta(&df).state_before_last), (None, None));
+        assert_eq!((meta(&df).state.as_ref().map(|words| words.to_vec()), meta(&df).state_before_last.as_ref().map(|words| words.to_vec())), (None, None));
     }
 
     /// Both states describe rows relative to the last valid one, so a slice holding it
@@ -407,27 +420,28 @@
     fn a_slice_carries_both_states_together() {
         let mut df = ten_rows();
         df.set_computed_states("close", Some(vec![9.0]), Some(vec![8.0]));
-        let tail = df.slice(5, 10);
-        assert_eq!((meta(&tail).state, meta(&tail).state_before_last), (Some(vec![9.0]), Some(vec![8.0])));
+        let tail = df.rows(5, 10, &NoReplay);
+        assert_eq!((meta(&tail).state.as_ref().map(|words| words.to_vec()), meta(&tail).state_before_last.as_ref().map(|words| words.to_vec())), (Some(vec![9.0]), Some(vec![8.0])));
         assert_eq!(tail.computed_resume_state("close"), Some((&[9.0][..], 5)));
-        let last_two = df.slice(8, 10);
-        assert_eq!(meta(&last_two).state_before_last, Some(vec![8.0]));
+        let last_two = df.rows(8, 10, &NoReplay);
+        assert_eq!(meta(&last_two).state_before_last.as_ref().map(|words| words.to_vec()), Some(vec![8.0]));
         let last_one = ten_rows_lookback(1);
-        let last_one = { let mut d = last_one; d.set_computed_states("close", Some(vec![9.0]), Some(vec![8.0])); d.slice(9, 10) };
-        assert_eq!((meta(&last_one).state, meta(&last_one).state_before_last), (Some(vec![9.0]), None));
-        let head = df.slice(0, 9);
-        assert_eq!((meta(&head).state, meta(&head).state_before_last), (None, None));
+        let last_one = { let mut d = last_one; d.set_computed_states("close", Some(vec![9.0]), Some(vec![8.0])); d.rows(9, 10, &NoReplay) };
+        assert_eq!((meta(&last_one).state.as_ref().map(|words| words.to_vec()), meta(&last_one).state_before_last.as_ref().map(|words| words.to_vec())), (Some(vec![9.0]), None));
+        let head = df.rows(0, 9, &NoReplay);
+        assert_eq!((meta(&head).state.as_ref().map(|words| words.to_vec()), meta(&head).state_before_last.as_ref().map(|words| words.to_vec())), (None, None));
         // a stale frame (valid through row 8) sliced after its last valid row: the state
         // describes a row before the slice, so it is not carried and nothing is valid
         let mut stale = stale_last_row();
         stale.append(&DataFrame::new(vec!["x".into()], vec![Column::f64(vec![10.0])], None).unwrap())
             .unwrap();
-        let after = stale.slice(9, 11);
+        let after = stale.rows(9, 11, &NoReplay);
         let m = after.computed_columns().into_iter().find(|(n, _)| n == "close").unwrap().1;
-        assert_eq!((m.valid_rows, m.state, m.state_before_last), (0, None, None));
+        assert_eq!((m.valid_rows, m.state.as_ref().map(|words| words.to_vec()), m.state_before_last.as_ref().map(|words| words.to_vec())), (0, None, None));
         // the history behind a carried column is kept: past warm-up from the first row
-        assert!(df.slice(9, 10).computed_columns().is_empty()); // 1 row < lookback 2
-        assert!(meta(&df.slice(8, 10)).warm(8));
+        assert_eq!(df.rows(9, 10, &NoReplay).computed_columns().len(), 1);
+        assert_eq!(df.rows(9, 10, &NoReplay).lead_rows(), 3);
+        assert!(meta(&df.rows(8, 10, &NoReplay)).warm(8));
     }
 
     fn ten_rows_lookback(lookback: usize) -> DataFrame {
@@ -480,7 +494,7 @@
         df.set_computed("close", std::sync::Arc::new(()), Reach { lookback: 11, resume: 0, continuation: 11, history: History::Window });
         df.set_computed_states("close", Some(vec![42.0]), None);
         // slice() carries it (continuable, with the recursive state) ...
-        assert_eq!(df.slice(40, 60).computed_columns().len(), 1);
+        assert_eq!(df.rows(40, 60, &NoReplay).computed_columns().len(), 1);
         // ... slice_data() drops it (same row data, no resume carry) — and the underlying
         // raw values are identical, so a read-only probe sees exactly the same columns.
         let data = df.slice_data(40, 60);

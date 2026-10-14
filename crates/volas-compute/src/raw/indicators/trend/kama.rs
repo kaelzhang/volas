@@ -28,7 +28,7 @@ pub fn kama_pass(data: &[f64], period: usize, _origin: usize, states: &mut impl 
     let mut k = KamaState::seed(data, period);
     for (today, o) in out.iter_mut().enumerate().skip(period) {
         *o = kama_bar(data, period, today, &mut k);
-        states.record(today, n, || k.to_vec());
+        states.record(today, n, |out| { let at = out.len(); out.resize(at + KAMA_STATE, 0.0); k.write_state(&mut out[at..]); });
     }
     out
 }

@@ -125,18 +125,19 @@ fn rolling_mean_std_each(data: &[f64], period: usize, ddof: usize, origin: usize
                     let (m, d) = mean_std_of_sums(&sums, k, p, denom);
                     emit(i, m, d);
                 }
-                states.record(i, n, || Slide::state(sums, 0, origin + i + 1));
+                states.record(i, n, |out| Slide::append_components(out, sums, 0, origin + i + 1));
             }
         }
         if clean && sums.iter().all(|s| s.value().is_finite()) {
             return;
         }
     }
+    states.restart();
     // Careful path — window-local (see [`crate::guard`]).
     let mut slide = Slide::<2>::at(origin);
     for i in 0..n {
         let (m, d) = mean_std_row(&mut slide, period, ddof, i, |j| data[j]);
         emit(i, m, d);
-        states.record(i, n, || { let mut v = vec![0.0; Slide::<2>::STATE]; slide.write_state(&mut v); v });
+        states.record(i, n, |out| slide.append_state(out));
     }
 }

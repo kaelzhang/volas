@@ -74,7 +74,7 @@ pub fn vr_pass<S: crate::pass::StateSink>(close: &[f64], volume: &[f64], n: usiz
     for i in 1..len {
         [uv[i], dv[i], pv[i]] = vr_volumes(close, volume, i);
     }
-    let (mut a, mut b, mut c) = (S::default(), S::default(), S::default());
+    let (mut a, mut b, mut c) = (states.child(), states.child(), states.child());
     let (mut suv, mut sdv, mut spv) = (kernels::sma_pass(&uv, n, origin, &mut a), kernels::sma_pass(&dv, n, origin, &mut b), kernels::sma_pass(&pv, n, origin, &mut c));
     for values in [&mut suv, &mut sdv, &mut spv] { for x in values { *x *= n as f64; } }
     states.compose(len, &[&a, &b, &c], |_, _| {});
@@ -126,7 +126,7 @@ pub fn relative_vigor_pass<S: crate::pass::StateSink>(open: &[f64],
     let len = close.len();
     let co: Vec<f64> = (0..len).map(|i| close[i] - open[i]).collect();
     let hl: Vec<f64> = (0..len).map(|i| high[i] - low[i]).collect();
-    let (mut a, mut b) = (S::default(), S::default());
+    let (mut a, mut b) = (states.child(), states.child());
     let num = kernels::sma_pass(&swma4(&co), n, origin, &mut a);
     let den = kernels::sma_pass(&swma4(&hl), n, origin, &mut b);
     states.compose(len, &[&a, &b], |_, _| {});
@@ -152,7 +152,7 @@ pub fn relative_vigor_signal_pass<S: crate::pass::StateSink>(open: &[f64],
     close: &[f64],
     n: usize,
     origin: usize, states: &mut S) -> Vec<f64> {
-    let mut stage = S::default();
+    let mut stage = states.child();
     let rvi = relative_vigor_pass(open, high, low, close, n, origin, &mut stage);
     states.compose(close.len(), &[&stage], |end, out| out.extend_from_slice(&rvi[end.saturating_sub(3)..end]));
     swma4(&rvi)
@@ -177,7 +177,7 @@ pub fn dkx_ma(open: &[f64], high: &[f64], low: &[f64], close: &[f64], m: usize, 
 
 /// Batch computation with terminal-state publication.
 pub fn dkx_ma_pass<S: crate::pass::StateSink>(open: &[f64], high: &[f64], low: &[f64], close: &[f64], m: usize, origin: usize, states: &mut S) -> Vec<f64> {
-    let (mut a, mut b) = (S::default(), S::default());
+    let (mut a, mut b) = (states.child(), states.child());
     let line = dkx_pass(open, high, low, close, origin, &mut a);
     let values = kernels::sma_pass(&line, m, origin, &mut b);
     states.compose(close.len(), &[&a, &b], |end, out| out.extend_from_slice(&line[end.saturating_sub(m)..end]));

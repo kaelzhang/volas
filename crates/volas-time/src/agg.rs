@@ -98,6 +98,16 @@ impl AggSpec {
         self.by_name.insert(name.into(), agg);
     }
 
+    /// This spec for columns renamed by `mapping` (old name -> new name): each renamed
+    /// column keeps the aggregator it had under its old name.
+    pub fn renamed(&self, mapping: &HashMap<String, String>) -> AggSpec {
+        let mut spec = self.clone();
+        for (old, new) in mapping {
+            spec.set(new.clone(), self.agg_for(old));
+        }
+        spec
+    }
+
     /// The aggregator for a column (the default if unset).
     pub fn agg_for(&self, name: &str) -> Agg {
         self.by_name.get(name).copied().unwrap_or(self.default)

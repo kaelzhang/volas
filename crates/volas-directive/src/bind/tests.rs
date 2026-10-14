@@ -73,8 +73,7 @@ fn binds_bare_name_command_on_the_fly() {
 }
 
 /// Against a frame, a bare name reads what it names: a data column, a command (kept as
-/// written), or — when it is both a data column and a command usable bare — nothing:
-/// the directive is ambiguous.
+/// written); a data column owns the name even when it also spells a command.
 #[test]
 fn binds_bare_names_against_a_frame() {
     let columns = |n: &str| matches!(n, "close" | "change" | "repeat");
@@ -82,8 +81,8 @@ fn binds_bare_names_against_a_frame() {
     let node = bind("close * obv").unwrap();
     assert!(uses_bare_command(&node, "obv") && !uses_bare_command(&node, "close"));
     assert!(matches!(node.node(), Node::Binary { right, .. } if matches!(&**right, Node::Command(_))));
-    let err = format!("{:?}", bind("close * change").unwrap_err());
-    assert!(err.contains("ambiguous name 'change' in 'close * change'"), "{err}");
+    let data = bind("close * change").unwrap();
+    assert!(matches!(data.node(), Node::Binary { right, .. } if matches!(&**right, Node::Data(name) if name == "change")));
     // `repeat` is no bare command (its operand is required): the data column is read
     assert!(bind("accbands@repeat").is_ok());
     assert!(bind("ma:5@(-obv) + nope + 1").is_ok()); // every node kind; an unknown name stays a name
@@ -138,6 +137,91 @@ fn check_bare_walks_every_node_kind() {
     assert!(bare("kdj").is_err()); // a bare name needing a sub
 }
 
+/// Projected indicator values are ordinary data at every command spelling and at
+/// every expression depth, even when the frame no longer has the command's inputs.
+#[test]
+fn directive_named_data_shadows_commands_in_every_operand() {
+    use volas_core::{Column, DataFrame};
+    let data = vec![2.0, 3.0, 5.0, 7.0];
+    let frame = DataFrame::new(vec!["atr:14".into(), "change".into()],
+        vec![Column::f64(data.clone()), Column::f64(data.clone())], None).unwrap();
+    for text in ["atr:14", "ATR:14", "atr:014@high,low,close", "atr:14+0", "CHANGE", "change:", "change:*1"] {
+        let node = bind_frame(&parse(text).unwrap(), &|n| frame.has_column(n), text).unwrap();
+        assert_eq!(crate::execute(&frame, &node).unwrap().to_f64_vec(), data, "{text}");
+    }
+    let text = "ema:2@(ATR:14)";
+    let node = bind_frame(&parse(text).unwrap(), &|n| frame.has_column(n), text).unwrap();
+    let got = crate::execute(&frame, &node).unwrap().to_f64_vec();
+    let expected = volas_compute::raw::indicators::ema(&data, 2);
+    assert!(got.iter().zip(expected).all(|(a,b)| a.to_bits()==b.to_bits() || a.is_nan() && b.is_nan()));
+}
+
+
+#[test]
+fn a_resolved_data_name_keeps_its_physical_label_and_window_history() {
+    use volas_core::{Column, DataFrame, History};
+    let frame = DataFrame::new(vec!["ATR:014".into(), "CHANGE".into()],
+        vec![Column::f64(vec![2.0, 3.0]), Column::f64(vec![4.0, 5.0])], None).unwrap();
+    let resolve = |name: &str| match name { "atr:14" => Some("ATR:014".to_string()), "change" => Some("CHANGE".to_string()), _ => None };
+    for text in ["atr:14+0", "CHANGE", "change:", "ma:2@(change)"] {
+        let node = bind_frame_resolved(&parse(text).unwrap(), &resolve, text).unwrap();
+        let (lookback, history) = (crate::lookback::lookback(&node), crate::lookback::history(&node));
+        assert_eq!(history, if text.starts_with("ma") { History::Accumulator } else { History::Window });
+        assert_eq!(lookback, usize::from(text.starts_with("ma")));
+        assert!(crate::execute(&frame, &node).is_ok(), "{text}");
+    }
+    let node = bind_frame_resolved(&parse("CHANGE").unwrap(), &resolve, "CHANGE").unwrap();
+    assert!(matches!(node.node(), Node::Data(name) if name == "CHANGE"));
+    assert!(matches!(node.continuation(), crate::types::Continuation::None));
+}
+
+
+#[test]
+fn a_cached_bound_command_blocks_every_equivalent_data_shadow() {
+    let no_data = |_: &str| false;
+    for text in ["close-OBV", "close-obv:", "close-(obv:)"] {
+        let node = bind_frame(&parse(text).unwrap(), &no_data, text).unwrap();
+        assert!(uses_command_shadow(&node, "obv"));
+        assert!(!uses_command_shadow(&node, "close"));
+    }
+    let node = bind_frame(&parse("change:*2").unwrap(), &no_data, "change:*2").unwrap();
+    assert!(uses_command_shadow(&node, "change"));
+    assert!(!uses_bare_command(&node, "change"));
+    let node = bind_frame(&parse("ema:2@(atr:14+0)").unwrap(), &no_data, "").unwrap();
+    assert!(uses_command_shadow(&node, "atr:14"));
+    assert!(uses_command_shadow(&node, "atr:14+0"));
+    let node = bind_frame(&parse("change:*2").unwrap(), &|name| name == "change", "").unwrap();
+    assert!(!uses_command_shadow(&node, "change"));
+}
+
+#[test]
+fn expression_literals_remain_constants_beside_numeric_data_labels() {
+    use volas_core::{Column, DataFrame};
+    let frame = DataFrame::new(vec!["close".into(), "1".into()],
+        vec![Column::f64(vec![2.0, 3.0]), Column::f64(vec![100.0, 200.0])], None).unwrap();
+    let node = bind_frame(&parse("close+1").unwrap(), &|name| frame.has_column(name), "").unwrap();
+    assert_eq!(crate::execute(&frame, &node).unwrap().to_f64_vec(), vec![3.0, 4.0]);
+}
+
+#[test]
+fn data_nodes_keep_identity_through_lowering_form_and_bare_validation() {
+    let data: Cst = Node::Data("ATR:014".into());
+    let bound = bind_node(&data).unwrap();
+    assert!(matches!(&bound, Node::Data(name) if name == "ATR:014"));
+    assert!(check_bare_node(&bound).is_ok());
+    let form = bind_form(&data).unwrap();
+    assert!(matches!(&form, Node::Data(name) if name == "ATR:014"));
+    assert_eq!(crate::stringify(&form), "ATR:014");
+}
+
+#[test]
+fn cached_unary_computation_protects_its_expression_and_nested_command() {
+    let node = bind_frame(&parse("~(close>ema:2)").unwrap(), &|name| name == "close", "").unwrap();
+    assert!(uses_command_shadow(&node, &crate::stringify(&node)));
+    assert!(uses_command_shadow(&node, "ema:2"));
+    assert!(!uses_command_shadow(&node, "close"));
+    assert!(!uses_command_shadow(&node, "1"));
+}
 
 /// A bare command's identity is canonical; a prospective data column keeps its case.
 #[test]
@@ -156,4 +240,30 @@ fn bare_command_collisions_use_canonical_identity() {
     }
     let explicit = bind_frame(&parse("ACCBANDS: + 1").unwrap(), &|_| false, "").unwrap();
     assert!(!uses_bare_command(&explicit, "accbands"));
+}
+
+
+/// Schema-label normalization agrees with the full renderer, including names whose
+/// command requires arguments or a sub-command and therefore cannot run bare.
+#[test]
+fn canonical_data_names_match_full_parse_and_render() {
+    let mut labels: Vec<String> = crate::spec::COMMANDS.iter().flat_map(|name| {
+        let mixed = name.chars().enumerate().map(|(i, c)| {
+            if i % 2 == 0 { c.to_ascii_uppercase() } else { c }
+        }).collect::<String>();
+        [name.to_string(), name.to_ascii_uppercase(), mixed]
+    }).collect();
+    labels.extend([
+        "open", "high", "low", "close", "volume", "Close", "RSI", "KDJ", "cdl", "CDL",
+        "_column", "x1", "nan", "inf", "", " OBV ", "OBV:", "ma:05", "atr:014@high,low,close",
+        "close + OBV", "1", "001", "ma:0", "bad:", "close +", "数据",
+    ].into_iter().map(str::to_string));
+    for label in labels {
+        let expected = crate::parse(&label).map(|node| crate::stringify::stringify_node(node.node()));
+        match (canonical_data_name(&label), expected) {
+            (Ok(actual), Ok(expected)) => assert_eq!(actual, expected, "{label}"),
+            (Err(actual), Err(expected)) => assert_eq!(actual.to_string(), expected.to_string(), "{label}"),
+            (actual, expected) => panic!("{label}: {actual:?} != {expected:?}"),
+        }
+    }
 }

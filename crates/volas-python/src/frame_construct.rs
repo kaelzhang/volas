@@ -6,9 +6,7 @@ use std::collections::HashSet;
 use pyo3::exceptions::{PyKeyError, PyTypeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList};
-use volas_core::{
-    CmpOp, DataFrame, Index, IndexKind, Tz,
-};
+use volas_core::{CmpOp, DataFrame, Tz};
 
 use crate::timeframe::{build_agg_spec_for, resolve_time_frame};
 #[allow(unused_imports)]
@@ -34,12 +32,9 @@ impl PyDataFrame {
         // The windowing arguments are checked before any data is read.
         let bounds = crate::frame_bounded::bounds(window, max_lookback)?;
         // `columns`, when given, selects and orders the columns — a strict projection, like
-        // `df[[...]]`: a name not present raises KeyError, and an empty list or a duplicate
-        // name is rejected. It never silently NaN-fills an absent column.
+        // `df[[...]]`: a name not present raises KeyError, a duplicate name is rejected, and
+        // an empty list keeps no column. It never silently NaN-fills an absent column.
         if let Some(cols) = &columns {
-            if cols.is_empty() {
-                return Err(PyValueError::new_err("columns must not be empty"));
-            }
             let mut seen = HashSet::with_capacity(cols.len());
             for c in cols {
                 if !seen.insert(c.as_str()) {
@@ -56,11 +51,35 @@ impl PyDataFrame {
         // volas pandas-free at import. To build a DatetimeIndex from a column, parse it with
         // `to_datetime` then `set_index` (or use `read_csv`).
         let (df, tf) = if let Ok(mut other) = data.extract::<PyRefMut<PyDataFrame>>() {
+            if columns.is_none()
+                && index.is_none()
+                && dtype.is_none()
+                && window.is_none()
+                && time_frame.is_none()
+                && cumulators.is_none()
+            {
+                // `DataFrame(other)` is `other.copy()`: the window and time-frame state too
+                return Ok(other.copy());
+            }
             if index.is_some() || dtype.is_some() || window.is_some() || time_frame.is_some() {
                 // a derivation that re-labels, re-types, re-windows or re-frames the rows reads them
                 other.read()?;
             }
             match &columns {
+                // re-labelled / re-typed: a new series of the visible rows' data columns
+                None if index.is_some() || dtype.is_some() => {
+                    let view = other.read()?;
+                    (
+                        view.select(&view.data_names()).map_err(pyerr)?,
+                        other.tf.clone(),
+                    )
+                }
+                // a windowed source made an unbounded frame gives its visible rows (its hidden
+                // margin serving as their history); re-windowed, all the rows it holds
+                None if other.window.is_some() && window.is_none() => {
+                    let view = other.read()?;
+                    (view.contiguous(0, view.rows()), other.tf.clone())
+                }
                 None => (other.inner.clone(), other.tf.clone()),
                 Some(cols) => {
                     // A projection reads like `df[[...]]` (stale cached columns refreshed,
@@ -68,12 +87,17 @@ impl PyDataFrame {
                     // projected onto `cols` too. The cumulator spec is per-column with a
                     // default, so the dropped columns' rules simply go unused — folding
                     // stays correct on the kept ones.
-                    // A strict selection of existing columns: a name that is not one raises
-                    // (it is never computed here).
-                    if let Some(c) = cols.iter().find(|c| !other.inner.has_column(c)) {
-                        return Err(PyKeyError::new_err(format!("column \"{c}\" not found")));
-                    }
-                    let inner = other.project(cols)?;
+                    // A strict selection of existing columns, a cached one by any spelling of
+                    // its directive: a name that is not one raises (it is never computed here).
+                    let names = cols
+                        .iter()
+                        .map(|c| {
+                            other.column_name(c).ok_or_else(|| {
+                                PyKeyError::new_err(format!("column \"{c}\" not found"))
+                            })
+                        })
+                        .collect::<PyResult<Vec<_>>>()?;
+                    let inner = other.project(&names)?;
                     // The open period follows the projection: kept data columns keep every
                     // fine bar; a cached column the projection turns into data was never in
                     // the fine bars, which hold it as missing.
@@ -115,20 +139,16 @@ impl PyDataFrame {
             ));
         };
         // F45: an explicit `index=` attaches row labels at construction (pandas
-        // `DataFrame(data, index=...)`): a list / array of int64, str or
-        // datetime labels — the same kinds (and uniqueness rules) as set_index.
+        // `DataFrame(data, index=...)`): a list / array of int64, str or datetime labels,
+        // keyed like set_index keys them (a re-sent row replaces the one before; any
+        // other repeated label raises). Aware labels (a frame's own `.index`) keep their
+        // zone.
         let df = match index {
             None => df,
             Some(ix) => {
                 let col = pyany_to_column(ix)?;
-                let new_index = Index::from_column(&col).map_err(pyerr)?;
-                // aware labels (a frame's own `.index`) keep their zone
-                let new_index = match (crate::convert::labels_zone(ix)?, new_index.kind()) {
-                    (Some(tz), IndexKind::Datetime(v, _)) => Index::datetime(v.clone(), tz),
-                    _ => new_index,
-                };
-                DataFrame::new(df.names().to_vec(), df.columns().to_vec(), Some(new_index))
-                    .map_err(pyerr)?
+                let tz = crate::convert::labels_zone(ix)?.unwrap_or(Tz::Naive);
+                df.with_labels(&col, tz, None).map_err(pyerr)?
             }
         };
         // `dtype=` casts every column to a single dtype (pandas `DataFrame(data,
@@ -137,23 +157,17 @@ impl PyDataFrame {
             None => df,
             Some(dt_str) => {
                 let dt = parse_dtype(dt_str)?;
-                let cols = df
-                    .columns()
-                    .iter()
-                    .map(|c| c.cast(dt))
-                    .collect::<std::result::Result<Vec<_>, _>>()
-                    .map_err(pyerr)?;
-                DataFrame::new(df.names().to_vec(), cols, Some((**df.index()).clone()))
-                    .map_err(pyerr)?
+                // a new series: its data columns cast (a cached one is not carried)
+                let mapping = df.data_names().into_iter().map(|n| (n, dt)).collect();
+                df.astype(&mapping).map_err(pyerr)?
             }
         };
         // Re-labelled or re-typed rows of a time-frame frame are bars that the open
         // period's fine bars no longer describe: the frame is the time-frame frame of its
-        // new rows, the last one the forming bar (as the `time_frame` argument builds it).
+        // new rows, the last one the forming bar, checked as the `time_frame` argument
+        // checks its seed.
         let tf = match tf {
-            Some(t) if index.is_some() || dtype.is_some() => {
-                Some(t.reseeded(&df)?)
-            }
+            Some(t) if index.is_some() || dtype.is_some() => Some(t.reseeded(&df)?),
             tf => tf,
         };
         // A `time_frame` makes this a cumulating frame: the given rows are bars at that
@@ -164,12 +178,22 @@ impl PyDataFrame {
             let frame = resolve_time_frame(tf_obj)?;
             let spec = build_agg_spec_for(cumulators, Some(df.names()))?;
             let tf = TfState::seeded(frame, spec, &df)?;
-            return PyDataFrame { inner: df, tf: Some(tf), window: None }.bounded(bounds);
+            return PyDataFrame {
+                inner: df,
+                tf: Some(tf),
+                window: None,
+            }
+            .bounded(bounds);
         }
         if cumulators.is_some() {
             return Err(PyValueError::new_err("cumulators requires time_frame"));
         }
-        PyDataFrame { inner: df, tf, window: None }.bounded(bounds)
+        PyDataFrame {
+            inner: df,
+            tf,
+            window: None,
+        }
+        .bounded(bounds)
     }
 
     /// The DatetimeIndex timezone name (`"UTC"` / `"+08:00"` /
@@ -189,9 +213,8 @@ impl PyDataFrame {
     /// data was ingested without a tz. Returns a new frame.
     pub(crate) fn tz_localize(&self, py: Python<'_>, tz: &str) -> PyResult<PyDataFrame> {
         let tzv = crate::timezone::parse(py, tz)?;
-        Ok(PyDataFrame::plain(
-            self.read()?.tz_localize(tzv).map_err(pyerr)?,
-        ))
+        let inner = self.read()?.tz_localize(tzv.clone()).map_err(pyerr)?;
+        self.derive_rezoned(inner, |bars| bars.tz_localize(tzv.clone()))
     }
 
     /// Change the index display / matching tz without moving any instant (pandas
@@ -201,14 +224,15 @@ impl PyDataFrame {
     /// attached without the naive-guard that protects user-facing `tz_convert`.
     pub(crate) fn _set_index_tz(&self, py: Python<'_>, tz: &str) -> PyResult<PyDataFrame> {
         let tzv = crate::timezone::parse(py, tz)?;
-        Ok(PyDataFrame::plain(self.read()?.set_index_tz(tzv).map_err(pyerr)?))
+        Ok(PyDataFrame::plain(
+            self.read()?.set_index_tz(tzv).map_err(pyerr)?,
+        ))
     }
 
     pub(crate) fn tz_convert(&self, py: Python<'_>, tz: &str) -> PyResult<PyDataFrame> {
         let tzv = crate::timezone::parse(py, tz)?;
-        Ok(PyDataFrame::plain(
-            self.read()?.tz_convert(tzv).map_err(pyerr)?,
-        ))
+        let inner = self.read()?.tz_convert(tzv.clone()).map_err(pyerr)?;
+        self.derive_rezoned(inner, |bars| bars.tz_convert(tzv.clone()))
     }
 
     /// The column names, in order.

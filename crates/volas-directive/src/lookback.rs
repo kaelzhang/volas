@@ -27,7 +27,7 @@ pub fn lookback(node: &Ast) -> usize { lookback_node(node.node()) }
 
 pub(crate) fn lookback_node(node: &BoundNode) -> usize {
     match node {
-        Node::Scalar(_) => 0,
+        Node::Data(_) | Node::Scalar(_) => 0,
         // A bare name is a column (no warm-up) or a no-argument command.
         Node::Name(_) => command_of(node).map_or(0, |(spec, args)| spec.lookback_of(&args)),
         Node::Command(c) => {
@@ -55,7 +55,7 @@ pub(crate) fn evaluates_on_a_window_node(node: &BoundNode) -> bool {
         command_of(node).is_none_or(|(spec, args)| spec.history(&args) != History::Recursive && !spec.emits_position())
     };
     match node {
-        Node::Scalar(_) | Node::Name(_) => own(node),
+        Node::Data(_) | Node::Scalar(_) | Node::Name(_) => own(node),
         Node::Command(c) => own(node) && c.series.iter().all(evaluates_on_a_window_node),
         Node::Unary { operand, .. } => evaluates_on_a_window_node(operand),
         Node::Binary { left, right, .. } => evaluates_on_a_window_node(left) && evaluates_on_a_window_node(right),
@@ -115,7 +115,7 @@ fn classes(node: &BoundNode) -> (u8, usize) {
     };
     let join = |a: (u8, usize), b: (u8, usize)| (a.0.max(b.0), a.1 + b.1);
     match node {
-        Node::Scalar(_) | Node::Name(_) => own(node),
+        Node::Data(_) | Node::Scalar(_) | Node::Name(_) => own(node),
         Node::Command(c) => c.series.iter().map(classes).fold(own(node), join),
         Node::Unary { operand, .. } => classes(operand),
         Node::Binary { left, right, .. } => join(classes(left), classes(right)),

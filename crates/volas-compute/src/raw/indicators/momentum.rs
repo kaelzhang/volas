@@ -282,11 +282,12 @@ pub fn imi_pass<S: crate::pass::StateSink>(open: &[f64], close: &[f64], period: 
         let (lu, ld) = updown(today - lookback);
         up_sum.sub(lu);
         down_sum.sub(ld);
-        states.record(today, n, || Slide::state([up_sum, down_sum], 0, origin + today + 1));
+        states.record(today, n, |out| Slide::append_components(out, [up_sum, down_sum], 0, origin + today + 1));
     }
     if clean && up_sum.value().is_finite() && down_sum.value().is_finite() {
         return out.finish();
     }
+    states.restart();
     // A non-finite bar entered: window-local careful path (see `crate::guard`).
     let mut out = crate::buf::OutBuf::warmup(n, lookback);
     crate::guard::window_sums_pass(n, period, Order::AddReadDrop, origin, |i| {
@@ -337,17 +338,18 @@ pub fn cci_pass(high: &[f64], low: &[f64], close: &[f64], period: usize, origin:
         }
         out.set(i, value(i, sum.mean(p)));
         sum.sub(tp[i + 1 - period]);
-        states.record(i, n, || Slide::state([sum], 0, origin + i + 1));
+        states.record(i, n, |out| Slide::append_components(out, [sum], 0, origin + i + 1));
     }
     if clean && sum.value().is_finite() {
         return out.finish();
     }
+    states.restart();
     // A non-finite bar entered: window-local careful path (see `crate::guard`).
     let mut slide = Slide::<1>::at(origin);
     let tpf = |j: usize| tp[j];
     (0..n).map(|i| {
         let v = cci_row(&mut slide, period, i, tpf);
-        states.record(i, n, || { let mut s = vec![0.0; Slide::<1>::STATE]; slide.write_state(&mut s); s });
+        states.record(i, n, |out| slide.append_state(out));
         v
     }).collect()
 }
@@ -620,10 +622,8 @@ pub fn ultosc_pass<S: crate::pass::StateSink>(high: &[f64],
     let mut slides = [Slide::<2>::at(origin); 3];
     (0..n).map(|row| {
         let value = ultosc_row(|j| terms[j], periods, row, &mut slides);
-        states.record(row, n, || {
-            let mut state = vec![0.0; 3 * Slide::<2>::STATE];
-            for (slide, words) in slides.iter().zip(state.chunks_mut(Slide::<2>::STATE)) { slide.write_state(words); }
-            state
+        states.record(row, n, |out| {
+            for slide in &slides { slide.append_state(out); }
         });
         value
     }).collect()

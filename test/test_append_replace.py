@@ -85,7 +85,7 @@ def test_a_datetime_label_before_the_last_raises_and_leaves_the_frame_unchanged(
     with pytest.raises(ValueError, match="only increases"):
         df.append(_frame_of([_bar(9)], np.array([at])))
     # in a batch, a later row going back raises too, atomically
-    batch = _frame_of([_bar(5), _bar(6), _bar(7)], T0 + np.array([5, 6, 5]) * MINUTE)
+    batch = _frame_of([_bar(5), _bar(6), _bar(7)], T0 + np.array([5, 6, 4]) * MINUTE)
     with pytest.raises(ValueError, match="only increases"):
         df.append(batch)
     assert len(df) == 5
@@ -108,9 +108,9 @@ def test_an_integer_index_stays_unique():
 def test_a_batch_replaces_and_appends_in_order():
     df = _frame_of([_bar(i) for i in range(5)], T0 + np.arange(5) * MINUTE)
     df['ema:3']
-    batch = _frame_of([_bar(4, 0.5), _bar(5), _bar(5, 0.3), _bar(6)],
-                      T0 + np.array([4, 5, 5, 6]) * MINUTE)
-    df.append(batch)
+    # a batch never repeats a label: the re-sent 5 is the first row of the next batch
+    df.append(_frame_of([_bar(4, 0.5), _bar(5)], T0 + np.array([4, 5]) * MINUTE))
+    df.append(_frame_of([_bar(5, 0.3), _bar(6)], T0 + np.array([5, 6]) * MINUTE))
     assert len(df) == 7
     assert df['close'].iloc[-2] == _bar(5, 0.3)["close"]
     _same(df['ema:3'], _full(df)['ema:3'], "batch")

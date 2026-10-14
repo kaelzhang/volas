@@ -31,11 +31,11 @@ mod state;
 mod row;
 mod window;
 
-pub use history::{capture, checkpoint, replay};
+pub use history::{capture, checkpoint, checkpoints, replay};
 pub use initial_state::initial_state;
 pub use resume::execute_resume;
 pub use scalar::execute_resume_step;
-pub use states::{capture as capture_states, execute_with_states, WithStates};
+pub use states::{capture as capture_states, execute_with_states, execute_with_states_and_anchors, execute_for_cache, WithStates};
 
 /// The command a continuation of `node` runs: a plain `Node::Command` (borrowed), or a
 /// bare `Node::Name` no-argument command bound on the fly (a tree not bound against a
