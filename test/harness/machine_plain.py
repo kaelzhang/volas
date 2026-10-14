@@ -253,17 +253,12 @@ class PlainMachine(FrameMachine):
         existing = name in self.df.columns
 
         def commit(_):
-            stored = [None] * self.visible_start() + [float(v) for v in values]
             if self.window is not None and was_cached:
                 self.opaque.add(name)  # its hidden cells stay as the cache held them
             if name in self.cached:
                 del self.cached[name]
-            # User-added data columns also own their hidden history on replacement.
-            if name in self.coarse().columns:
-                for i, v in enumerate(stored[self.visible_start():]):
-                    self.store.write(self.visible_start() + i, name, v)
-            else:
-                self.store.add_column(name, stored)
+            self.store.set_column(name, [float(v) for v in values],
+                                  start=self.visible_start(), dtype=str(values.dtype))
             if existing:
                 self._invalidate_all()  # a replaced column may feed any cache
             # A brand-new column leaves every cache as it is (each keeps its binding).

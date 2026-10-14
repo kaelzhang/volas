@@ -27,6 +27,18 @@ from . import build, contracts, observe
 from .data import OHLC, Schema
 
 
+def _columns(schema: Schema, user: dict[str, str]) -> tuple[str, ...]:
+    return schema.columns + tuple(c for c in user if c not in schema.columns)
+
+
+def _record_dtype(schema: Schema, user: dict[str, str], name: str, dtype: str) -> None:
+    # Whole-column replacement adopts the incoming type, including for base data.
+    if name not in schema.columns or dtype != schema.dtype(name):
+        user[name] = dtype
+    else:
+        user.pop(name, None)
+
+
 @dataclass
 class Ledger:
     """Accepted rows of a plain frame (or the coarse rows of a tf frame)."""
@@ -34,7 +46,7 @@ class Ledger:
     schema: Schema
     rows: list[dict] = field(default_factory=list)
     index: list[int] = field(default_factory=list)  # epoch ns, or absolute range labels
-    user: dict[str, str] = field(default_factory=dict)  # plain columns added by setitem -> dtype
+    user: dict[str, str] = field(default_factory=dict)  # added columns / replacement dtype overrides
 
     # Whether the frame's index is still a RangeIndex (a bare RangeIndex bar then
     # takes the next labels); a Row / sliced bar / slice turns it into explicit labels.
@@ -50,7 +62,7 @@ class Ledger:
 
     @property
     def columns(self) -> tuple[str, ...]:
-        return self.schema.columns + tuple(self.user)
+        return _columns(self.schema, self.user)
 
     def dtype(self, col: str) -> str:
         return self.user[col] if col in self.user else self.schema.dtype(col)
@@ -108,8 +120,19 @@ class Ledger:
         self.rows[pos][col] = value
 
     def add_column(self, name: str, values: list, dtype: str = 'float64') -> None:
-        self.user[name] = dtype
-        for r, v in zip(self.rows, values):
+        self.set_column(name, values, dtype=dtype)
+
+    def set_column(self, name: str, values: list, start: int = 0,
+                   dtype: str = 'float64') -> None:
+        """Record a whole-column write; retain history outside the visible rows.
+
+        Unlike a cell write, replacement takes the incoming column's dtype.
+        The product has already checked that retained values can survive it.
+        """
+        _record_dtype(self.schema, self.user, name, dtype)
+        for r in self.rows:
+            r.setdefault(name, None)
+        for r, v in zip(self.rows[start:], values):
             r[name] = v
 
     def slice(self, start: int) -> 'Ledger':
@@ -134,7 +157,8 @@ class Ledger:
                         tuple((c, self.dtype(c)) for c in columns if c not in self.schema.columns[:5]),
                         self.schema.index, self.schema.tz)
         index = None if self.schema.index == 'range' else self.index
-        full = build.frame(schema, self.rows, index, columns=columns)
+        full = build.frame(schema, self.rows, index, columns=columns,
+                           dtypes={c: self.dtype(c) for c in columns})
         return full.iloc[start:] if start else full
 
 
@@ -198,10 +222,11 @@ def aggregate(schema: Schema, fine: list[tuple[int, dict]], tf: str,
     rows = []
     for g in groups:
         out = {}
-        for col in schema.columns + tuple(user or ()):
+        for col in _columns(schema, user or {}):
             op = AGG.get(col, 'last')
             vals = [r.get(col) for r in g]
-            if col in (user or {}) or schema.dtype(col) in ('float64', 'float32'):
+            dtype = user[col] if user and col in user else schema.dtype(col)
+            if dtype in ('float64', 'float32'):
                 vals = [None if v is None else float(v) for v in vals]  # float addition
             out[col] = _aggregate(op, vals)
         rows.append(out)
@@ -224,7 +249,7 @@ class TfLedger:
     seed_index: list[int] = field(default_factory=list)
     seed_rows: list[dict] = field(default_factory=list)
     fine: list[tuple[int, dict]] = field(default_factory=list)
-    user: dict[str, str] = field(default_factory=dict)  # plain columns added by setitem -> dtype
+    user: dict[str, str] = field(default_factory=dict)  # added columns / replacement dtype overrides
     override: dict = field(default_factory=dict)  # forming cells written over missing bar values
 
     def copy(self) -> 'TfLedger':
@@ -280,6 +305,14 @@ class TfLedger:
         self.seed_rows, self.seed_index = rows[:last], list(coarse.index[:last])
         self.fine = open_bars
 
+    def set_column(self, name: str, values: list, start: int = 0,
+                   dtype: str = 'float64') -> None:
+        """Whole-column writes share dtype ownership with the plain ledger."""
+        existing = self.carried(name)
+        self.write({start + i: {name: v} for i, v in enumerate(values)},
+                   columns=None if existing else {name: dtype})
+        _record_dtype(self.schema, self.user, name, dtype)
+
     def accepts(self, ts: int) -> bool:
         """Whether the fold takes a bar at ``ts`` (documented: no out-of-order bar)."""
         last = self.fine[-1][0] if self.fine else (self.seed_index[-1] if self.seed_index else None)
@@ -293,7 +326,7 @@ class TfLedger:
                 self.seed_rows, self.seed_index = [dict(r) for r in coarse.rows], list(coarse.index)
                 self.fine = []
             self.override = {}
-        full = {c: row.get(c) for c in self.schema.columns + tuple(self.user)}
+        full = {c: row.get(c) for c in _columns(self.schema, self.user)}
         if self.fine and self.fine[-1][0] == ts:
             self.fine[-1] = (ts, full)  # a re-sent bar replaces the one it repeats
         else:
