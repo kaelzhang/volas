@@ -180,9 +180,11 @@ name: whitespace removed, minimal parentheses, every argument written as its val
 The name does not depend on the spelling: `boll`, `boll:`, `BOLL` and `boll:20@close`
 all cache as one column `boll`. The cached column keeps the directive it was bound to
 when it was cached, and an append continues exactly that directive — never a re-read of
-its name. When an operand binds to a data column with a noncanonical physical label,
-that exact label is kept in the stored expression name (`ema:2@(EMA:2)`, for example).
-Projections and window declarations use this bound name too.
+its name. A bound operand retains the exact physical data label for execution, while
+its rendered name uses that label's canonical directive syntax: `ema:2@(EMA:02)` names
+`ema:2@(ema:2)`. Expression labels retain their grouping even under unary operators or
+inside `@` operands. Re-parsing the name against the same data schema gives the same
+values. Projections and window declarations use this canonical name too.
 
 ## Error handling
 

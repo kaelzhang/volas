@@ -144,7 +144,8 @@ def test_binding_reads_the_physical_data_column_under_every_command_spelling(spe
         np.testing.assert_array_equal(df.exec(directive), CLOSE * CHANGE)
         np.testing.assert_array_equal(df[directive], CLOSE * CHANGE)
         np.testing.assert_array_equal(df[name], CHANGE)
-    assert list(df.columns) == [*before_columns, f'close*{spelling}']
+    assert volas.directive_stringify(f'close*{spelling}') == 'close*change'
+    assert list(df.columns) == [*before_columns, 'close*change']
     assert not df.is_computed(spelling)
     assert df.is_computed(f'close*{spelling}')
     np.testing.assert_array_equal(df.get_column(spelling), CHANGE)

@@ -16,44 +16,44 @@ use crate::types::{Command, Node, Payload, UnaryOp};
 /// cache key) or a directive [`Form`](crate::types::Form) (`directive_stringify`, where
 /// a required argument may be absent), rendered alike.
 pub(crate) fn stringify_node<A: Payload>(node: &Node<A>) -> String {
+    render_node(node).0
+}
+
+/// Grouping follows the rendered syntax, including data labels that spell a directive.
+/// A bound Data node still executes as one column; only its canonical spelling is read
+/// here, through the same parser and renderer used for every other tree.
+#[derive(Clone, Copy)]
+enum Shape { Primary, Scalar, Binary(u8) }
+
+fn render_node<A: Payload>(node: &Node<A>) -> (String, Shape) {
+    let primary = |s| (s, Shape::Primary);
     match node {
-        // a bare name that is a command usable bare names that command (a frame-bound
-        // tree holds none: there it is a command node, or a resolved Data reference)
-        Node::Name(s) if is_bare_command(s) => normalize(s).into_owned(),
-        Node::Data(s) | Node::Name(s) => s.clone(),
-        Node::Scalar(v) => v.token(),
-        Node::Command(cmd) => stringify_command(cmd),
+        Node::Data(s) if !is_identifier(s) => {
+            match crate::parse(s) {
+                Ok(ast) => render_node(ast.node()),
+                Err(_) => primary(s.clone()),
+            }
+        }
+        Node::Data(s) | Node::Name(s) if is_bare_command(s) => primary(normalize(s).into_owned()),
+        Node::Data(s) | Node::Name(s) => primary(s.clone()),
+        Node::Scalar(v) => (v.token(), Shape::Scalar),
+        Node::Command(cmd) => primary(stringify_command(cmd)),
         Node::Unary { op, operand } => {
-            let op_s = match op {
-                UnaryOp::Not => "~",
-                UnaryOp::Neg => "-",
-            };
-            // A negated number keeps its parentheses: `-5` is an exact literal, `-(5)`
-            // the negation of one, so each form re-parses as itself.
-            let inner = match operand.as_ref() {
-                Node::Binary { .. } => format!("({})", stringify_node(operand)),
-                Node::Scalar(_) if *op == UnaryOp::Neg => format!("({})", stringify_node(operand)),
-                _ => stringify_node(operand),
-            };
-            format!("{op_s}{inner}")
+            let op_s = match op { UnaryOp::Not => "~", UnaryOp::Neg => "-" };
+            let (text, shape) = render_node(operand);
+            // `-5` is a literal; `-(5)` is its negation. Keep both syntax and zero sign.
+            let grouped = matches!(shape, Shape::Binary(_))
+                || (*op == UnaryOp::Neg && matches!(shape, Shape::Scalar));
+            let inner = if grouped { format!("({text})") } else { text };
+            primary(format!("{op_s}{inner}"))
         }
         Node::Binary { left, op, right } => {
             let p = op.priority();
-            // The left child only needs parens if it binds *looser* than us.
-            let l = match left.as_ref() {
-                Node::Binary { op: lop, .. } if lop.priority() < p => {
-                    format!("({})", stringify_node(left))
-                }
-                _ => stringify_node(left),
-            };
-            // The right child needs parens at equal priority too (left-assoc).
-            let r = match right.as_ref() {
-                Node::Binary { op: rop, .. } if rop.priority() <= p => {
-                    format!("({})", stringify_node(right))
-                }
-                _ => stringify_node(right),
-            };
-            format!("{l}{}{r}", op.token())
+            let (l, ls) = render_node(left);
+            let (r, rs) = render_node(right);
+            let l = if matches!(ls, Shape::Binary(lp) if lp < p) { format!("({l})") } else { l };
+            let r = if matches!(rs, Shape::Binary(rp) if rp <= p) { format!("({r})") } else { r };
+            (format!("{l}{}{r}", op.token()), Shape::Binary(p))
         }
     }
 }

@@ -211,7 +211,7 @@ fn data_nodes_keep_identity_through_lowering_form_and_bare_validation() {
     assert!(check_bare_node(&bound).is_ok());
     let form = bind_form(&data).unwrap();
     assert!(matches!(&form, Node::Data(name) if name == "ATR:014"));
-    assert_eq!(crate::stringify(&form), "ATR:014");
+    assert_eq!(crate::stringify(&form), "atr:14");
 }
 
 #[test]

@@ -234,15 +234,37 @@ fn directive_lookback(directive: &str) -> PyResult<usize> {
 /// `history` (`'window'` / `'accumulating'` / `'recursive'` under the directive's
 /// arguments), `accumulates` (a running accumulator by kind), `resume` (`'recompute'` /
 /// `'rows'` / `'step'`), `position` (a row-position output) and `bare` (usable as a bare
-/// name). `directive` is one command, written explicitly or bare.
+/// name). Without `columns`, `directive` is one command, explicit or bare. With
+/// `columns`, it is any expression: returns its bound lookback / history class and
+/// whether adding `shadow` would change a command dependency of that binding.
 #[pyfunction]
+#[pyo3(signature = (directive, columns=None, shadow=None))]
 fn _directive_facts<'py>(
     py: Python<'py>,
     directive: &str,
+    columns: Option<Vec<String>>,
+    shadow: Option<&str>,
 ) -> PyResult<Bound<'py, pyo3::types::PyDict>> {
     use volas_directive::spec::{History, Resume};
     use volas_directive::types::Node;
     let node = parse(directive).map_err(directive_err)?;
+    if let Some(columns) = columns {
+        // Harness inventory facts use the same binding owner as execution. A physical
+        // directive label is data at every nesting level, with no command warm-up.
+        let identities: Vec<_> = columns.iter().map(|c| crate::frame_identity::data_identity(c)).collect();
+        let bound = volas_directive::bind_frame_resolved(&node, &|name| {
+            identities.iter().position(|id| id.as_ref() == name).map(|i| columns[i].clone())
+        }, directive).map_err(directive_err)?;
+        let reach = volas_directive::lookback::reach(&bound);
+        let class = reach.history.class();
+        let facts = pyo3::types::PyDict::new(py);
+        facts.set_item("lookback", reach.lookback)?;
+        facts.set_item("history_class", class)?;
+        facts.set_item("shadows", shadow.is_some_and(|name| {
+            volas_directive::uses_command_shadow(&bound, &crate::frame_identity::data_identity(name))
+        }))?;
+        return Ok(facts);
+    }
     let node = match node.node() {
         Node::Name(name) => std::rc::Rc::new(
             volas_directive::bind_command(name, None, &[], &[]).map_err(value_err)?,
