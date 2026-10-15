@@ -28,9 +28,9 @@ from hypothesis.stateful import RuleBasedStateMachine, invariant, precondition, 
 import volas
 import volas_rs
 
-from . import contracts, inventory, observe
+from . import contracts, observe
 from .data import EXTREME_SCALES
-from .directives import Directive, directives, stored_bare_names
+from .directives import Directive, directives
 from .ledger import Ledger, reference
 
 
@@ -149,13 +149,12 @@ class FrameMachine(RuleBasedStateMachine):
             tolerance = max(tolerance, contracts.ULP_DRIFT_TOLERANCE)
         return tolerance
 
-    def oracle(self, entry: Entry, evaluate: bool = False, hide: set[str] = frozenset()):
-        """The reference values of ``entry`` on the visible rows, or its error class —
-        over the frame without the data columns ``hide``."""
+    def oracle(self, entry: Entry, evaluate: bool = False):
+        """Reference values on visible rows under the entry's original data binding."""
         if entry.lost:
             return None, ValueError
         text = entry.directive.text if entry.directive else entry.name
-        env = tuple(c for c in entry.env if c not in hide)
+        env = entry.env
         values, error = reference(self.coarse(), text, env, entry.start, evaluate)
         if error is not None:
             return None, error
@@ -243,7 +242,7 @@ class FrameMachine(RuleBasedStateMachine):
             return False  # a logical combination cannot be excused a tie flip
         if self.window is not None:
             try:
-                volas.directive_lookback(d.text)
+                volas_rs._directive_facts(d.text, columns=list(self.env()))
             except Exception:
                 return False
         return True
@@ -252,8 +251,9 @@ class FrameMachine(RuleBasedStateMachine):
         """Whether a windowed frame refuses ``d`` requested after construction: a
         directive of history class 2 or 3, or one reading more rows than the margin (the
         frames under test declare no directive)."""
+        facts = volas_rs._directive_facts(d.text, columns=list(self.env()))
         return (self.window is not None and contracts.WINDOWED_LATE_RECURSION_RAISES
-                and (inventory.history_class(d.text) > 1 or volas.directive_lookback(d.text) > self.max_lookback))
+                and (facts['history_class'] > 1 or facts['lookback'] > self.max_lookback))
 
     @rule(data=st.data())
     def cache(self, data):
@@ -297,11 +297,11 @@ class FrameMachine(RuleBasedStateMachine):
             got = observe.column_values_series(series)
             observe.same_indicator(got, np.asarray(want), f'df[{d.text!r}]', self.tolerance(entry),
                                    self.excused(entry))
-            # I9: the column name is a directive of the same meaning (it is what a
-            # refresh re-parses — reading its bare names as the commands, never as a data
-            # column named like one: `change: * 2` caches as `change*2`).
+            # I9: re-parsing the canonical name under the original data binding must
+            # compute the same values. Physical columns own every equivalent spelling;
+            # refresh itself retains its bound tree and never re-parses the name.
             renamed = replace(entry, name=col, directive=replace(d, text=col))
-            again, error = self.oracle(renamed, hide=stored_bare_names(col) & self.command_columns())
+            again, error = self.oracle(renamed)
             assert error is None, f'the cached name {col!r} of {d.text!r} does not re-parse: {error}'
             observe.same_indicator(np.asarray(again), np.asarray(want), f'{col!r} vs {d.text!r}')
             self.column_of[name] = col

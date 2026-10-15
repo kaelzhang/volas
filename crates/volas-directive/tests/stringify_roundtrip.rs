@@ -1,7 +1,6 @@
 //! A canonical name re-parses to the directive it names.
 //!
-//! The frame caches a computed column under `stringify(parse(d))` and re-parses that
-//! name to refresh it, so for every directive `d` the grammar accepts, the canonical
+//! The frame caches a computed column under its bound canonical name, so for every directive `d` the grammar accepts, the canonical
 //! name must parse, be its own canonical name (a fixed point), and compute the same
 //! column as `d`. (`parse(stringify(parse(d)))` equals `parse(d)` as a tree exactly
 //! when `d` spells out nothing that canonicalizing drops — a default argument or
@@ -172,4 +171,45 @@ fn a_directive_without_defaults_reparses_to_the_same_tree() {
         let name = stringify(&*node);
         assert_eq!(*parse(&name).unwrap(), *node, "{d} -> {name}");
     }
+}
+
+/// A bound data reference can itself spell an expression. Its syntax still determines
+/// grouping in the shared renderer, although execution reads its physical column.
+#[test]
+fn bound_data_syntax_roundtrips_every_operator_unary_and_series_nesting() {
+    use volas_directive::{bind_frame_resolved, canonical_data_name};
+    let mut df = ohlcv(80);
+    let labels = ["open+close", "open*close", "open<close", "-(open+close)",
+        "ma:3@(open+close)", "ACCBANDS", "odd label"];
+    for label in labels {
+        df.set_column(label, Column::f64((0..80).map(|i| 1.0 + i as f64).collect())).unwrap();
+    }
+    let resolve = |name: &str| df.names().iter().find(|n|
+        canonical_data_name(n).is_ok_and(|id| id == name)).cloned();
+    for label in &labels[..labels.len() - 1] {
+        for op in BINARY {
+            let expr = format!("({label}){op}close");
+            for text in [expr.clone(), format!("close{op}({label})"),
+                format!("-({expr})"), format!("~({expr})"),
+                format!("ma:3@({expr})"), format!("ma:3@(-({expr}))"),
+                format!("ma:3@(ma:2@({expr}))"), format!("-({label})"),
+                format!("~({label})")] {
+                let node = bind_frame_resolved(&parse(&text).unwrap(), &resolve, &text).unwrap();
+                let name = stringify(&node);
+                assert_eq!(name, stringify(&*parse(&text).unwrap()), "{text}");
+                let again = bind_frame_resolved(&parse(&name).unwrap(), &resolve, &name).unwrap();
+                assert_eq!(stringify(&again), name, "{text}");
+                match (execute(&df, &node), execute(&df, &again)) {
+                    (Ok(a), Ok(b)) => assert!(same_column(&a, &b), "{text} -> {name}"),
+                    (Err(_), Err(_)) => {},
+                    (a, b) => panic!("{text}: {:?} vs {:?}", a.is_ok(), b.is_ok()),
+                }
+            }
+        }
+    }
+    let opaque = bind_frame_resolved(&parse("open").unwrap(), &|_| Some("odd label".into()), "").unwrap();
+    assert_eq!(stringify(&opaque), "odd label");
+    let opaque_operand = bind_frame_resolved(&parse("-open").unwrap(),
+        &|name| (name == "open").then(|| "odd label".into()), "").unwrap();
+    assert_eq!(stringify(&opaque_operand), "-odd label");
 }

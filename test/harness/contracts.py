@@ -33,7 +33,8 @@ def avoids(defect: str) -> bool:
 # --- naming (README "directive_stringify") -------------------------------------------
 
 # A bare name that is both a data column and a built-in command reads the data at
-# bind time: an existing data column owns the name. A new data column cannot shadow
+# bind time, under every canonical spelling and at every expression level (R40).
+# A new data column cannot shadow
 # a command read by an existing cached directive. A new directive binds data only.
 AMBIGUOUS_BARE_NAME_RAISES = False
 COLUMN_UNDER_A_CACHED_COMMAND_RAISES = True

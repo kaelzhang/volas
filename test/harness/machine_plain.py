@@ -11,7 +11,6 @@ import volas
 import volas_rs
 
 from . import build, contracts, observe
-from .directives import stored_bare_names
 from .data import EPOCHS, NS, make_rows, next_timestamps, regimes, schemas, steps
 from .ledger import Ledger, last_close
 from .machine_base import FrameMachine
@@ -239,8 +238,8 @@ class PlainMachine(FrameMachine):
             name = data.draw(st.sampled_from([ln.canonical for ln in executable_lines()][:40]))
         else:
             name = data.draw(st.sampled_from(list(self.df.columns)))
-        bare = set(volas_rs._directive_bare_commands)
-        if name in bare and any(name in stored_bare_names(key) for key in self.cached if key != name):
+        if any(volas_rs._directive_facts((entry.directive.text if entry.directive else entry.name), columns=list(entry.env), shadow=name)['shadows']
+               for key, entry in self.cached.items() if key != name):
             if contracts.COLUMN_UNDER_A_CACHED_COMMAND_RAISES:
                 self.attempt(lambda: self.df.__setitem__(name, np.zeros(len(self.df))),
                              expect_error=ValueError, label=f'df[{name!r}] = ... under a cached command')

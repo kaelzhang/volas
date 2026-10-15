@@ -140,7 +140,9 @@ impl PyDataFrame {
                 _ => None,
             };
             if let Some(rows) = rows {
-                let led = self.inner.led(&self.inner, rows);
+                // Other cached columns may retain an older lead. This column's
+                // computation starts at `since`; earlier rows must never warm it up.
+                let led = self.inner.led(&self.inner, rows.min(origin - since));
                 return self.refresh_led(
                     name,
                     node,
