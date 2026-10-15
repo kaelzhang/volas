@@ -8,7 +8,6 @@ names it reads (which may bind to a frame column of the same name).
 
 from __future__ import annotations
 
-import re
 from dataclasses import dataclass
 
 from hypothesis import strategies as st
@@ -59,14 +58,6 @@ def _arg_token(draw, domain: inventory.ArgDomain) -> str:
     return repr(round(value, 3)) if domain.lo <= round(value, 3) <= domain.hi else repr(domain.lo)
 
 
-_BARE = re.compile(r'(?<![\w.])([A-Za-z_][\w.]*)(?![\w.:@])')
-
-
-def stored_bare_names(name: str) -> set[str]:
-    """The bare names (as spelled) of a cached column's name — the directive text a
-    refresh re-reads: every identifier that is not a command with arguments or a series
-    (``ma:5``, ``accbands@open``), including the ``@`` operands."""
-    return set(_BARE.findall(name))
 
 
 @st.composite
