@@ -2,7 +2,7 @@
 
 
 use numpy::{IntoPyArray, PyReadwriteArray2};
-use pyo3::exceptions::{PyKeyError, PyTypeError, PyValueError};
+use pyo3::exceptions::{PyTypeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::{PyCapsule, PyDict, PyList};
 use volas_core::{
@@ -121,7 +121,6 @@ impl PyDataFrame {
         na_value: Option<Bound<'py, PyAny>>,
     ) -> PyResult<Bound<'py, PyAny>> {
         let node = parse(directive).map_err(directive_err)?;
-        self.admit_new(&node, directive)?;
         let col = self.evaluate(&*self.binding_frame()?, &node, directive)?;
         let col = match &self.window {
             Some(_) => {
@@ -232,10 +231,7 @@ impl PyDataFrame {
         let positions: Vec<usize> = match &columns {
             Some(cols) => cols
                 .iter()
-                .map(|n| {
-                    df.column_pos(n)
-                        .ok_or_else(|| PyKeyError::new_err(format!("column \"{n}\" not found")))
-                })
+                .map(|n| Self::column_position(df, n))
                 .collect::<PyResult<_>>()?,
             None => (0..df.width()).collect(),
         };
@@ -310,7 +306,9 @@ impl PyDataFrame {
     #[pyo3(signature = (data, *, copy = volas_arrow::DEFAULT_IMPORT_COPY), text_signature = "(data, *, copy=False)")]
     pub(crate) fn from_arrow(data: &Bound<'_, PyAny>, copy: bool) -> PyResult<PyDataFrame> {
         let (names, cols, height) = crate::arrow::frame_from_arrow_obj(data, copy)?;
-        Ok(PyDataFrame::plain(DataFrame::new(names, cols, Some(Index::range(height))).map_err(pyerr)?))
+        let frame = DataFrame::new(names, cols, Some(Index::range(height))).map_err(pyerr)?;
+        Self::validate_schema(&frame)?;
+        Ok(PyDataFrame::plain(frame))
     }
 
     /// Export as a `pyarrow.Table` (zero-copy where dtypes match; requires pyarrow).
@@ -476,10 +474,7 @@ impl PyDataFrame {
         let positions: Vec<usize> = match &columns {
             Some(cols) => cols
                 .iter()
-                .map(|n| {
-                    df.column_pos(n)
-                        .ok_or_else(|| PyKeyError::new_err(format!("column \"{n}\" not found")))
-                })
+                .map(|n| Self::column_position(df, n))
                 .collect::<PyResult<_>>()?,
             None => (0..df.width()).collect(),
         };

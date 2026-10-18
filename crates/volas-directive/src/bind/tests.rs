@@ -211,7 +211,7 @@ fn data_nodes_keep_identity_through_lowering_form_and_bare_validation() {
     assert!(check_bare_node(&bound).is_ok());
     let form = bind_form(&data).unwrap();
     assert!(matches!(&form, Node::Data(name) if name == "ATR:014"));
-    assert_eq!(crate::stringify(&form), "ATR:014");
+    assert_eq!(crate::stringify(&form), "atr:14");
 }
 
 #[test]
@@ -265,5 +265,14 @@ fn canonical_data_names_match_full_parse_and_render() {
             (Err(actual), Err(expected)) => assert_eq!(actual.to_string(), expected.to_string(), "{label}"),
             (actual, expected) => panic!("{label}: {actual:?} != {expected:?}"),
         }
+    }
+}
+
+#[test]
+fn unchanged_data_identity_borrows_schema_label() {
+    for name in ["open", "high", "low", "close", "volume", "obv", "Close", "RSI", "cdl"] {
+        let canonical = canonical_data_name(name).unwrap();
+        assert_eq!(canonical, name);
+        assert_eq!(canonical.as_ptr(), name.as_ptr(), "allocated unchanged identity: {name}");
     }
 }

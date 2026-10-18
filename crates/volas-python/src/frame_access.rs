@@ -15,8 +15,8 @@ use crate::*;
 enum Resolved {
     /// An existing column: data, or a cached directive under its canonical name.
     Column(String),
-    /// A new directive: as written, and parsed.
-    New(String, std::rc::Rc<volas_directive::Ast>),
+    /// A new directive: original text, bound tree, and its final storage label.
+    New(String, std::sync::Arc<volas_directive::Ast>, String),
 }
 
 /// A new directive computed over the binding frame, not yet cached.
@@ -184,7 +184,7 @@ impl PyDataFrame {
         // single-name form, so `df[['ma:3']]` and `df['ma:3']` stay consistent.
         if let Ok(list) = key.extract::<Vec<String>>() {
             let df = self.project(&list)?;
-            return Ok(Py::new(py, self.derive_projection(df)?)?.into_any());
+            return Ok(Py::new(py, df)?.into_any());
         }
         Err(PyKeyError::new_err(
             "key must be a column name, directive, list, boolean mask, or slice",
@@ -300,42 +300,29 @@ impl PyDataFrame {
 }
 
 impl PyDataFrame {
-    /// An equivalent canonical spelling among the frame's data columns.
-    /// The stored label remains exact so bound data operands keep their owner.
-    fn canonical_column_name(frame: &DataFrame, canonical: &str) -> Option<String> {
-        frame.names().iter().find(|actual| {
-            !frame.is_computed(actual)
-                && volas_directive::canonical_data_name(actual).ok().as_deref() == Some(canonical)
-        }).cloned()
-    }
-
-    /// Resolve a data spelling to the physical label, including directive aliases.
-    /// Matching stays at bind/read time; cached trees keep the resulting exact label.
-    fn data_column_name(frame: &DataFrame, name: &str) -> Option<String> {
-        if frame.has_column(name) && !frame.is_computed(name) {
-            return Some(name.to_string());
-        }
-        let canonical = volas_directive::canonical_data_name(name).ok()?;
-        Self::canonical_column_name(frame, &canonical)
-    }
-
     /// An existing physical column named by exact label or an equivalent directive.
     /// Never computes; data columns take precedence over cached directives.
     pub(crate) fn column_name(&self, name: &str) -> Option<String> {
-        if self.inner.has_column(name) {
-            return Some(name.to_string());
+        Self::column_name_in(&self.inner, name)
+    }
+
+    fn column_name_in(frame: &DataFrame, name: &str) -> Option<String> {
+        match Self::resolve_on(frame, name).ok()? {
+            Resolved::Column(actual) => Some(actual),
+            Resolved::New(..) => None,
         }
-        let canonical = volas_directive::canonical_data_name(name).ok()?;
-        if let Some(actual) = Self::canonical_column_name(&self.inner, &canonical) {
-            return Some(actual);
+    }
+
+    /// Named selection uses the same identity owner; exact labels retain the O(1)
+    /// allocation-free path used by per-bar feature export.
+    #[inline]
+    pub(crate) fn column_position(frame: &DataFrame, name: &str) -> PyResult<usize> {
+        if let Some(position) = frame.column_pos(name) {
+            return Ok(position);
         }
-        // A cached expression is named by its bound tree, whose data nodes carry
-        // physical labels. Resolve those through the same binder as computation;
-        // normalizing the requested text alone cannot find such a cache.
-        let node = parse(name).ok()?;
-        let bound = Self::bind(&self.inner, &node, name).ok()?;
-        let canonical = volas_directive::stringify(&bound);
-        self.inner.is_computed(&canonical).then_some(canonical)
+        Self::column_name_in(frame, name)
+            .and_then(|actual| frame.column_pos(&actual))
+            .ok_or_else(|| PyKeyError::new_err(format!("column {name:?} not found")))
     }
 
     /// The column `df[name] = values` stores, `values` being the visible rows' values —
@@ -419,9 +406,9 @@ impl PyDataFrame {
                 let col = self.inner.column(&name).map_err(pyerr)?.clone();
                 Ok((name, col))
             }
-            Resolved::New(text, node) => {
-                self.admit_new(&node, &text)?;
-                self.cache_new(&text, &node)
+            Resolved::New(text, node, storage) => {
+                self.admit_bound(&node, &text)?;
+                self.cache_new(&storage, &node)
             }
         }
     }
@@ -430,10 +417,10 @@ impl PyDataFrame {
     /// it: its canonical name and values.
     pub(crate) fn cache_new(
         &mut self,
-        text: &str,
-        node: &volas_directive::Ast,
+        storage: &str,
+        node: &std::sync::Arc<volas_directive::Ast>,
     ) -> PyResult<(String, Column)> {
-        let new = self.compute_new(&*self.binding_frame()?, node, text)?;
+        let new = self.compute_new(&*self.binding_frame()?, node, storage)?;
         let canonical = new.canonical.clone();
         Ok((canonical, self.cache(new)?))
     }
@@ -441,13 +428,23 @@ impl PyDataFrame {
     /// What a requested name reads: an existing column (data, or a cached directive under
     /// its canonical name), or a new directive to compute. Writes nothing.
     fn resolve(&self, name: &str) -> PyResult<Resolved> {
-        if let Some(actual) = self.column_name(name) {
+        Self::resolve_on(&self.inner, name)
+    }
+
+    fn resolve_on(frame: &DataFrame, name: &str) -> PyResult<Resolved> {
+        if frame.has_column(name) {
+            return Ok(Resolved::Column(name.to_string()));
+        }
+        if let Some(actual) = Self::data_column_name(frame, name) {
             return Ok(Resolved::Column(actual));
         }
-        Ok(Resolved::New(
-            name.to_string(),
-            parse(name).map_err(directive_err)?,
-        ))
+        let parsed = parse(name).map_err(directive_err)?;
+        let bound = Self::bind(frame, &parsed, name)?;
+        let storage = volas_directive::stringify(&bound);
+        if frame.is_computed(&storage) {
+            return Ok(Resolved::Column(storage));
+        }
+        Ok(Resolved::New(name.to_string(), std::sync::Arc::new(bound), storage))
     }
 
     /// Compute a new directive over `frame` (the binding frame) — writing nothing — with
@@ -456,17 +453,17 @@ impl PyDataFrame {
     fn compute_new(
         &self,
         frame: &DataFrame,
-        node: &volas_directive::Ast,
-        text: &str,
+        node: &std::sync::Arc<volas_directive::Ast>,
+        storage: &str,
     ) -> PyResult<Computed> {
-        let bound = Self::bind(frame, node, text)?;
+        let bound = node.as_ref();
         let (col, state, before, anchors) =
-            volas_directive::exec::execute_for_cache(frame, &bound)
+            volas_directive::exec::execute_for_cache(frame, bound)
                 .map_err(value_err)?;
         Ok(Computed {
-            canonical: volas_directive::stringify(&bound),
-            reach: volas_directive::lookback::reach(&bound),
-            directive: std::sync::Arc::new(bound),
+            canonical: storage.to_string(),
+            reach: volas_directive::lookback::reach(bound),
+            directive: node.clone(),
             col,
             state,
             before,
@@ -502,60 +499,38 @@ impl PyDataFrame {
     /// as a plain frame over the visible rows. Every entry is resolved and every new
     /// directive computed before any is cached, so a bad entry caches nothing; cached
     /// entries are refreshed like single-column reads.
-    pub(crate) fn project(&mut self, list: &[String]) -> PyResult<DataFrame> {
-        let resolved = list
-            .iter()
-            .map(|n| self.resolve(n))
-            .collect::<PyResult<Vec<_>>>()?;
-        for r in &resolved {
-            if let Resolved::New(text, node) = r {
-                self.admit_new(node, text)?;
-            }
-        }
+    pub(crate) fn project(&mut self, list: &[String]) -> PyResult<PyDataFrame> {
+        // Stage refresh and cache writes on shared buffers; publish only after every
+        // bound storage name, selection and schema invariant has succeeded.
+        let mut next = self.copy();
+        let data = next.project_staged(list)?;
+        let result = next.derive_projection(data)?;
+        self.inner = next.inner;
+        Ok(result)
+    }
+
+    fn project_staged(&mut self, list: &[String]) -> PyResult<DataFrame> {
+        let resolved = list.iter().map(|n| self.resolve(n)).collect::<PyResult<Vec<_>>>()?;
+        let names: Vec<String> = resolved.iter().map(|r| match r {
+            Resolved::Column(name) | Resolved::New(_, _, name) => name.clone(),
+        }).collect();
+        Self::validate_data_names(names.iter().map(String::as_str))?;
         let mut computed: Vec<Computed> = Vec::new();
         {
             let frame = self.binding_frame()?;
             for r in &resolved {
-                if let Resolved::New(text, node) = r {
-                    let canonical = volas_directive::stringify(node.as_ref());
-                    if !computed.iter().any(|c| c.canonical == canonical) {
-                        computed.push(self.compute_new(&frame, node, text)?);
+                if let Resolved::New(text, node, storage) = r {
+                    self.admit_bound(node, text)?;
+                    if !computed.iter().any(|c| &c.canonical == storage) {
+                        computed.push(self.compute_new(&frame, node, storage)?);
                     }
                 }
             }
         }
-        for c in computed {
-            self.cache(c)?;
-        }
-        let mut names = Vec::with_capacity(list.len());
-        for r in &resolved {
-            names.push(match r {
-                Resolved::Column(name) => {
-                    self.refresh_computed(Some(name))?;
-                    name.clone()
-                }
-                Resolved::New(text, node) => {
-                    let canonical = volas_directive::stringify(node.as_ref());
-                    if !self.inner.is_computed(&canonical) {
-                        // not cached: a data column holds its name (see `cache`)
-                        return Err(PyValueError::new_err(format!(
-                            "cannot select '{text}' into a frame: it is named '{canonical}' like a \
-                             data column of this DataFrame, so it is not cached under that name. \
-                             Read it with df.exec('{text}'), or rename the data column."
-                        )));
-                    }
-                    canonical
-                }
-            });
-        }
-        // the listed columns over the same rows, each as data (R40), its visible rows
-        let df = self.inner.select(&names).map_err(pyerr)?;
+        for c in computed { self.cache(c)?; }
+        for name in &names { self.refresh_computed(Some(name))?; }
         let (start, len) = self.logical_range();
-        Ok(if self.window.is_some() {
-            df.rows(start, start + len, &Replayer)
-        } else {
-            df
-        })
+        self.inner.project(&names, start, start + len).map_err(pyerr)
     }
 
     /// Bind a new directive (`directive` as written, parsed to `node`) against `frame` —
@@ -566,7 +541,9 @@ impl PyDataFrame {
         node: &volas_directive::Ast,
         directive: &str,
     ) -> PyResult<Column> {
-        execute(frame, &Self::bind(frame, node, directive)?).map_err(value_err)
+        let bound = Self::bind(frame, node, directive)?;
+        self.admit_bound(&bound, directive)?;
+        execute(frame, &bound).map_err(value_err)
     }
 
     /// Bind a new directive (`directive` as written, parsed to `node`) against `frame`:
@@ -584,8 +561,8 @@ impl PyDataFrame {
     /// Refuse data whose equivalent directive spelling shadows a computation within a
     /// cached bound tree. Checking happens on schema changes, outside the refresh path.
     fn check_new_data_column(&self, name: &str) -> PyResult<()> {
-        let canonical =
-            volas_directive::canonical_data_name(name).unwrap_or_else(|_| name.to_string());
+        self.check_data_owner(name)?;
+        let canonical = crate::frame_identity::data_identity(name);
         let mut users = Vec::new();
         for cached in self.inner.names().iter().filter(|n| n.as_str() != name) {
             let reads = self.inner.computed_directive(cached).map(bound_directive);

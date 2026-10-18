@@ -344,9 +344,13 @@ class TfLedger:
 
 
 def _same(a, b) -> bool:
-    """Cell equality as the frame judges a forming write (missing equals missing)."""
+    """Stored cell equality: missing matches missing; a float's zero sign matters."""
     missing = lambda v: v is None or (isinstance(v, float) and math.isnan(v))
-    return (missing(a) and missing(b)) or (not missing(a) and not missing(b) and a == b)
+    if missing(a) or missing(b):
+        return missing(a) and missing(b)
+    if isinstance(a, float) and isinstance(b, float):
+        return np.float64(a).tobytes() == np.float64(b).tobytes()
+    return a == b
 
 
 def last_close(rows: list[dict]) -> float | None:

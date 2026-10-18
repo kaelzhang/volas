@@ -141,6 +141,7 @@ pub(crate) fn bounds(
 impl PyDataFrame {
     /// This freshly built frame, bounded by `bounds` when given (see [`bound`](Self::bound)).
     pub(crate) fn bounded(mut self, bounds: Option<Bounds>) -> PyResult<Self> {
+        Self::validate_schema(&self.inner)?;
         if let Some(b) = bounds {
             self.bound(b)?;
         }
@@ -179,29 +180,24 @@ impl PyDataFrame {
         self.checkpoint_carried_states();
         let mut nodes = Vec::with_capacity(declared.len());
         for text in &declared {
-            let node = parse(text).map_err(directive_err)?;
-            // An existing raw column is already kept as data: it needs no computed
-            // cache or warm-up. Binding still enforces the bare-name ambiguity rule.
-            if let volas_directive::types::Node::Name(name) = node.node() {
-                if self.inner.has_column(name) && !self.inner.is_computed(name) {
-                    volas_directive::bind_frame(&node, &|n| self.inner.has_column(n), text).map_err(value_err)?;
-                    continue;
-                }
+            let parsed = parse(text).map_err(directive_err)?;
+            let node = Self::bind(&self.inner, &parsed, text)?;
+            if matches!(node.node(), volas_directive::types::Node::Data(_)) {
+                continue; // explicitly classified data declaration: no cache or warm-up
             }
             self.check_kept(&node, text)?;
-            self.check_declarable(&node, text)?;
-            nodes.push((text, node));
+            let storage = stringify(&node);
+            self.check_declarable(&storage, text)?;
+            nodes.push((storage, std::sync::Arc::new(node)));
         }
-        for (text, node) in &nodes {
-            let canonical = stringify(node.as_ref());
-            if !self.inner.is_computed(&canonical) {
-                self.cache_new(text, node)?;
+        for (canonical, node) in &nodes {
+            if !self.inner.is_computed(canonical) {
+                self.cache_new(canonical, node)?;
             }
-            self.window
-                .as_mut()
-                .expect("bounded above")
-                .declared
-                .push(canonical);
+            let declarations = &mut self.window.as_mut().expect("bounded above").declared;
+            if !declarations.contains(canonical) {
+                declarations.push(canonical.clone());
+            }
         }
         self.maybe_compact();
         Ok(())
@@ -210,9 +206,8 @@ impl PyDataFrame {
     /// A declaration is kept as a cached column under its canonical name: a data column
     /// of that name leaves no place for it, so the declaration is refused (never accepted
     /// and then left uncomputed).
-    fn check_declarable(&self, node: &Ast, text: &str) -> PyResult<()> {
-        let canonical = stringify(node);
-        if !self.inner.has_column(&canonical) || self.inner.is_computed(&canonical) {
+    fn check_declarable(&self, canonical: &str, text: &str) -> PyResult<()> {
+        if !self.inner.has_column(canonical) || self.inner.is_computed(canonical) {
             return Ok(());
         }
         Err(PyValueError::new_err(format!(
@@ -242,10 +237,9 @@ impl PyDataFrame {
     /// running accumulator) whose window the margin holds. Classes 2 and 3 must be
     /// declared at construction. The error names the two correct paths — or, for a
     /// directive this frame already caches, its column.
-    pub(crate) fn admit_new(&self, node: &Ast, text: &str) -> PyResult<()> {
+    pub(crate) fn admit_bound(&self, bound: &Ast, text: &str) -> PyResult<()> {
         let Some(w) = &self.window else { return Ok(()) };
-        let bound = Self::bind(&self.inner, node, text)?;
-        let reach = volas_directive::lookback::reach(&bound);
+        let reach = volas_directive::lookback::reach(bound);
         let why = match reach.history {
             History::Window if reach.lookback <= w.lookback => return Ok(()),
             History::Window => format!(
@@ -262,7 +256,7 @@ impl PyDataFrame {
                 w.capacity
             ),
         };
-        let canonical = stringify(node);
+        let canonical = stringify(bound);
         if self.inner.is_computed(&canonical) {
             return Err(PyValueError::new_err(format!(
                 "cannot compute '{text}' from this windowed frame's rows: {why}. It is declared — \
@@ -284,7 +278,6 @@ impl PyDataFrame {
         let first_visible = self.inner.origin() + self.logical_range().0;
         w.declared
             .iter()
-            .filter(|n| self.inner.is_computed(n))
             .all(|n| {
                 self.inner
                     .computed_first_present(n)

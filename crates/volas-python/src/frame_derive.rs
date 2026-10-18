@@ -113,6 +113,7 @@ impl PyDataFrame {
     /// `inner`, a column projection of this frame's visible rows: the time-frame model
     /// follows the projection.
     pub(crate) fn derive_projection(&self, inner: DataFrame) -> PyResult<PyDataFrame> {
+        Self::validate_schema(&inner)?;
         let tf = match &self.tf {
             Some(t) => Some(t.projected(&inner)?),
             None => None,
@@ -124,6 +125,7 @@ impl PyDataFrame {
     /// index, a cast): the time-frame frame of its rows when they are still bars in time
     /// order, else a plain frame.
     pub(crate) fn derive_relabelled(&self, inner: DataFrame) -> PyResult<PyDataFrame> {
+        Self::validate_schema(&inner)?;
         let tf = match &self.tf {
             Some(t) => t.relabelled(&inner)?,
             None => None,

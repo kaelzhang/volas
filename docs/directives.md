@@ -154,6 +154,11 @@ This also applies to bare command names: with a data column `change`, both
 `close * change` and `close * change:` read that column. Rename or drop the data
 column to compute the built-in command on that frame.
 
+Each canonical identity has exactly one physical data label. Construction, column
+addition and renaming reject equivalent labels such as `ema:2` and `EMA:02` with
+an error naming both owners. Equivalent spellings in getters, expressions and
+nested operands always resolve to that same label.
+
 A cached directive retains the data/command bindings chosen when it was cached.
 Adding a data column under any equivalent spelling of a computation it uses raises:
 `close * CHANGE`, `close * ChAnGe` and `close * change:` all prevent adding either
@@ -175,7 +180,11 @@ name: whitespace removed, minimal parentheses, every argument written as its val
 The name does not depend on the spelling: `boll`, `boll:`, `BOLL` and `boll:20@close`
 all cache as one column `boll`. The cached column keeps the directive it was bound to
 when it was cached, and an append continues exactly that directive — never a re-read of
-its name.
+its name. A bound operand retains the exact physical data label for execution, while
+its rendered name uses that label's canonical directive syntax: `ema:2@(EMA:02)` names
+`ema:2@(ema:2)`. Expression labels retain their grouping even under unary operators or
+inside `@` operands. Re-parsing the name against the same data schema gives the same
+values. Projections and window declarations use this canonical name too.
 
 ## Error handling
 
