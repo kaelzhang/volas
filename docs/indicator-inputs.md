@@ -55,6 +55,14 @@ count finite observations toward `min_periods`. Element-wise column arithmetic a
 comparisons keep IEEE behavior (`close * 2` can remain infinite); the separate
 [cumulation aggregation rule](cumulation.md#cumulation-and-datetimeindex) is unchanged.
 
+The missing-input rule applies at computation boundaries. Arithmetic terms produced
+inside one indicator keep IEEE behavior: for example, Mass Index can form an infinite
+EMA ratio from finite subnormal ranges when its denominator underflows to zero. Its
+rolling ratio sum publishes that infinity and recovers when it leaves the window;
+batch, captured-state, and single-row continuation use the same exact slide. An output
+passed as an explicit input to another indicator or moving-average stage follows the
+missing-input rule again.
+
 ## True range and period-one smoothing
 
 True range follows [TA-Lib's comparison order](https://github.com/TA-Lib/ta-lib/blob/v0.6.4/src/ta_func/ta_TRANGE.c):

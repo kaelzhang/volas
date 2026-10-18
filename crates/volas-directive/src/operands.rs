@@ -46,9 +46,9 @@ pub(crate) struct Read<'a> {
     values: Cow<'a, [f64]>,
     /// The frame column read whole, which remembers its all-finite fact.
     column: Option<&'a Column>,
-    /// Whether the values hold a missing input, when known without a scan: a window of a frame
-    /// column known to hold none holds none.
-    known_missing: Option<bool>,
+    /// This pass's fact. A mutable borrowed column cannot remember across calls;
+    /// this read's values stay fixed for its pass, so admission can be reused here.
+    known_missing: Cell<Option<bool>>,
 }
 
 impl Read<'_> {
@@ -59,15 +59,18 @@ impl Read<'_> {
 
     /// Whether the values hold a missing input — remembered for a frame column read whole.
     pub(crate) fn has_nonfinite(&self) -> bool {
-        match self.column {
+        if let Some(found) = self.known_missing.get() { return found; }
+        let found = match self.column {
             Some(c) => c.has_nonfinite(),
-            None => self.known_missing.unwrap_or_else(|| volas_compute::missing::any_missing(&self.values)),
-        }
+            None => volas_compute::missing::any_missing(&self.values),
+        };
+        self.known_missing.set(Some(found));
+        found
     }
 
     /// Whether the values hold a missing input, if known without a scan.
     pub(crate) fn known_has_nonfinite(&self) -> Option<bool> {
-        self.column.map_or(self.known_missing, Column::known_has_nonfinite)
+        self.known_missing.get().or_else(|| self.column.and_then(Column::known_has_nonfinite))
     }
 }
 
@@ -177,7 +180,7 @@ impl<'a> Operands<'a> {
             over: true, ..Operands::window(df, series, start) };
         for (slot, values) in views.into_iter().enumerate() {
             if let Some(values) = values {
-                ops.reads[slot] = OnceCell::from(Read { values, column: None, known_missing: None });
+                ops.reads[slot] = OnceCell::from(Read { values, column: None, known_missing: Cell::new(None) });
             }
         }
         ops
@@ -250,7 +253,7 @@ impl<'a> Operands<'a> {
             Some(node) => {
                 let col = execute_node(self.operand_frame(), node)?;
                 require_f64_input(&col)?;
-                Ok(Read { values: Cow::Owned(col.to_f64_vec()), column: None, known_missing: None })
+                Ok(Read { values: Cow::Owned(col.to_f64_vec()), column: None, known_missing: Cell::new(None) })
             }
             None => self.column_read(slot, default),
         }
@@ -263,8 +266,8 @@ impl<'a> Operands<'a> {
         self.fit(slot, col.len(), self.df.height())?;
         let values = convert(col, self.start, self.end)?;
         Ok(match self.whole() {
-            true => Read { values, column: Some(col), known_missing: None },
-            false => Read { values, column: None, known_missing: col.known_has_nonfinite().filter(|has| !has) },
+            true => Read { values, column: Some(col), known_missing: Cell::new(None) },
+            false => Read { values, column: None, known_missing: Cell::new(col.known_has_nonfinite().filter(|has| !has)) },
         })
     }
 
@@ -313,11 +316,20 @@ impl<'a> Operands<'a> {
                         Some(t) => f64::from(u8::from(t)),
                         None => f64::NAN,
                     });
-                    Ok(Read { values: Cow::Owned(truths.collect()), column: None, known_missing: None })
+                    Ok(Read { values: Cow::Owned(truths.collect()), column: None, known_missing: Cell::new(None) })
                 })?;
                 self.hand_out(read)?
         };
         Ok(values.iter().map(|&v| (!volas_compute::missing::is_missing(v)).then_some(v != 0.0)).collect())
+    }
+
+    /// Decide once from the input columns' remembered all-finite facts, scanning
+    /// only unknown inputs through the missing owner.
+    pub(crate) fn all_finite(&self) -> bool {
+        if self.clean.get() { return true; }
+        let clean = self.reads().all(|(_, read)| !read.has_nonfinite());
+        self.clean.set(clean);
+        clean
     }
 
     /// Whether every input read is a frame column known to hold no missing input.

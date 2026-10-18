@@ -11,7 +11,7 @@ use super::{
 
 /// Doji (TA-Lib CDLDOJI): real body no larger than the recent doji-body threshold —
 /// open ≈ close. Non-directional (uncertainty): `100` or `0`. Lookback 10.
-pub fn cdl_doji(o: &[f64], h: &[f64], l: &[f64], c: &[f64], origin: usize) -> Vec<f64> {
+pub(super) fn cdl_doji_raw(o: &[f64], h: &[f64], l: &[f64], c: &[f64], origin: usize) -> Vec<f64> {
     each_bar_avg([BODY_DOJI], BODY_DOJI.avg_period, o, h, l, c, origin, |i, a| {
         if realbody(o, c, i) <= a[0] {
             100.0
@@ -22,7 +22,7 @@ pub fn cdl_doji(o: &[f64], h: &[f64], l: &[f64], c: &[f64], origin: usize) -> Ve
 }
 
 /// Marubozu (TA-Lib CDLMARUBOZU): long body, negligible shadows both ends. Lookback 10.
-pub fn cdl_marubozu(o: &[f64], h: &[f64], l: &[f64], c: &[f64], origin: usize) -> Vec<f64> {
+pub(super) fn cdl_marubozu_raw(o: &[f64], h: &[f64], l: &[f64], c: &[f64], origin: usize) -> Vec<f64> {
     let lb = BODY_LONG.avg_period.max(SHADOW_VERY_SHORT.avg_period);
     each_bar_avg([BODY_LONG, SHADOW_VERY_SHORT], lb, o, h, l, c, origin, |i, a| {
         let vs = a[1];
@@ -37,7 +37,7 @@ pub fn cdl_marubozu(o: &[f64], h: &[f64], l: &[f64], c: &[f64], origin: usize) -
 
 /// Closing Marubozu (TA-Lib CDLCLOSINGMARUBOZU): long body whose *closing* end has no
 /// shadow (white → no upper shadow, black → no lower shadow). Lookback 10.
-pub fn cdl_closingmarubozu(o: &[f64], h: &[f64], l: &[f64], c: &[f64], origin: usize) -> Vec<f64> {
+pub(super) fn cdl_closingmarubozu_raw(o: &[f64], h: &[f64], l: &[f64], c: &[f64], origin: usize) -> Vec<f64> {
     let lb = BODY_LONG.avg_period.max(SHADOW_VERY_SHORT.avg_period);
     each_bar_avg([BODY_LONG, SHADOW_VERY_SHORT], lb, o, h, l, c, origin, |i, a| {
         let vs = a[1];
@@ -54,7 +54,7 @@ pub fn cdl_closingmarubozu(o: &[f64], h: &[f64], l: &[f64], c: &[f64], origin: u
 }
 
 /// Long Line (TA-Lib CDLLONGLINE): long body, short shadows both ends. Lookback 10.
-pub fn cdl_longline(o: &[f64], h: &[f64], l: &[f64], c: &[f64], origin: usize) -> Vec<f64> {
+pub(super) fn cdl_longline_raw(o: &[f64], h: &[f64], l: &[f64], c: &[f64], origin: usize) -> Vec<f64> {
     let lb = BODY_LONG.avg_period.max(SHADOW_SHORT.avg_period);
     each_bar_avg([BODY_LONG, SHADOW_SHORT], lb, o, h, l, c, origin, |i, a| {
         let short = a[1];
@@ -70,7 +70,7 @@ pub fn cdl_longline(o: &[f64], h: &[f64], l: &[f64], c: &[f64], origin: usize) -
 }
 
 /// Short Line (TA-Lib CDLSHORTLINE): short body, short shadows both ends. Lookback 10.
-pub fn cdl_shortline(o: &[f64], h: &[f64], l: &[f64], c: &[f64], origin: usize) -> Vec<f64> {
+pub(super) fn cdl_shortline_raw(o: &[f64], h: &[f64], l: &[f64], c: &[f64], origin: usize) -> Vec<f64> {
     let lb = BODY_SHORT.avg_period.max(SHADOW_SHORT.avg_period);
     each_bar_avg([BODY_SHORT, SHADOW_SHORT], lb, o, h, l, c, origin, |i, a| {
         let short = a[1];
@@ -86,7 +86,7 @@ pub fn cdl_shortline(o: &[f64], h: &[f64], l: &[f64], c: &[f64], origin: usize) 
 }
 
 /// High-Wave (TA-Lib CDLHIGHWAVE): short body, very long shadows both ends. Lookback 10.
-pub fn cdl_highwave(o: &[f64], h: &[f64], l: &[f64], c: &[f64], origin: usize) -> Vec<f64> {
+pub(super) fn cdl_highwave_raw(o: &[f64], h: &[f64], l: &[f64], c: &[f64], origin: usize) -> Vec<f64> {
     let lb = BODY_SHORT.avg_period.max(SHADOW_VERY_LONG.avg_period);
     each_bar_avg([BODY_SHORT, SHADOW_VERY_LONG], lb, o, h, l, c, origin, |i, a| {
         let very_long = a[1];
@@ -102,7 +102,7 @@ pub fn cdl_highwave(o: &[f64], h: &[f64], l: &[f64], c: &[f64], origin: usize) -
 }
 
 /// Spinning Top (TA-Lib CDLSPINNINGTOP): short body smaller than both shadows. Lookback 10.
-pub fn cdl_spinningtop(o: &[f64], h: &[f64], l: &[f64], c: &[f64], origin: usize) -> Vec<f64> {
+pub(super) fn cdl_spinningtop_raw(o: &[f64], h: &[f64], l: &[f64], c: &[f64], origin: usize) -> Vec<f64> {
     each_bar_avg([BODY_SHORT], BODY_SHORT.avg_period, o, h, l, c, origin, |i, a| {
         let body = realbody(o, c, i);
         if body < a[0] && uppershadow(o, h, c, i) > body && lowershadow(o, l, c, i) > body {
@@ -115,7 +115,7 @@ pub fn cdl_spinningtop(o: &[f64], h: &[f64], l: &[f64], c: &[f64], origin: usize
 
 /// Dragonfly Doji (TA-Lib CDLDRAGONFLYDOJI): doji body, very short upper shadow, long
 /// lower shadow. Non-directional: `100` or `0`. Lookback 10.
-pub fn cdl_dragonflydoji(o: &[f64], h: &[f64], l: &[f64], c: &[f64], origin: usize) -> Vec<f64> {
+pub(super) fn cdl_dragonflydoji_raw(o: &[f64], h: &[f64], l: &[f64], c: &[f64], origin: usize) -> Vec<f64> {
     let lb = BODY_DOJI.avg_period.max(SHADOW_VERY_SHORT.avg_period);
     each_bar_avg([BODY_DOJI, SHADOW_VERY_SHORT], lb, o, h, l, c, origin, |i, a| {
         let vs = a[1];
@@ -130,7 +130,7 @@ pub fn cdl_dragonflydoji(o: &[f64], h: &[f64], l: &[f64], c: &[f64], origin: usi
 
 /// Gravestone Doji (TA-Lib CDLGRAVESTONEDOJI): doji body, very short lower shadow, long
 /// upper shadow. Non-directional: `100` or `0`. Lookback 10.
-pub fn cdl_gravestonedoji(o: &[f64], h: &[f64], l: &[f64], c: &[f64], origin: usize) -> Vec<f64> {
+pub(super) fn cdl_gravestonedoji_raw(o: &[f64], h: &[f64], l: &[f64], c: &[f64], origin: usize) -> Vec<f64> {
     let lb = BODY_DOJI.avg_period.max(SHADOW_VERY_SHORT.avg_period);
     each_bar_avg([BODY_DOJI, SHADOW_VERY_SHORT], lb, o, h, l, c, origin, |i, a| {
         let vs = a[1];
@@ -146,7 +146,7 @@ pub fn cdl_gravestonedoji(o: &[f64], h: &[f64], l: &[f64], c: &[f64], origin: us
 /// Long-Legged Doji (TA-Lib CDLLONGLEGGEDDOJI): doji body with at least one long shadow.
 /// Non-directional: `100` or `0`. Lookback 10. (ShadowLong has avg_period 0, so its
 /// threshold is the bar's own real body.)
-pub fn cdl_longleggeddoji(o: &[f64], h: &[f64], l: &[f64], c: &[f64], origin: usize) -> Vec<f64> {
+pub(super) fn cdl_longleggeddoji_raw(o: &[f64], h: &[f64], l: &[f64], c: &[f64], origin: usize) -> Vec<f64> {
     let lb = BODY_DOJI.avg_period.max(SHADOW_LONG.avg_period);
     each_bar_avg([BODY_DOJI, SHADOW_LONG], lb, o, h, l, c, origin, |i, a| {
         let long = a[1];
@@ -162,7 +162,7 @@ pub fn cdl_longleggeddoji(o: &[f64], h: &[f64], l: &[f64], c: &[f64], origin: us
 
 /// Rickshaw Man (TA-Lib CDLRICKSHAWMAN): a long-legged doji whose body sits near the
 /// midpoint of the high-low range. Non-directional: `100` or `0`. Lookback 10.
-pub fn cdl_rickshawman(o: &[f64], h: &[f64], l: &[f64], c: &[f64], origin: usize) -> Vec<f64> {
+pub(super) fn cdl_rickshawman_raw(o: &[f64], h: &[f64], l: &[f64], c: &[f64], origin: usize) -> Vec<f64> {
     let lb = BODY_DOJI
         .avg_period
         .max(SHADOW_LONG.avg_period)
@@ -188,7 +188,7 @@ pub fn cdl_rickshawman(o: &[f64], h: &[f64], l: &[f64], c: &[f64], origin: usize
 
 /// Belt-Hold (TA-Lib CDLBELTHOLD): a long body opening at its extreme — white with no
 /// lower shadow (bullish) or black with no upper shadow (bearish). Lookback 10.
-pub fn cdl_belthold(o: &[f64], h: &[f64], l: &[f64], c: &[f64], origin: usize) -> Vec<f64> {
+pub(super) fn cdl_belthold_raw(o: &[f64], h: &[f64], l: &[f64], c: &[f64], origin: usize) -> Vec<f64> {
     let lb = BODY_LONG.avg_period.max(SHADOW_VERY_SHORT.avg_period);
     each_bar_avg([BODY_LONG, SHADOW_VERY_SHORT], lb, o, h, l, c, origin, |i, a| {
         let vs = a[1];
@@ -230,7 +230,7 @@ fn hammer_shape(
 
 /// Hammer (TA-Lib CDLHAMMER): a hammer-shape candle whose body sits near the prior bar's
 /// low — bullish reversal `100`. Lookback 11 (prior-bar reference).
-pub fn cdl_hammer(o: &[f64], h: &[f64], l: &[f64], c: &[f64], origin: usize) -> Vec<f64> {
+pub(super) fn cdl_hammer_raw(o: &[f64], h: &[f64], l: &[f64], c: &[f64], origin: usize) -> Vec<f64> {
     let lb = BODY_SHORT
         .avg_period
         .max(SHADOW_VERY_SHORT.avg_period)
@@ -256,7 +256,7 @@ pub fn cdl_hammer(o: &[f64], h: &[f64], l: &[f64], c: &[f64], origin: usize) -> 
 
 /// Hanging Man (TA-Lib CDLHANGINGMAN): a hammer-shape candle whose body sits near the
 /// prior bar's high — bearish reversal `-100`. Lookback 11.
-pub fn cdl_hangingman(o: &[f64], h: &[f64], l: &[f64], c: &[f64], origin: usize) -> Vec<f64> {
+pub(super) fn cdl_hangingman_raw(o: &[f64], h: &[f64], l: &[f64], c: &[f64], origin: usize) -> Vec<f64> {
     let lb = BODY_SHORT
         .avg_period
         .max(SHADOW_VERY_SHORT.avg_period)
@@ -282,7 +282,7 @@ pub fn cdl_hangingman(o: &[f64], h: &[f64], l: &[f64], c: &[f64], origin: usize)
 
 /// Inverted Hammer (TA-Lib CDLINVERTEDHAMMER): inverted hammer-shape gapping down from
 /// the prior body — bullish `100`. Lookback 11.
-pub fn cdl_invertedhammer(o: &[f64], h: &[f64], l: &[f64], c: &[f64], origin: usize) -> Vec<f64> {
+pub(super) fn cdl_invertedhammer_raw(o: &[f64], h: &[f64], l: &[f64], c: &[f64], origin: usize) -> Vec<f64> {
     let lb = BODY_SHORT.avg_period.max(SHADOW_VERY_SHORT.avg_period) + 1;
     each_bar_avg(
         [SHADOW_LONG, SHADOW_VERY_SHORT, BODY_SHORT],
@@ -303,7 +303,7 @@ pub fn cdl_invertedhammer(o: &[f64], h: &[f64], l: &[f64], c: &[f64], origin: us
 
 /// Shooting Star (TA-Lib CDLSHOOTINGSTAR): inverted hammer-shape gapping up from the
 /// prior body — bearish `-100`. Lookback 11.
-pub fn cdl_shootingstar(o: &[f64], h: &[f64], l: &[f64], c: &[f64], origin: usize) -> Vec<f64> {
+pub(super) fn cdl_shootingstar_raw(o: &[f64], h: &[f64], l: &[f64], c: &[f64], origin: usize) -> Vec<f64> {
     let lb = BODY_SHORT.avg_period.max(SHADOW_VERY_SHORT.avg_period) + 1;
     each_bar_avg(
         [SHADOW_LONG, SHADOW_VERY_SHORT, BODY_SHORT],
@@ -324,7 +324,7 @@ pub fn cdl_shootingstar(o: &[f64], h: &[f64], l: &[f64], c: &[f64], origin: usiz
 
 /// Takuri (TA-Lib CDLTAKURI): a dragonfly doji with an exceptionally long lower shadow.
 /// Non-directional `100`. Lookback 10.
-pub fn cdl_takuri(o: &[f64], h: &[f64], l: &[f64], c: &[f64], origin: usize) -> Vec<f64> {
+pub(super) fn cdl_takuri_raw(o: &[f64], h: &[f64], l: &[f64], c: &[f64], origin: usize) -> Vec<f64> {
     let lb = BODY_DOJI
         .avg_period
         .max(SHADOW_VERY_SHORT.avg_period)

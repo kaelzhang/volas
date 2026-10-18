@@ -17,22 +17,20 @@ use crate::raw::smoothing;
 /// bar `n` (NaN before), and each value reads its `n + 1` closes only.
 /// Source: Eastmoney 心理线. Row 0 is at absolute position `origin`.
 pub fn psy(close: &[f64], n: usize, origin: usize) -> Vec<f64> {
-    let up: Vec<f64> = (0..close.len()).map(|i| psy_up(close, i)).collect();
+    psy_with(close, n, origin, false)
+}
+
+/// PSY using the caller's remembered all-finite input fact.
+pub fn psy_with(close: &[f64], n: usize, origin: usize, complete: bool) -> Vec<f64> {
+    let up = missing::map_terms(close.len(), 1, complete, |i| [close[i], close[i - 1]], |_, [c, p]| psy_value(c, p));
     let mut out = kernels::sma(&up, n, origin);
     for x in &mut out { *x *= 100.0; }
     out
 }
 
-/// PSY's rising flag at bar `i`: it reads `close[i]` and the prior close, and is missing
-/// when one of them is (the per-row term rule, [`missing::term`]): a comparison with a
-/// missing close would read as "not rising". The first bar has no prior close.
-#[inline]
-fn psy_up(close: &[f64], i: usize) -> f64 {
-    if i == 0 {
-        return f64::NAN;
-    }
-    missing::term(&[close[i], close[i - 1]], f64::from(close[i] > close[i - 1]))
-}
+/// PSY's rising flag; the batch admission pass owns its original-input check.
+#[inline(always)]
+fn psy_value(current: f64, prior: f64) -> f64 { f64::from(current > prior) }
 
 /// PVT Price Volume Trend (cumulative): `PVT_i = PVT_{i-1} + (C_i - C_{i-1}) / C_{i-1} * V_i`,
 /// with `PVT_0 = 0`.
@@ -102,10 +100,23 @@ pub fn cmf(high: &[f64], low: &[f64], close: &[f64], volume: &[f64], n: usize, o
 
 /// Batch computation with terminal-state publication.
 pub fn cmf_pass<S: crate::pass::StateSink>(high: &[f64], low: &[f64], close: &[f64], volume: &[f64], n: usize, origin: usize, states: &mut S) -> Vec<f64> {
-    let mfv: Vec<f64> = (0..close.len()).map(|i| mfv(high, low, close, volume, i)).collect();
+    cmf_pass_with(high, low, close, volume, n, origin, false, states)
+}
+
+/// Batch pass using the caller's remembered all-finite input fact.
+#[allow(clippy::too_many_arguments)]
+pub fn cmf_pass_with<S: crate::pass::StateSink>(high: &[f64], low: &[f64], close: &[f64], volume: &[f64], n: usize, origin: usize, complete: bool, states: &mut S) -> Vec<f64> {
+    let mut mfv = missing::map_terms_packed(close.len(), 0, complete, |i| [high[i], low[i], close[i]],
+        |i, [h, l, c]| super::volume::money_flow_volume_parts(h, l, c, volume[i]));
     let (mut a, mut b) = (states.child(), states.child());
-    let sum_mfv = super::sum_pass(&mfv, n, origin, &mut a);
-    let sum_vol = super::sum_pass(volume, n, origin, &mut b);
+    let (sum_vol, volume_finite) = super::sum_source_pass_with_finiteness(volume, n, origin, &mut b);
+    // The denominator already reads every volume and detects a non-finite sum.
+    // Reuse that result; repair before the numerator publishes continuation state
+    // so a no-flow bar with missing volume has exactly the scalar owner's state.
+    if !complete && !volume_finite {
+        missing::repair_terms(&mut mfv, 0, |i| [high[i], low[i], close[i], volume[i]]);
+    }
+    let sum_mfv = super::sum_internal_pass(&mfv, n, origin, &mut a);
     states.compose(close.len(), &[&a, &b], |_, _| {});
     (0..close.len()).map(|i| sum_mfv[i] / sum_vol[i]).collect()
 }
@@ -115,7 +126,7 @@ pub fn cmf_pass<S: crate::pass::StateSink>(high: &[f64], low: &[f64], close: &[f
 pub fn chop(high: &[f64], low: &[f64], close: &[f64], n: usize, origin: usize) -> Vec<f64> {
     let tr = super::tr(high, low, close);
     // TR[0] is NaN; `sma` skips the leading-NaN prefix, so `sma * n` is the n-window TR sum.
-    let mut sum_tr = kernels::sma(&tr, n, origin);
+    let mut sum_tr = kernels::sma_internal(&tr, n, origin);
     for x in &mut sum_tr { *x *= n as f64; }
     let hh = super::hhv(high, n);
     let ll = super::llv(low, n);
@@ -134,11 +145,17 @@ pub fn kst(close: &[f64], origin: usize) -> Vec<f64> {
 
 /// Batch computation with terminal-state publication.
 pub fn kst_pass<S: crate::pass::StateSink>(close: &[f64], origin: usize, states: &mut S) -> Vec<f64> {
+    kst_pass_with(close, origin, false, states)
+}
+
+/// Batch pass using the caller's remembered all-finite input fact.
+#[allow(clippy::too_many_arguments)]
+pub fn kst_pass_with<S: crate::pass::StateSink>(close: &[f64], origin: usize, complete: bool, states: &mut S) -> Vec<f64> {
     let mut stages = Vec::new();
     let leg = |(p, n): (usize, usize)| {
-        let roc: Vec<f64> = (0..close.len()).map(|i| kst_roc(close, p, i)).collect();
+        let roc = missing::map_terms(close.len(), p, complete, |i| [close[i], close[i - p]], |_, [c, p]| super::momentum::unguarded_roc_value(c, p));
         let mut s = states.child();
-        let values = kernels::sma_pass(&roc, n, origin, &mut s);
+        let values = kernels::sma_internal_pass(&roc, n, origin, &mut s);
         stages.push(s);
         values
     };
@@ -158,8 +175,40 @@ pub fn emv(high: &[f64], low: &[f64], volume: &[f64], n: usize, origin: usize) -
 
 /// Batch computation with terminal-state publication.
 pub fn emv_pass<S: crate::pass::StateSink>(high: &[f64], low: &[f64], volume: &[f64], n: usize, origin: usize, states: &mut S) -> Vec<f64> {
-    let emv1: Vec<f64> = (0..high.len()).map(|i| emv_term(high, low, volume, i)).collect();
-    kernels::sma_pass(&emv1, n, origin, states)
+    emv_pass_with(high, low, volume, n, origin, false, states)
+}
+
+/// Batch pass using the caller's remembered all-finite input fact.
+#[allow(clippy::too_many_arguments)]
+pub fn emv_pass_with<S: crate::pass::StateSink>(high: &[f64], low: &[f64], volume: &[f64], n: usize, origin: usize, complete: bool, states: &mut S) -> Vec<f64> {
+    let emv1 = if complete { emv_terms::<true>(high, low, volume) } else { emv_terms::<false>(high, low, volume) };
+    kernels::sma_internal_pass(&emv1, n, origin, states)
+}
+
+// Keep the numerical pass separate from the SMA and state-publication frame so
+// their live arguments do not prevent vectorisation. This is one call per column.
+#[inline(never)]
+fn emv_terms<const COMPLETE: bool>(high: &[f64], low: &[f64], volume: &[f64]) -> Vec<f64> {
+    let len = high.len();
+    if len < 2 { return vec![f64::NAN; len]; }
+    // Admit the slice lengths once. The original pass reads both through len;
+    // empty/warm-up-only passes above do not require unused input rows.
+    let low = &low[..len];
+    let volume = &volume[..len];
+    let mut out = crate::buf::OutBuf::warmup(len, 1);
+    let mut finiteness = missing::Finiteness::default();
+    let mut previous_midpoint = emv_midpoint(high[0], low[0]);
+    for i in 1..len {
+        let midpoint = emv_midpoint(high[i], low[i]);
+        let (value, witness) = emv_value_parts(midpoint - previous_midpoint, high[i], low[i], volume[i]);
+        if !COMPLETE { finiteness.record(witness); }
+        out.set(i, value);
+        previous_midpoint = midpoint;
+    }
+    if !finiteness.all_finite() {
+        missing::repair_slots(len, 1, |i| [high[i], low[i], high[i - 1], low[i - 1], volume[i]], |i, value| out.set(i, value));
+    }
+    out.finish()
 }
 
 /// EFI Elder Force Index: `EMA_n((C - prev C) * volume)`.
@@ -187,7 +236,7 @@ pub fn mass_index(high: &[f64], low: &[f64], n: usize, origin: usize) -> Vec<f64
     let ratio: Vec<f64> = (0..high.len()).map(|i| single[i] / double[i]).collect();
     // `ratio` warms up with NaN, so use `sma * n` (which skips the leading NaN) rather than
     // the running `sum` (which would propagate it).
-    let mut out = kernels::sma(&ratio, n, origin);
+    let mut out = kernels::sma_internal(&ratio, n, origin);
     for x in &mut out { *x *= n as f64; }
     out
 }
@@ -441,7 +490,7 @@ pub fn mass_index_final_state(high: &[f64], low: &[f64], n: usize, origin: usize
         return None; // the n-window sum has not emitted a valid value yet
     }
     let slide = state_after(Slide::<1>::initial(origin), len, |row, prev, next| {
-        kernels::sma_step(n, row, |j| ratio[j], prev, next)
+        kernels::sma_internal_step(n, row, |j| ratio[j], prev, next)
     })?;
     let mut state = vec![single[len - 1], double[len - 1]];
     state.extend(slide);
@@ -463,7 +512,7 @@ fn mass_index_step(range: f64, n: usize, row: usize, state: &[f64], next: &mut [
     let ratio = single / double;
     let ring = &state[MASS_RATIOS..MASS_RATIOS + n]; // the ratios of rows `row-n .. row-1`
     let term = |j: usize| if j == row { ratio } else { ring[j + n - row] };
-    let mean = kernels::sma_step(n, row, term, &state[2..MASS_RATIOS], &mut next[2..MASS_RATIOS])?;
+    let mean = kernels::sma_internal_step(n, row, term, &state[2..MASS_RATIOS], &mut next[2..MASS_RATIOS])?;
     next[0] = single;
     next[1] = double;
     next[MASS_RATIOS..MASS_RATIOS + n - 1].copy_from_slice(&ring[1..]);
@@ -651,7 +700,8 @@ pub fn mass_index_resume_one(
 /// One bar's money-flow volume, as [`cmf`] sums it: AD's own term.
 #[inline]
 fn mfv(high: &[f64], low: &[f64], close: &[f64], volume: &[f64], i: usize) -> f64 {
-    super::volume::money_flow_volume(high[i], low[i], close[i], volume[i])
+    missing::term(&[high[i], low[i], close[i], volume[i]],
+        super::volume::money_flow_volume(high[i], low[i], close[i], volume[i]))
 }
 
 /// [`cmf`]'s state after the rows: its two sums' states.
@@ -685,7 +735,7 @@ pub fn cmf_step(
         return None;
     }
     let (n_mfv, n_vol) = next.split_at_mut(S);
-    let flow = super::sum_row(n, row, |j| mfv(high, low, close, volume, j), &state[..S], n_mfv)?;
+    let flow = super::sum_internal_row(n, row, |j| mfv(high, low, close, volume, j), &state[..S], n_mfv)?;
     let vol = super::sum_row(n, row, |j| volume[j], &state[S..], n_vol)?;
     Some(flow / vol)
 }
@@ -705,13 +755,38 @@ pub fn dpo_step(close: &[f64], n: usize, row: usize, state: &[f64], next: &mut [
 /// One bar's ease of movement, as [`emv`] averages it.
 #[inline]
 fn emv_term(high: &[f64], low: &[f64], volume: &[f64], i: usize) -> f64 {
+    if i == 0 { return f64::NAN; }
+    missing::term(&[high[i], low[i], high[i - 1], low[i - 1], volume[i]], emv_value(high, low, volume, i))
+}
+
+#[inline]
+fn emv_value(high: &[f64], low: &[f64], volume: &[f64], i: usize) -> f64 {
+    if i == 0 { return f64::NAN; }
+    emv_bar([high[i], low[i], high[i - 1], low[i - 1], volume[i]])
+}
+
+#[inline(always)]
+fn emv_bar([high, low, prior_high, prior_low, volume]: [f64; 5]) -> f64 {
+    emv_parts([high, low, prior_high, prior_low, volume]).0
+}
+
+#[inline(always)]
+fn emv_parts([high, low, prior_high, prior_low, volume]: [f64; 5]) -> (f64, f64) {
+    emv_value_parts(emv_midpoint(high, low) - emv_midpoint(prior_high, prior_low), high, low, volume)
+}
+
+#[inline(always)]
+fn emv_midpoint(high: f64, low: f64) -> f64 {
+    (high + low) / 2.0
+}
+
+#[inline(always)]
+fn emv_value_parts(distance: f64, high: f64, low: f64, volume: f64) -> (f64, f64) {
     const SCALE: f64 = 100_000_000.0;
-    if i == 0 {
-        return f64::NAN;
-    }
-    let mid = |k: usize| (high[k] + low[k]) / 2.0;
-    missing::term(&[high[i], low[i], high[i - 1], low[i - 1], volume[i]],
-        (mid(i) - mid(i - 1)) / ((volume[i] / SCALE) / (high[i] - low[i])))
+    let value = distance / ((volume / SCALE) / (high - low));
+    // A missing price makes distance non-finite; a missing volume then also
+    // makes this witness non-finite. Overflow from finite prices stays IEEE.
+    (value, distance + volume)
 }
 
 /// [`emv`]'s state after the rows: its SMA's.
@@ -734,7 +809,7 @@ pub fn emv_step(
     if row >= high.len() {
         return None;
     }
-    kernels::sma_step(n, row, |j| emv_term(high, low, volume, j), state, next)
+    kernels::sma_internal_step(n, row, |j| emv_term(high, low, volume, j), state, next)
 }
 
 /// KST's four `(rate-of-change period, SMA period)` pairs.
@@ -743,7 +818,7 @@ const KST_LEGS: [(usize, usize); 4] = [(10, 10), (15, 10), (20, 10), (30, 15)];
 /// The `p`-bar rate of change of `close` at `i`, as [`kst`] averages it.
 #[inline]
 fn kst_roc(close: &[f64], p: usize, i: usize) -> f64 {
-    if i >= p { missing::term(&[close[i], close[i - p]], (close[i] / close[i - p] - 1.0) * 100.0) } else { f64::NAN }
+    super::momentum::unguarded_roc::<false>(close, p, i)
 }
 
 /// [`kst`]'s state after the rows of `close`: its four SMAs'.
@@ -762,7 +837,7 @@ pub fn kst_step(close: &[f64], row: usize, state: &[f64], next: &mut [f64]) -> O
     let mut r = [0.0; 4];
     for (k, (roc, sma)) in KST_LEGS.into_iter().enumerate() {
         let (s, n) = (&state[k * S..(k + 1) * S], &mut next[k * S..(k + 1) * S]);
-        r[k] = kernels::sma_step(sma, row, |j| kst_roc(close, roc, j), s, n)?;
+        r[k] = kernels::sma_internal_step(sma, row, |j| kst_roc(close, roc, j), s, n)?;
     }
     Some(r[0] + 2.0 * r[1] + 3.0 * r[2] + 4.0 * r[3])
 }

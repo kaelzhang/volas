@@ -9,6 +9,37 @@ fn frame() -> DataFrame {
     DataFrame::new(vec!["close".into()], vec![Column::f64(vec![1.0, 2.0, 3.0])], None).unwrap()
 }
 
+#[test]
+fn a_read_records_a_finite_fact_only_for_its_pass() {
+    let df = frame();
+    let ops = Operands::over(&df, &[], 0, vec![Some(Cow::Owned(vec![1.0, 2.0, 3.0]))]);
+    ops.f64(0, "close").unwrap();
+    assert!(!ops.clean());
+    let read = ops.reads().next().unwrap().1;
+    assert_eq!(read.known_has_nonfinite(), None);
+    assert!(!read.has_nonfinite());
+    assert_eq!(read.known_has_nonfinite(), Some(false));
+    assert!(ops.all_finite());
+    assert!(ops.clean());
+    let next = Operands::over(&df, &[], 0, vec![Some(Cow::Owned(vec![1.0, 2.0, 3.0]))]);
+    assert_eq!(next.reads().next().unwrap().1.known_has_nonfinite(), None);
+}
+
+#[test]
+fn a_read_records_a_nonfinite_fact_only_for_its_pass() {
+    let df = frame();
+    let ops = Operands::over(&df, &[], 0, vec![Some(Cow::Owned(vec![1.0, f64::INFINITY, 3.0]))]);
+    ops.f64(0, "close").unwrap();
+    let read = ops.reads().next().unwrap().1;
+    assert_eq!(read.known_has_nonfinite(), None);
+    assert!(read.has_nonfinite());
+    assert_eq!(read.known_has_nonfinite(), Some(true));
+    assert!(!ops.all_finite());
+    assert!(!ops.clean());
+    let next = Operands::over(&df, &[], 0, vec![Some(Cow::Owned(vec![1.0, 2.0, 3.0]))]);
+    assert_eq!(next.reads().next().unwrap().1.known_has_nonfinite(), None);
+}
+
 /// Every input a rerun hands out is as long as the others; a shorter one is a shape
 /// error, never a slice a kernel reads past.
 #[test]

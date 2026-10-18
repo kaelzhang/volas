@@ -18,7 +18,7 @@ use crate::raw::smoothing;
 
 mod sma;
 pub use sma::{sma, sma_pass};
-pub(crate) use sma::{sma_row, sma_step, SMA_STATE};
+pub(crate) use sma::{sma_row, sma_step, sma_internal, sma_internal_pass, sma_internal_step, SMA_STATE};
 
 /// The seed of an SMA-seeded smoother over `data` (TA-Lib's EMA / Wilder shape): the row
 /// of its `period`-th present (non-NaN) value and the mean of the first `period` present

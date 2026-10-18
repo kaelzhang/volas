@@ -17,6 +17,22 @@ pub fn sma(data: &[f64], period: usize, origin: usize) -> Vec<f64> {
 /// SMA batch pass with optional terminal-state publication.
 #[inline]
 pub fn sma_pass<S: crate::pass::StateSink>(data: &[f64], period: usize, origin: usize, states: &mut S) -> Vec<f64> {
+    sma_pass_with::<false, S>(data, period, origin, states)
+}
+
+/// Window mean of terms produced inside one indicator: preserve arithmetic infinities.
+/// External inputs use `sma`; both paths share the exact slide and state layout.
+pub(crate) fn sma_internal(data: &[f64], period: usize, origin: usize) -> Vec<f64> {
+    sma_internal_pass(data, period, origin, &mut ())
+}
+
+/// Capturing twin for internal arithmetic terms.
+pub(crate) fn sma_internal_pass<S: crate::pass::StateSink>(data: &[f64], period: usize, origin: usize, states: &mut S) -> Vec<f64> {
+    sma_pass_with::<true, S>(data, period, origin, states)
+}
+
+#[inline]
+fn sma_pass_with<const INTERNAL: bool, S: crate::pass::StateSink>(data: &[f64], period: usize, origin: usize, states: &mut S) -> Vec<f64> {
     let n = data.len();
     if period == 0 || period > n {
         return vec![f64::NAN; n];
@@ -89,6 +105,25 @@ pub fn sma_pass<S: crate::pass::StateSink>(data: &[f64], period: usize, origin: 
             return out;
         }
     }
+    if INTERNAL {
+        sma_nonfinite::<S>(data, period, origin, states)
+    } else {
+        sma_careful::<false, S>(data, period, origin, states)
+    }
+}
+
+#[cold]
+#[inline(never)]
+fn sma_nonfinite<S: crate::pass::StateSink>(data: &[f64], period: usize, origin: usize, states: &mut S) -> Vec<f64> {
+    sma_careful::<true, S>(data, period, origin, states)
+}
+
+// External-input SMA's original careful pass predates internal IEEE terms. Keep
+// its original value-only code generation; only the new internal fallback needs
+// the cold boundary above. Both use this one owner for state and admission.
+#[inline(always)]
+fn sma_careful<const INTERNAL: bool, S: crate::pass::StateSink>(data: &[f64], period: usize, origin: usize, states: &mut S) -> Vec<f64> {
+    let n = data.len();
     states.restart();
     // Careful path — window-local (see [`crate::guard`]): the running sum holds only
     // finite rows; a window holding a non-finite input is missing, so a bad row
@@ -96,13 +131,13 @@ pub fn sma_pass<S: crate::pass::StateSink>(data: &[f64], period: usize, origin: 
     let mut slide = Slide::<1>::at(origin);
     // Keep the value-only iterator free of the capturing closure environment.
     if !S::CAPTURE {
-        return (0..n).map(|i| super::sma_row(&mut slide, period, i, |j| data[j])).collect();
+        return (0..n).map(|i| sma_row_with::<INTERNAL>(&mut slide, period, i, |j| data[j])).collect();
     }
     let mut out = Vec::with_capacity(n);
     let mut from = 0;
     while from < n {
         let end = states.next_end(from + 1, n);
-        out.extend((from..end).map(|i| super::sma_row(&mut slide, period, i, |j| data[j])));
+        out.extend((from..end).map(|i| sma_row_with::<INTERNAL>(&mut slide, period, i, |j| data[j])));
         states.record(end - 1, n, |out| slide.append_state(out));
         from = end;
     }
@@ -119,12 +154,18 @@ pub(crate) fn sma_row(
     i: usize,
     term: impl Fn(usize) -> f64,
 ) -> f64 {
+    sma_row_with::<false>(slide, period, i, term)
+}
+
+#[inline]
+fn sma_row_with<const INTERNAL: bool>(slide: &mut Slide<1>, period: usize, i: usize, term: impl Fn(usize) -> f64) -> f64 {
     match slide.row(Order::AddDrop, period, i, |j| {
         let x = term(j);
         ([x], !crate::missing::is_missing(x))
     }) {
         Window::Partial => f64::NAN,
         Window::Sums([sum]) => sum.mean(period as f64),
+        Window::Bad if INTERNAL => crate::guard::own_sums(i + 1 - period..=i, |j| [term(j)])[0] / period as f64,
         Window::Bad => f64::NAN,
     }
 }
@@ -141,11 +182,21 @@ pub(crate) fn sma_step(
     state: &[f64],
     next: &mut [f64],
 ) -> Option<f64> {
+    sma_step_with::<false>(period, row, term, state, next)
+}
+
+/// Continuation of `sma_internal`, with the same window-local IEEE result.
+pub(crate) fn sma_internal_step(period: usize, row: usize, term: impl Fn(usize) -> f64, state: &[f64], next: &mut [f64]) -> Option<f64> {
+    sma_step_with::<true>(period, row, term, state, next)
+}
+
+#[inline]
+fn sma_step_with<const INTERNAL: bool>(period: usize, row: usize, term: impl Fn(usize) -> f64, state: &[f64], next: &mut [f64]) -> Option<f64> {
     if period == 0 || next.len() != SMA_STATE {
         return None;
     }
     let mut slide = Slide::<1>::from_state(state)?;
-    let value = sma_row(&mut slide, period, row, term);
+    let value = if INTERNAL { sma_row_with::<true>(&mut slide, period, row, term) } else { super::sma_row(&mut slide, period, row, term) };
     slide.write_state(next);
     Some(value)
 }

@@ -74,21 +74,23 @@ pub(super) fn dispatch(
         ("accbands", Some("upper")) => {
             let high = ops.f64(0, "high")?;
             let low = ops.f64(1, "low")?;
-            f64col(ind::accbands_upper(
+            f64col(ind::accbands_upper_pass(
                 &high,
                 &low,
                 arg_usize(args, 0),
                 ops.origin(),
+                &mut (),
             ))
         }
         ("accbands", Some("lower")) => {
             let high = ops.f64(0, "high")?;
             let low = ops.f64(1, "low")?;
-            f64col(ind::accbands_lower(
+            f64col(ind::accbands_lower_pass(
                 &high,
                 &low,
                 arg_usize(args, 0),
                 ops.origin(),
+                &mut (),
             ))
         }
 
@@ -136,7 +138,7 @@ pub(super) fn dispatch(
             let high = ops.f64(0, "high")?;
             let low = ops.f64(1, "low")?;
             let close = ops.f64(2, "close")?;
-            f64col(ind::tr(&high, &low, &close))
+            f64col(ind::tr_with(&high, &low, &close, ops.clean()))
         }
         ("atr", _) => {
             let high = ops.f64(0, "high")?;
@@ -201,14 +203,15 @@ pub(super) fn dispatch(
         // 61-arm matches per candle exec). `bullish`/`bearish` are handled above, and
         // the pattern is validated before dispatch, so an unknown name is unreachable.
         ("style", Some(pat)) => {
-            let (pattern, _) = match ind::candle_pattern(pat) {
-                Some(p) => p,
-                None => unreachable!("candle pattern validated by command_spec"), // LCOV_EXCL_LINE
-            };
             let open = ops.f64(0, "open")?;
             let high = ops.f64(1, "high")?;
             let low = ops.f64(2, "low")?;
             let close = ops.f64(3, "close")?;
+            let entry = if ops.all_finite() { ind::candle_pattern_complete(pat) } else { ind::candle_pattern(pat) };
+            let (pattern, _) = match entry {
+                Some(p) => p,
+                None => unreachable!("candle pattern validated by command_spec"), // LCOV_EXCL_LINE
+            };
             let v = match pattern {
                 ind::CandlePattern::Plain(f) => f(&open, &high, &low, &close, ops.origin()),
                 ind::CandlePattern::Penetration { f, .. } => {
@@ -223,11 +226,12 @@ pub(super) fn dispatch(
         )),
         ("change", _) => f64col(ind::change(&close(0)?, arg_usize(args, 0))),
 
-        ("mom", _) => f64col(ind::mom(&close(0)?, arg_usize(args, 0))),
-        ("roc", _) => f64col(ind::roc(&close(0)?, arg_usize(args, 0))),
-        ("rocp", _) => f64col(ind::rocp(&close(0)?, arg_usize(args, 0))),
-        ("rocr", _) => f64col(ind::rocr(&close(0)?, arg_usize(args, 0))),
-        ("rocr100", _) => f64col(ind::rocr100(&close(0)?, arg_usize(args, 0))),
+        (name @ ("mom" | "roc" | "rocp" | "rocr" | "rocr100"), _) => {
+            let close = close(0)?;
+            let p = arg_usize(args, 0);
+            let family = ind::Momentum::of(name).expect("matched momentum family");
+            f64col(family.series_with(&close, p, ops.clean()))
+        },
 
         ("willr", _) => {
             let high = ops.f64(0, "high")?;
@@ -246,13 +250,15 @@ pub(super) fn dispatch(
             let low = ops.f64(1, "low")?;
             let close = ops.f64(2, "close")?;
             let volume = ops.f64(3, "volume")?;
-            f64col(ind::mfi(
+            f64col(ind::mfi_pass_with(
                 &high,
                 &low,
                 &close,
                 &volume,
                 arg_usize(args, 0),
                 ops.origin(),
+                ops.clean(),
+                &mut (),
             ))
         }
         ("ultosc", _) => {

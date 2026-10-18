@@ -1,7 +1,7 @@
 """TR and its smoothers on non-finite prices, against TA-Lib 0.6.4.
 
-Input NaNs retain volas's documented missing-row rule. NaNs computed from
-infinities are arithmetic results, including in the ATR seed. NATR(1) retains
+Non-finite inputs follow the missing-row rule: recursive oracles delete
+those rows; per-term and finite-window oracles substitute NaN. NATR(1) retains
 volas's documented normalization, and DI(1) its documented percentage scale.
 """
 
@@ -29,7 +29,7 @@ _VALUES = [0.0, -0.0, 3.0, -2.0, np.inf, -np.inf, np.nan]
 def test_tr_uses_talibs_ordered_comparisons(high, low, prev_close):
     h, l, c = np.array([5., high]), np.array([1., low]), np.array([prev_close, 2.])
     want = talib.TRANGE(h, l, c)
-    if np.isnan([high, low, prev_close]).any():
+    if (~np.isfinite([high, low, prev_close])).any():
         want[1] = np.nan  # a term reading a missing operand is missing
     _bits(volas.DataFrame({'high': h, 'low': l, 'close': c}).exec('tr'), want)
 
@@ -52,7 +52,7 @@ def _frame(d, start=0, end=None):
 
 
 def _complete_oracle(d, fn):
-    keep = np.logical_and.reduce([~np.isnan(v) for v in d.values()])
+    keep = np.logical_and.reduce([np.isfinite(v) for v in d.values()])
     out = np.full(len(keep), np.nan)
     with np.errstate(all='ignore'):
         out[keep] = fn(*(d[k][keep] for k in ('high', 'low', 'close')))
@@ -178,15 +178,16 @@ def test_directional_period_one_has_no_smoothing(name, value):
 
 
 @pytest.mark.parametrize('first', [1., -0., np.inf, -np.inf, np.nan])
-def test_smma_period_one_is_identity_after_nonfinite_values(first):
+def test_smma_period_one_skips_nonfinite_inputs(first):
     c = np.array([first, np.inf, 2., np.nan, -np.inf, -0., 3., 0.])
     d = {'close': c}
-    _bits(_frame(d).exec('smma:1'), c)
+    want = np.where(np.isfinite(c), c, np.nan)
+    _bits(_frame(d).exec('smma:1'), want)
     live = _frame(d, 0, 2)
     live['smma:1']
     for row in range(2, len(c)):
         live.append(_frame(d, row, row + 1))
-        _bits(live['smma:1'], c[:row + 1])
+        _bits(live['smma:1'], want[:row + 1])
 
 
 @pytest.mark.parametrize('name', ['sar', 'sarext'])
@@ -221,8 +222,9 @@ def test_native_atr_consumers_share_the_range_and_identity(line, value, row, per
     if line.startswith('supertrend'):
         directive = f'{line}:{period},2'
         with np.errstate(all='ignore'):
-            want = native.supertrend(c, h, l, c, c, period, 2.,
-                                     'direction' if line.endswith('direction') else 'line')
+            want = _complete_oracle(d, lambda h, l, c: native.supertrend(
+                c, h, l, c, c, period, 2.,
+                'direction' if line.endswith('direction') else 'line'))
     else:
         directive = f'{line}:5,{period},2'
         def fn(h, l, c):
@@ -250,7 +252,7 @@ def test_ultosc_uses_talib_terms_with_window_local_sums(periods, columns, value)
         # Only the prior close is read on the extra bar; avoid the Python
         # wrapper treating an irrelevant missing high/low as a leading gap.
         h[0], l[0] = 1., 0.
-        if any(np.isnan(x).any() for x in (h, l, c)):
+        if any((~np.isfinite(x)).any() for x in (h, l, c)):
             continue
         if width == 1:
             # TA_ULTOSC_Lookback(1,1,1) is SMA_Lookback(1)+1 == 0:
@@ -280,7 +282,7 @@ def test_finite_range_consumers_recover_after_a_bad_window(directive, value):
     if directive.startswith('vortex'):
         # VM also reads the prior high/low: its last affected term is bar 37,
         # one later than TR's. At bar 43 the TR sum is finite but VM is not.
-        assert np.isnan(got[43]) if np.isnan(value) else np.isposinf(got[43])
+        assert np.isnan(got[43])
         recovered = 44
     _bits(got[recovered:], _frame(clean).exec(directive)[recovered:])
     _live_paths(d, directive, got)

@@ -175,15 +175,21 @@ pub fn wma_pass<S: crate::pass::StateSink>(data: &[f64], period: usize, _origin:
     let values = if finite {
         values
     } else {
-        states.restart();
-        wma_publish_prefix(states, start, n);
-        wma_with::<NonFiniteRows>(&data[start..], period, states, start, n).0
+        wma_nonfinite(data, period, states, start)
     };
     if start == 0 { values } else {
         let mut out = vec![f64::NAN; n];
         out[start..].copy_from_slice(&values);
         out
     }
+}
+
+#[cold]
+#[inline(never)]
+fn wma_nonfinite<S: crate::pass::StateSink>(data: &[f64], period: usize, states: &mut S, start: usize) -> Vec<f64> {
+    states.restart();
+    wma_publish_prefix(states, start, data.len());
+    wma_with::<NonFiniteRows>(&data[start..], period, states, start, data.len()).0
 }
 
 /// Skipped leading NaNs carry the initial WMA state, including requested anchors.
@@ -341,9 +347,17 @@ pub fn vwma_pass(close: &[f64], volume: &[f64], period: usize, origin: usize, st
     if clean && pv.value().is_finite() && vv.value().is_finite() {
         return out;
     }
+    vwma_nonfinite(close, volume, period, origin, out, states)
+}
+
+// Keep admission and window-local IEEE recovery out of the numerical loop's body.
+#[cold]
+#[inline(never)]
+fn vwma_nonfinite(close: &[f64], volume: &[f64], period: usize, origin: usize, mut out: Vec<f64>, states: &mut impl crate::pass::StateSink) -> Vec<f64> {
+    let n = close.len();
     states.restart();
     // A non-finite bar entered: window-local careful path (see `crate::guard`).
-    crate::guard::window_sums_pass(n, period, Order::AddDrop, origin, |i| [close[i] * volume[i], volume[i]], |i, s| {
+    crate::guard::window_sums_pass(n, period, Order::AddDrop, origin, |i| crate::missing::terms(&[close[i], volume[i]], [close[i] * volume[i], volume[i]]), |i, s| {
         out[i] = vwma_value(s);
     }, states);
     out
@@ -384,8 +398,8 @@ pub fn alma(close: &[f64], period: usize, offset: f64, sigma: f64) -> Vec<f64> {
         }
         out[i] = acc;
     }
-    missing::blank_windows(&mut out, close, period);
-    out
+    drop(w);
+    missing::blank_owned_windows(out, close, period)
 }
 
 /// Hull Moving Average (TradingView `ta.hma`): `WMA(2·WMA(close, n/2) −
@@ -421,15 +435,19 @@ pub fn hma_pass<S: crate::pass::StateSink>(close: &[f64], period: usize, origin:
 /// window, weights `[1/6, 2/6, 2/6, 1/6]` (oldest→newest). Lookback 3.
 pub fn swma(close: &[f64]) -> Vec<f64> {
     let n = close.len();
-    let mut out = vec![f64::NAN; n];
+    let mut out = crate::buf::OutBuf::warmup(n, 0);
+    // This fixed four-bar kernel has at most three warm-up slots. Write them
+    // directly, without a dynamic memset or a prefill of the valid region.
+    if n > 0 { out.set(0, f64::NAN); }
+    if n > 1 { out.set(1, f64::NAN); }
+    if n > 2 { out.set(2, f64::NAN); }
     for i in 3..n {
-        out[i] = close[i - 3] / 6.0
+        out.set(i, close[i - 3] / 6.0
             + close[i - 2] * 2.0 / 6.0
             + close[i - 1] * 2.0 / 6.0
-            + close[i] / 6.0;
+            + close[i] / 6.0);
     }
-    missing::blank_windows(&mut out, close, 4);
-    out
+    missing::blank_window_output::<4>(out, close)
 }
 
 /// Bull and Bear Index (`mean of ma:a, ma:b, ma:c, ma:d`); row 0 at absolute position
@@ -579,9 +597,14 @@ pub fn vwma_step(
     if period == 0 || row >= close.len() || next.len() != Slide::<2>::STATE {
         return None;
     }
-    let term = |i: usize| [close[i] * volume[i], volume[i]];
+    let term = |i: usize| crate::missing::terms(&[close[i], volume[i]], [close[i] * volume[i], volume[i]]);
     let mut slide = Slide::<2>::from_state(state)?;
-    let value = match slide.row(Order::AddDrop, period, row, |j| all_finite(term(j))) {
+    let value = match slide.row(Order::AddDrop, period, row, |j| {
+        // Any missing operand makes at least one numerical term non-finite.
+        // The slide rejects it already; original-input admission is only needed
+        // by the cold IEEE re-sum, which distinguishes generated overflow.
+        all_finite([close[j] * volume[j], volume[j]])
+    }) {
         Window::Partial => f64::NAN,
         Window::Sums(s) => vwma_value(s.map(|c| c.value())),
         Window::Bad => vwma_value(own_sums(row + 1 - period..=row, term)),

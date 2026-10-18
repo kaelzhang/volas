@@ -241,7 +241,8 @@ pub(crate) fn step(
         ("stoch", Some("k" | "d")) | ("stochf", Some("d")) => {
             let (h, l, c) = hlc()?;
             let (stages, k) = stoch_stages(name, sub, args);
-            ind::stoch_step(&h, &l, &c, p(0), &stages[..k], row, prev, next)
+            let step = if ops.all_finite() { ind::stoch_step_complete } else { ind::stoch_step };
+            step(&h, &l, &c, p(0), &stages[..k], row, prev, next)
         }
         ("apo" | "ppo" | "bias" | "dma" | "macdext" | "mavp", _) => {
             composite_step(ops, name, sub, args, prev, row, next)

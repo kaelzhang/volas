@@ -644,6 +644,20 @@ pub fn rci(close: &[f64], period: usize) -> Vec<f64> {
 /// future bars), `NaN` everywhere else. A `NaN` anywhere in the window
 /// disqualifies the pivot. Lookback `left+right`. O(n·(left+right)).
 pub fn pivot(source: &[f64], left: usize, right: usize, high: bool) -> Vec<f64> {
+    pivot_with(source, left, right, high, false)
+}
+
+/// Pivot with a trusted all-finite input fact (`true` requires finite inputs).
+/// Classification and missing-window repair stay outside the numerical loop.
+pub fn pivot_with(source: &[f64], left: usize, right: usize, high: bool, complete: bool) -> Vec<f64> {
+    let out = pivot_ieee(source, left, right, high);
+    let span = left + right + 1;
+    if complete { out }
+    else { missing::blank_owned_windows(out, source, span) }
+}
+
+#[inline(never)]
+fn pivot_ieee(source: &[f64], left: usize, right: usize, high: bool) -> Vec<f64> {
     let n = source.len();
     let mut out = vec![f64::NAN; n];
     let win = left + right;
@@ -662,7 +676,6 @@ pub fn pivot(source: &[f64], left: usize, right: usize, high: bool) -> Vec<f64> 
             out[i] = cand;
         }
     }
-    missing::blank_windows(&mut out, source, win + 1);
     out
 }
 

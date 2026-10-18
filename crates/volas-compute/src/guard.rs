@@ -331,6 +331,8 @@ pub(crate) fn all_finite<const K: usize>(t: [f64; K]) -> ([f64; K], bool) {
 /// running ones for a clean window, the window's own sums when it holds a row with a
 /// non-finite term. A non-finite term therefore reaches exactly the windows holding it.
 /// `emit` is called for every `i` in `period-1..n`, in order, after `order`'s update.
+#[cold]
+#[inline(never)]
 pub(crate) fn window_sums_pass<const K: usize>(
     n: usize, period: usize, order: Order, origin: usize,
     term: impl Fn(usize) -> [f64; K], mut emit: impl FnMut(usize, [f64; K]),
@@ -350,7 +352,10 @@ pub(crate) fn window_sums_pass<const K: usize>(
     }
 }
 
-/// Sum a window in row order, returning missing if any term is missing.
+/// Sum internal arithmetic terms in row order. Input admission belongs to the
+/// term owner; an arithmetic infinity here retains IEEE propagation.
+#[cold]
+#[inline(never)]
 pub(crate) fn own_sums<const K: usize>(
     rows: std::ops::RangeInclusive<usize>,
     term: impl Fn(usize) -> [f64; K],
@@ -358,7 +363,6 @@ pub(crate) fn own_sums<const K: usize>(
     let mut own = [0.0; K];
     for j in rows {
         let values = term(j);
-        if crate::missing::any_of(&values) { return [f64::NAN; K]; }
         for (o, v) in own.iter_mut().zip(values) { *o += v; }
     }
     own
@@ -396,12 +400,16 @@ mod tests {
     use super::*;
 
     #[test]
-    fn own_window_sums_distinguish_missing_inputs_from_generated_overflow() {
+    fn own_window_sums_preserve_internal_ieee_terms() {
         assert_eq!(own_sums(0..=1, |_| [f64::MAX]), [f64::INFINITY]);
-        assert_eq!(own_sums(0..=1, |j| [j as f64 + 1.0]), [3.0]);
-        for bad in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
-            assert!(own_sums(0..=1, |j| [if j == 0 { 1.0 } else { bad }])[0].is_nan());
+        for inf in [f64::INFINITY, f64::NEG_INFINITY] {
+            assert_eq!(own_sums(0..=1, |j| [if j == 0 { 1.0 } else { inf }]), [inf]);
         }
+        assert_eq!(own_sums(0..=1, |j| [j as f64 + 1.0]), [3.0]);
+        let independent = own_sums(0..=1, |_| [f64::NAN, 1.0]);
+        assert!(independent[0].is_nan());
+        assert_eq!(independent[1].to_bits(), 2.0f64.to_bits());
+        assert!(own_sums(0..=1, |j| [if j == 0 { 1.0 } else { f64::NAN }])[0].is_nan());
     }
 
     #[test]
@@ -424,7 +432,7 @@ mod tests {
 
     fn sums(xs: &[f64], period: usize) -> Vec<(usize, f64)> {
         let mut out = Vec::new();
-        window_sums_pass(xs.len(), period, Order::AddDrop, 0, |i| [xs[i]], |i, [s]| out.push((i, s)), &mut ());
+        window_sums_pass(xs.len(), period, Order::AddDrop, 0, |i| [crate::missing::term(&[xs[i]], xs[i])], |i, [s]| out.push((i, s)), &mut ());
         out
     }
 

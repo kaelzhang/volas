@@ -11,9 +11,15 @@ use crate::guard::{NonFiniteRows, RowGuard, Unguarded};
 fn linreg_fit_pass(data: &[f64], period: usize, origin: usize, states: &mut impl crate::pass::StateSink, project: impl Fn(f64, f64) -> f64) -> Vec<f64> {
     let (out, finite) = linreg_fit_with::<Unguarded>(data, period, origin, states, &project);
     if finite { out } else {
-        states.restart();
-        linreg_fit_with::<NonFiniteRows>(data, period, origin, states, &project).0
+        linreg_nonfinite(data, period, origin, states, &project)
     }
+}
+
+#[cold]
+#[inline(never)]
+fn linreg_nonfinite(data: &[f64], period: usize, origin: usize, states: &mut impl crate::pass::StateSink, project: &impl Fn(f64, f64) -> f64) -> Vec<f64> {
+    states.restart();
+    linreg_fit_with::<NonFiniteRows>(data, period, origin, states, project).0
 }
 
 /// The sliding fit under a row guard (row 0 at absolute position `origin`); also returns
@@ -193,9 +199,15 @@ pub fn var_pass(data: &[f64], period: usize, origin: usize, states: &mut impl cr
     if finite {
         out
     } else {
-        states.restart();
-        rolling_var_with::<NonFiniteRows>(data, period, origin, states).0
+        var_nonfinite(data, period, origin, states)
     }
+}
+
+#[cold]
+#[inline(never)]
+fn var_nonfinite(data: &[f64], period: usize, origin: usize, states: &mut impl crate::pass::StateSink) -> Vec<f64> {
+    states.restart();
+    rolling_var_with::<NonFiniteRows>(data, period, origin, states).0
 }
 
 /// The sliding variance under a row guard (row 0 at absolute position `origin`); also
@@ -352,6 +364,13 @@ pub fn correl_pass<S: crate::pass::StateSink>(x: &[f64], y: &[f64], period: usiz
     if clean && s.iter().all(|a| a.value().is_finite()) {
         return out.finish();
     }
+    correl_nonfinite(x, y, period, origin, states)
+}
+
+#[cold]
+#[inline(never)]
+fn correl_nonfinite(x: &[f64], y: &[f64], period: usize, origin: usize, states: &mut impl crate::pass::StateSink) -> Vec<f64> {
+    let n = x.len();
     states.restart();
     // A non-finite row entered: window-local careful path (see `crate::guard`).
     let mut slide = Slide::<5>::at(origin);
@@ -457,6 +476,13 @@ pub fn beta_pass<S: crate::pass::StateSink>(x: &[f64], y: &[f64], period: usize,
     if clean && s.iter().all(|a| a.value().is_finite()) {
         return out.finish();
     }
+    beta_nonfinite(x, y, period, origin, states)
+}
+
+#[cold]
+#[inline(never)]
+fn beta_nonfinite(x: &[f64], y: &[f64], period: usize, origin: usize, states: &mut impl crate::pass::StateSink) -> Vec<f64> {
+    let n = x.len();
     states.restart();
     // A non-finite return entered: window-local careful path (see `crate::guard`).
     let mut out = crate::buf::OutBuf::warmup(n, period);

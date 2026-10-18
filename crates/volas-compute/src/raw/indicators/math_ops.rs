@@ -18,17 +18,43 @@ pub fn sum(data: &[f64], period: usize, _origin: usize) -> Vec<f64> {
 
 /// SUM batch pass with terminal-state publication.
 pub fn sum_pass(data: &[f64], period: usize, origin: usize, states: &mut impl crate::pass::StateSink) -> Vec<f64> {
-    let (out, finite) = sum_with::<Unguarded>(data, period, origin, states);
+    sum_pass_with::<false>(data, period, origin, states)
+}
+
+/// SUM of internal arithmetic terms, preserving generated infinities.
+pub(crate) fn sum_internal_pass(data: &[f64], period: usize, origin: usize, states: &mut impl crate::pass::StateSink) -> Vec<f64> {
+    sum_pass_with::<true>(data, period, origin, states)
+}
+
+fn sum_pass_with<const INTERNAL: bool>(data: &[f64], period: usize, origin: usize, states: &mut impl crate::pass::StateSink) -> Vec<f64> {
+    sum_pass_with_finiteness::<INTERNAL>(data, period, origin, states).0
+}
+
+/// Reuse the existing fast sum's finite result without another input scan.
+/// True proves the values it read were finite; false can also mean finite-input
+/// overflow, so callers still inspect original inputs on their cold repair path.
+pub(crate) fn sum_source_pass_with_finiteness(data: &[f64], period: usize, origin: usize, states: &mut impl crate::pass::StateSink) -> (Vec<f64>, bool) {
+    sum_pass_with_finiteness::<false>(data, period, origin, states)
+}
+
+fn sum_pass_with_finiteness<const INTERNAL: bool>(data: &[f64], period: usize, origin: usize, states: &mut impl crate::pass::StateSink) -> (Vec<f64>, bool) {
+    let (out, finite) = sum_with::<Unguarded, INTERNAL>(data, period, origin, states);
     if finite {
-        out
+        (out, true)
     } else {
-        states.restart();
-        sum_with::<NonFiniteRows>(data, period, origin, states).0
+        (sum_nonfinite::<INTERNAL>(data, period, origin, states), false)
     }
 }
 
+#[cold]
+#[inline(never)]
+fn sum_nonfinite<const INTERNAL: bool>(data: &[f64], period: usize, origin: usize, states: &mut impl crate::pass::StateSink) -> Vec<f64> {
+    states.restart();
+    sum_with::<NonFiniteRows, INTERNAL>(data, period, origin, states).0
+}
+
 /// The sliding sum under a row guard; also returns whether the total stayed finite.
-fn sum_with<G: RowGuard>(data: &[f64], period: usize, origin: usize, states: &mut impl crate::pass::StateSink) -> (Vec<f64>, bool) {
+fn sum_with<G: RowGuard, const INTERNAL: bool>(data: &[f64], period: usize, origin: usize, states: &mut impl crate::pass::StateSink) -> (Vec<f64>, bool) {
     let n = data.len();
     let mut out = vec![f64::NAN; n];
     if period == 0 || period > n {
@@ -60,6 +86,8 @@ fn sum_with<G: RowGuard>(data: &[f64], period: usize, origin: usize, states: &mu
         }
         out[i] = if guard.clean() {
             total.value()
+        } else if INTERNAL {
+            data[i + 1 - period..=i].iter().sum()
         } else {
             f64::NAN
         };
@@ -91,6 +119,11 @@ fn position(data: &[f64], trailing: usize, today: usize, at: usize) -> f64 {
 /// the same on a slice or a bounded frame as in the full history. A window holding a
 /// missing value is NaN. Lookback `period-1`.
 pub fn maxindex(data: &[f64], period: usize, origin: usize) -> Vec<f64> {
+    maxindex_with(data, period, origin, false)
+}
+
+/// `maxindex` with a trusted all-finite input fact.
+pub fn maxindex_with(data: &[f64], period: usize, origin: usize, complete: bool) -> Vec<f64> {
     let n = data.len();
     let mut out = vec![f64::NAN; n];
     if period == 0 || period > n {
@@ -126,7 +159,7 @@ pub fn maxindex(data: &[f64], period: usize, origin: usize) -> Vec<f64> {
         out[today] = (hi_idx + origin) as f64;
         trailing += 1;
     }
-    missing::blank_windows(&mut out, data, period);
+    if !complete { missing::blank_windows(&mut out, data, period); }
     out
 }
 
@@ -135,6 +168,11 @@ pub fn maxindex(data: &[f64], period: usize, origin: usize) -> Vec<f64> {
 /// equal lows). Row 0 is at absolute position `origin`. A window holding a
 /// missing value is NaN. Lookback `period-1`.
 pub fn minindex(data: &[f64], period: usize, origin: usize) -> Vec<f64> {
+    minindex_with(data, period, origin, false)
+}
+
+/// `minindex` with a trusted all-finite input fact.
+pub fn minindex_with(data: &[f64], period: usize, origin: usize, complete: bool) -> Vec<f64> {
     let n = data.len();
     let mut out = vec![f64::NAN; n];
     if period == 0 || period > n {
@@ -169,7 +207,7 @@ pub fn minindex(data: &[f64], period: usize, origin: usize) -> Vec<f64> {
         out[today] = (lo_idx + origin) as f64;
         trailing += 1;
     }
-    missing::blank_windows(&mut out, data, period);
+    if !complete { missing::blank_windows(&mut out, data, period); }
     out
 }
 
@@ -372,6 +410,15 @@ pub(crate) fn sum_row(
     state: &[f64],
     next: &mut [f64],
 ) -> Option<f64> {
+    sum_row_with::<false>(period, row, term, state, next)
+}
+
+/// Step of the internal-term SUM, with its unchanged slide state.
+pub(crate) fn sum_internal_row(period: usize, row: usize, term: impl Fn(usize) -> f64, state: &[f64], next: &mut [f64]) -> Option<f64> {
+    sum_row_with::<true>(period, row, term, state, next)
+}
+
+fn sum_row_with<const INTERNAL: bool>(period: usize, row: usize, term: impl Fn(usize) -> f64, state: &[f64], next: &mut [f64]) -> Option<f64> {
     use crate::guard::{Order, Slide, Window};
     if period == 0 || next.len() != SUM_STATE {
         return None;
@@ -383,6 +430,7 @@ pub(crate) fn sum_row(
     }) {
         Window::Partial => f64::NAN,
         Window::Sums([total]) => total.value(),
+        Window::Bad if INTERNAL => crate::guard::own_sums(row + 1 - period..=row, |j| [term(j)])[0],
         Window::Bad => f64::NAN,
     };
     slide.write_state(next);

@@ -6,12 +6,12 @@ use crate::raw::smoothing;
 /// True Range (TA-Lib TRANGE): [`tr_at`] at every row; row 0 has no prior close, so
 /// it has no TR (NaN).
 pub fn tr(high: &[f64], low: &[f64], close: &[f64]) -> Vec<f64> {
-    let n = high.len();
-    let mut tr = vec![f64::NAN; n];
-    for (i, slot) in tr.iter_mut().enumerate().skip(1) {
-        *slot = tr_at(high, low, close, i);
-    }
-    tr
+    tr_with(high, low, close, false)
+}
+
+/// Batch TR with a remembered fact, or admission folded into its existing reads.
+pub fn tr_with(high: &[f64], low: &[f64], close: &[f64], complete: bool) -> Vec<f64> {
+    missing::map_terms(high.len(), 1, complete, |i| [high[i], low[i], close[i - 1]], |_, inputs| tr_value(inputs))
 }
 
 /// The true range of bar `i >= 1`: `max(high − low, |high − prev close|, |low − prev
@@ -23,17 +23,8 @@ pub fn tr(high: &[f64], low: &[f64], close: &[f64]) -> Vec<f64> {
 /// NaN from `inf − inf`, and the initial range's signed zero on a tie.
 #[inline]
 pub fn tr_at(high: &[f64], low: &[f64], close: &[f64], i: usize) -> f64 {
-    let (h, l, prev_close) = (high[i], low[i], close[i - 1]);
-    let mut range = h - l;
-    let high_gap = (prev_close - h).abs();
-    if high_gap > range {
-        range = high_gap;
-    }
-    let low_gap = (prev_close - l).abs();
-    if low_gap > range {
-        range = low_gap;
-    }
-    missing::term(&[h, l, prev_close], range)
+    let value = tr_at_complete(high, low, close, i);
+    missing::term(&[high[i], low[i], close[i - 1]], value)
 }
 
 /// ATR's fixed seed and recurrence, shared by the full output and state capture.
@@ -191,4 +182,28 @@ pub fn natr_resume(
         *v = natr_value(*v, c);
     }
     Some(new_state)
+}
+
+/// TR over prices already admitted as finite, retaining the original comparison loop.
+pub fn tr_complete(high: &[f64], low: &[f64], close: &[f64]) -> Vec<f64> {
+    tr_with(high, low, close, true)
+}
+
+#[inline]
+fn tr_at_complete(high: &[f64], low: &[f64], close: &[f64], i: usize) -> f64 {
+    tr_value([high[i], low[i], close[i - 1]])
+}
+
+#[inline(always)]
+pub(crate) fn tr_value([h, l, prev_close]: [f64; 3]) -> f64 {
+    let mut range = h - l;
+    let high_gap = (prev_close - h).abs();
+    if high_gap > range {
+        range = high_gap;
+    }
+    let low_gap = (prev_close - l).abs();
+    if low_gap > range {
+        range = low_gap;
+    }
+    range
 }

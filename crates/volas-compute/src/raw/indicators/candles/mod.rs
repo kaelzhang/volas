@@ -21,14 +21,16 @@
 // is incidental — keep the `max` so a future settings change stays correct.
 #![allow(clippy::unnecessary_min_or_max)]
 
+mod entry;
+pub use entry::*;
 mod multi_bar;
 mod one_bar;
 mod three_bar;
 mod two_bar;
-pub use multi_bar::*;
-pub use one_bar::*;
-pub use three_bar::*;
-pub use two_bar::*;
+use multi_bar::*;
+use one_bar::*;
+use three_bar::*;
+use two_bar::*;
 
 use crate::accum::Csum;
 use crate::missing;
@@ -56,75 +58,84 @@ pub enum CandlePattern {
 /// names exist — the directive layer (spec/exec/lookback) queries this, so adding a
 /// pattern is one entry here plus its function.
 pub fn candle_pattern(name: &str) -> Option<(CandlePattern, usize)> {
+    candle_pattern_with::<false>(name)
+}
+
+/// Resolve a recognizer for OHLC inputs already admitted as finite.
+pub fn candle_pattern_complete(name: &str) -> Option<(CandlePattern, usize)> {
+    candle_pattern_with::<true>(name)
+}
+
+fn candle_pattern_with<const CLEAN: bool>(name: &str) -> Option<(CandlePattern, usize)> {
     use CandlePattern::{Penetration, Plain};
     // Penetration patterns: darkcloudcover defaults 0.5, the star family 0.3.
     let pen = |f, default| Penetration { f, default };
     let entry = match name {
         // one-bar
-        "doji" => (Plain(cdl_doji as _), 10),
-        "marubozu" => (Plain(cdl_marubozu as _), 10),
-        "closingmarubozu" => (Plain(cdl_closingmarubozu as _), 10),
-        "longline" => (Plain(cdl_longline as _), 10),
-        "shortline" => (Plain(cdl_shortline as _), 10),
-        "highwave" => (Plain(cdl_highwave as _), 10),
-        "spinningtop" => (Plain(cdl_spinningtop as _), 10),
-        "dragonflydoji" => (Plain(cdl_dragonflydoji as _), 10),
-        "gravestonedoji" => (Plain(cdl_gravestonedoji as _), 10),
-        "longleggeddoji" => (Plain(cdl_longleggeddoji as _), 10),
-        "rickshawman" => (Plain(cdl_rickshawman as _), 10),
-        "belthold" => (Plain(cdl_belthold as _), 10),
-        "hammer" => (Plain(cdl_hammer as _), 11),
-        "hangingman" => (Plain(cdl_hangingman as _), 11),
-        "invertedhammer" => (Plain(cdl_invertedhammer as _), 11),
-        "shootingstar" => (Plain(cdl_shootingstar as _), 11),
-        "takuri" => (Plain(cdl_takuri as _), 10),
+        "doji" => (Plain(if CLEAN { cdl_doji_raw as _ } else { cdl_doji as _ }), 10),
+        "marubozu" => (Plain(if CLEAN { cdl_marubozu_raw as _ } else { cdl_marubozu as _ }), 10),
+        "closingmarubozu" => (Plain(if CLEAN { cdl_closingmarubozu_raw as _ } else { cdl_closingmarubozu as _ }), 10),
+        "longline" => (Plain(if CLEAN { cdl_longline_raw as _ } else { cdl_longline as _ }), 10),
+        "shortline" => (Plain(if CLEAN { cdl_shortline_raw as _ } else { cdl_shortline as _ }), 10),
+        "highwave" => (Plain(if CLEAN { cdl_highwave_raw as _ } else { cdl_highwave as _ }), 10),
+        "spinningtop" => (Plain(if CLEAN { cdl_spinningtop_raw as _ } else { cdl_spinningtop as _ }), 10),
+        "dragonflydoji" => (Plain(if CLEAN { cdl_dragonflydoji_raw as _ } else { cdl_dragonflydoji as _ }), 10),
+        "gravestonedoji" => (Plain(if CLEAN { cdl_gravestonedoji_raw as _ } else { cdl_gravestonedoji as _ }), 10),
+        "longleggeddoji" => (Plain(if CLEAN { cdl_longleggeddoji_raw as _ } else { cdl_longleggeddoji as _ }), 10),
+        "rickshawman" => (Plain(if CLEAN { cdl_rickshawman_raw as _ } else { cdl_rickshawman as _ }), 10),
+        "belthold" => (Plain(if CLEAN { cdl_belthold_raw as _ } else { cdl_belthold as _ }), 10),
+        "hammer" => (Plain(if CLEAN { cdl_hammer_raw as _ } else { cdl_hammer as _ }), 11),
+        "hangingman" => (Plain(if CLEAN { cdl_hangingman_raw as _ } else { cdl_hangingman as _ }), 11),
+        "invertedhammer" => (Plain(if CLEAN { cdl_invertedhammer_raw as _ } else { cdl_invertedhammer as _ }), 11),
+        "shootingstar" => (Plain(if CLEAN { cdl_shootingstar_raw as _ } else { cdl_shootingstar as _ }), 11),
+        "takuri" => (Plain(if CLEAN { cdl_takuri_raw as _ } else { cdl_takuri as _ }), 10),
         // two-bar
-        "engulfing" => (Plain(cdl_engulfing as _), 2),
-        "harami" => (Plain(cdl_harami as _), 11),
-        "haramicross" => (Plain(cdl_haramicross as _), 11),
-        "piercing" => (Plain(cdl_piercing as _), 11),
-        "darkcloudcover" => (pen(cdl_darkcloudcover, 0.5), 11),
-        "dojistar" => (Plain(cdl_dojistar as _), 11),
-        "homingpigeon" => (Plain(cdl_homingpigeon as _), 11),
-        "matchinglow" => (Plain(cdl_matchinglow as _), 6),
-        "inneck" => (Plain(cdl_inneck as _), 11),
-        "onneck" => (Plain(cdl_onneck as _), 11),
-        "thrusting" => (Plain(cdl_thrusting as _), 11),
-        "kicking" => (Plain(cdl_kicking as _), 11),
-        "kickingbylength" => (Plain(cdl_kickingbylength as _), 11),
-        "separatinglines" => (Plain(cdl_separatinglines as _), 11),
-        "counterattack" => (Plain(cdl_counterattack as _), 11),
+        "engulfing" => (Plain(if CLEAN { cdl_engulfing_raw as _ } else { cdl_engulfing as _ }), 2),
+        "harami" => (Plain(if CLEAN { cdl_harami_raw as _ } else { cdl_harami as _ }), 11),
+        "haramicross" => (Plain(if CLEAN { cdl_haramicross_raw as _ } else { cdl_haramicross as _ }), 11),
+        "piercing" => (Plain(if CLEAN { cdl_piercing_raw as _ } else { cdl_piercing as _ }), 11),
+        "darkcloudcover" => (pen(if CLEAN { cdl_darkcloudcover_raw as _ } else { cdl_darkcloudcover as _ }, 0.5), 11),
+        "dojistar" => (Plain(if CLEAN { cdl_dojistar_raw as _ } else { cdl_dojistar as _ }), 11),
+        "homingpigeon" => (Plain(if CLEAN { cdl_homingpigeon_raw as _ } else { cdl_homingpigeon as _ }), 11),
+        "matchinglow" => (Plain(if CLEAN { cdl_matchinglow_raw as _ } else { cdl_matchinglow as _ }), 6),
+        "inneck" => (Plain(if CLEAN { cdl_inneck_raw as _ } else { cdl_inneck as _ }), 11),
+        "onneck" => (Plain(if CLEAN { cdl_onneck_raw as _ } else { cdl_onneck as _ }), 11),
+        "thrusting" => (Plain(if CLEAN { cdl_thrusting_raw as _ } else { cdl_thrusting as _ }), 11),
+        "kicking" => (Plain(if CLEAN { cdl_kicking_raw as _ } else { cdl_kicking as _ }), 11),
+        "kickingbylength" => (Plain(if CLEAN { cdl_kickingbylength_raw as _ } else { cdl_kickingbylength as _ }), 11),
+        "separatinglines" => (Plain(if CLEAN { cdl_separatinglines_raw as _ } else { cdl_separatinglines as _ }), 11),
+        "counterattack" => (Plain(if CLEAN { cdl_counterattack_raw as _ } else { cdl_counterattack as _ }), 11),
         // three-bar
-        "morningstar" => (pen(cdl_morningstar, 0.3), 12),
-        "eveningstar" => (pen(cdl_eveningstar, 0.3), 12),
-        "3inside" => (Plain(cdl_3inside as _), 12),
-        "3outside" => (Plain(cdl_3outside as _), 3),
-        "3whitesoldiers" => (Plain(cdl_3whitesoldiers as _), 12),
-        "3blackcrows" => (Plain(cdl_3blackcrows as _), 13),
-        "morningdojistar" => (pen(cdl_morningdojistar, 0.3), 12),
-        "eveningdojistar" => (pen(cdl_eveningdojistar, 0.3), 12),
-        "abandonedbaby" => (pen(cdl_abandonedbaby, 0.3), 12),
-        "2crows" => (Plain(cdl_2crows as _), 12),
-        "upsidegap2crows" => (Plain(cdl_upsidegap2crows as _), 12),
-        "advanceblock" => (Plain(cdl_advanceblock as _), 12),
-        "stalledpattern" => (Plain(cdl_stalledpattern as _), 12),
-        "identical3crows" => (Plain(cdl_identical3crows as _), 12),
-        "sticksandwich" => (Plain(cdl_sticksandwich as _), 7),
-        "tristar" => (Plain(cdl_tristar as _), 12),
-        "unique3river" => (Plain(cdl_unique3river as _), 12),
-        "gapsidesidewhite" => (Plain(cdl_gapsidesidewhite as _), 7),
-        "tasukigap" => (Plain(cdl_tasukigap as _), 7),
-        "3starsinsouth" => (Plain(cdl_3starsinsouth as _), 12),
+        "morningstar" => (pen(if CLEAN { cdl_morningstar_raw as _ } else { cdl_morningstar as _ }, 0.3), 12),
+        "eveningstar" => (pen(if CLEAN { cdl_eveningstar_raw as _ } else { cdl_eveningstar as _ }, 0.3), 12),
+        "3inside" => (Plain(if CLEAN { cdl_3inside_raw as _ } else { cdl_3inside as _ }), 12),
+        "3outside" => (Plain(if CLEAN { cdl_3outside_raw as _ } else { cdl_3outside as _ }), 3),
+        "3whitesoldiers" => (Plain(if CLEAN { cdl_3whitesoldiers_raw as _ } else { cdl_3whitesoldiers as _ }), 12),
+        "3blackcrows" => (Plain(if CLEAN { cdl_3blackcrows_raw as _ } else { cdl_3blackcrows as _ }), 13),
+        "morningdojistar" => (pen(if CLEAN { cdl_morningdojistar_raw as _ } else { cdl_morningdojistar as _ }, 0.3), 12),
+        "eveningdojistar" => (pen(if CLEAN { cdl_eveningdojistar_raw as _ } else { cdl_eveningdojistar as _ }, 0.3), 12),
+        "abandonedbaby" => (pen(if CLEAN { cdl_abandonedbaby_raw as _ } else { cdl_abandonedbaby as _ }, 0.3), 12),
+        "2crows" => (Plain(if CLEAN { cdl_2crows_raw as _ } else { cdl_2crows as _ }), 12),
+        "upsidegap2crows" => (Plain(if CLEAN { cdl_upsidegap2crows_raw as _ } else { cdl_upsidegap2crows as _ }), 12),
+        "advanceblock" => (Plain(if CLEAN { cdl_advanceblock_raw as _ } else { cdl_advanceblock as _ }), 12),
+        "stalledpattern" => (Plain(if CLEAN { cdl_stalledpattern_raw as _ } else { cdl_stalledpattern as _ }), 12),
+        "identical3crows" => (Plain(if CLEAN { cdl_identical3crows_raw as _ } else { cdl_identical3crows as _ }), 12),
+        "sticksandwich" => (Plain(if CLEAN { cdl_sticksandwich_raw as _ } else { cdl_sticksandwich as _ }), 7),
+        "tristar" => (Plain(if CLEAN { cdl_tristar_raw as _ } else { cdl_tristar as _ }), 12),
+        "unique3river" => (Plain(if CLEAN { cdl_unique3river_raw as _ } else { cdl_unique3river as _ }), 12),
+        "gapsidesidewhite" => (Plain(if CLEAN { cdl_gapsidesidewhite_raw as _ } else { cdl_gapsidesidewhite as _ }), 7),
+        "tasukigap" => (Plain(if CLEAN { cdl_tasukigap_raw as _ } else { cdl_tasukigap as _ }), 7),
+        "3starsinsouth" => (Plain(if CLEAN { cdl_3starsinsouth_raw as _ } else { cdl_3starsinsouth as _ }), 12),
         // four / five-bar
-        "3linestrike" => (Plain(cdl_3linestrike as _), 8),
-        "breakaway" => (Plain(cdl_breakaway as _), 14),
-        "ladderbottom" => (Plain(cdl_ladderbottom as _), 14),
-        "concealbabyswall" => (Plain(cdl_concealbabyswall as _), 13),
-        "mathold" => (pen(cdl_mathold, 0.5), 14),
-        "risefall3methods" => (Plain(cdl_risefall3methods as _), 14),
-        "xsidegap3methods" => (Plain(cdl_xsidegap3methods as _), 2),
-        "hikkake" => (Plain(cdl_hikkake as _), 5),
-        "hikkakemod" => (Plain(cdl_hikkakemod as _), 10),
+        "3linestrike" => (Plain(if CLEAN { cdl_3linestrike_raw as _ } else { cdl_3linestrike as _ }), 8),
+        "breakaway" => (Plain(if CLEAN { cdl_breakaway_raw as _ } else { cdl_breakaway as _ }), 14),
+        "ladderbottom" => (Plain(if CLEAN { cdl_ladderbottom_raw as _ } else { cdl_ladderbottom as _ }), 14),
+        "concealbabyswall" => (Plain(if CLEAN { cdl_concealbabyswall_raw as _ } else { cdl_concealbabyswall as _ }), 13),
+        "mathold" => (pen(if CLEAN { cdl_mathold_raw as _ } else { cdl_mathold as _ }, 0.5), 14),
+        "risefall3methods" => (Plain(if CLEAN { cdl_risefall3methods_raw as _ } else { cdl_risefall3methods as _ }), 14),
+        "xsidegap3methods" => (Plain(if CLEAN { cdl_xsidegap3methods_raw as _ } else { cdl_xsidegap3methods as _ }), 2),
+        "hikkake" => (Plain(if CLEAN { cdl_hikkake_raw as _ } else { cdl_hikkake as _ }), 5),
+        "hikkakemod" => (Plain(if CLEAN { cdl_hikkakemod_raw as _ } else { cdl_hikkakemod as _ }), 10),
         _ => return None,
     };
     Some(entry)
@@ -302,10 +313,12 @@ fn range_mean(range: RangeType, p: usize, o: &[f64], h: &[f64], l: &[f64], c: &[
     out.resize(p - 1, f64::NAN);
     let mut sum = Csum::default();
     let mut clean = true;
+    // Call the forced-inline range owner directly: the iterator closure can be
+    // outlined by LTO, which otherwise adds two calls per sliding-window row.
     for i in 0..n {
-        sum.add(r(i));
+        sum.add(range_at(range, o, h, l, c, i));
         if i >= p {
-            sum.sub(r(i - p));
+            sum.sub(range_at(range, o, h, l, c, i - p));
         }
         if !sum.is_exact() && i + 1 >= p {
             clean = sum.value().is_finite();
@@ -322,7 +335,7 @@ fn range_mean(range: RangeType, p: usize, o: &[f64], h: &[f64], l: &[f64], c: &[
         return out;
     }
     let ranges: Vec<f64> = (0..n).map(r).collect();
-    kernels::sma(&ranges, p, origin)
+    kernels::sma_internal(&ranges, p, origin)
 }
 
 /// A setting's average at bar `i` from its range's mean series `mean` ([`range_mean`]):
@@ -360,8 +373,6 @@ fn candle_average_series(s: Setting, o: &[f64], h: &[f64], l: &[f64], c: &[f64],
 /// one mean series per distinct (range, period) — settings that differ only in their
 /// factor share it — read at each bar without materializing a series per setting.
 struct Averages<const K: usize> {
-    settings: [Setting; K],
-    inv_div: [f64; K],
     means: Vec<Vec<f64>>,
     which: [usize; K],
 }
@@ -378,13 +389,33 @@ impl<const K: usize> Averages<K> {
                 keys.len() - 1
             })
         });
-        Averages { settings, inv_div: settings.map(|s| 1.0 / divisor(s)), means, which }
+        Averages { means, which }
     }
 
-    /// The averages at bar `i`.
+    /// Prepare the fixed settings and mean slices once, outside the bar loop.
+    #[inline(always)]
+    fn views(&self, settings: [Setting; K]) -> AverageView<'_, K> {
+        AverageView {
+            settings,
+            inv_div: settings.map(|s| 1.0 / divisor(s)),
+            means: std::array::from_fn(|k| self.means[self.which[k]].as_slice()),
+        }
+    }
+}
+
+/// Borrowed means with their fixed scales and lags. Each bar borrows this record;
+/// the array builder never copies settings or slice arrays for each lag.
+struct AverageView<'a, const K: usize> {
+    settings: [Setting; K],
+    inv_div: [f64; K],
+    means: [&'a [f64]; K],
+}
+
+impl<const K: usize> AverageView<'_, K> {
+    /// The averages at bar `i`, in the original multiplication order.
     #[inline(always)]
     fn at(&self, i: usize) -> [f64; K] {
-        std::array::from_fn(|k| setting_average(self.settings[k], self.inv_div[k], &self.means[self.which[k]], i))
+        std::array::from_fn(|k| setting_average(self.settings[k], self.inv_div[k], self.means[k], i))
     }
 }
 
@@ -396,9 +427,9 @@ impl<const K: usize> Averages<K> {
 #[inline]
 fn each_bar(
     lookback: usize,
-    o: &[f64],
-    h: &[f64],
-    l: &[f64],
+    _o: &[f64],
+    _h: &[f64],
+    _l: &[f64],
     c: &[f64],
     mut f: impl FnMut(usize) -> f64,
 ) -> Vec<f64> {
@@ -406,7 +437,7 @@ fn each_bar(
     let warm = lookback.min(n);
     // Single-write (D2): NaN warm-up then one write per valid bar, no prefill memset
     // of the valid region. `build_f64` keeps it safe (debug poison + write-all assert).
-    let mut out = crate::buf::build_f64(n, |out| {
+    let out = crate::buf::build_f64(n, |out| {
         for slot in &mut out[..warm] {
             slot.write(f64::NAN);
         }
@@ -415,9 +446,15 @@ fn each_bar(
             out[i].write(f(i));
         }
     });
-    for x in [o, h, l, c] {
-        missing::blank_windows(&mut out, x, lookback + 1);
-    }
+    out
+}
+
+/// Apply the input rule around a numerical candle kernel. Clean frame inputs
+/// bypass this wrapper; unclassified/raw inputs use the one missing owner.
+#[cold]
+#[inline(never)]
+fn admit_candles(mut out: Vec<f64>, o: &[f64], h: &[f64], l: &[f64], c: &[f64], lookback: usize) -> Vec<f64> {
+    for x in [o, h, l, c] { missing::blank_windows(&mut out, x, lookback + 1); }
     out
 }
 
@@ -436,7 +473,8 @@ fn each_bar_avg<const K: usize>(
     f: impl Fn(usize, &[f64; K]) -> f64,
 ) -> Vec<f64> {
     let avg = Averages::new(settings, o, h, l, c, origin);
-    each_bar(lookback, o, h, l, c, |i| f(i, &avg.at(i)))
+    let view = avg.views(settings);
+    each_bar(lookback, o, h, l, c, |i| f(i, &view.at(i)))
 }
 
 /// [`each_bar_avg`] for a two-bar pattern: `f(i, cur, prev)` with the averages at `i`
@@ -454,7 +492,8 @@ fn each_bar_avg2<const K: usize>(
     f: impl Fn(usize, &[f64; K], &[f64; K]) -> f64,
 ) -> Vec<f64> {
     let avg = Averages::new(settings, o, h, l, c, origin);
-    each_bar(lookback, o, h, l, c, |i| f(i, &avg.at(i), &avg.at(i - 1)))
+    let view = avg.views(settings);
+    each_bar(lookback, o, h, l, c, |i| f(i, &view.at(i), &view.at(i - 1)))
 }
 
 /// [`each_bar_avg`] for a pattern that reads averages up to `L − 1` bars back:
@@ -472,7 +511,8 @@ fn each_bar_avg_n<const K: usize, const L: usize>(
     f: impl Fn(usize, &[[f64; K]; L]) -> f64,
 ) -> Vec<f64> {
     let avg = Averages::new(settings, o, h, l, c, origin);
-    each_bar(lookback, o, h, l, c, |i| f(i, &std::array::from_fn(|lag| avg.at(i - lag))))
+    let view = avg.views(settings);
+    each_bar(lookback, o, h, l, c, |i| f(i, &std::array::from_fn(|lag| view.at(i - lag))))
 }
 
 #[cfg(test)]
@@ -552,10 +592,10 @@ mod tests {
         let [o, h, l, c] = ohlc(80);
         let run = |o: &[f64], h: &[f64], l: &[f64], c: &[f64]| {
             [
-                each_bar_avg([BODY_DOJI], 10, o, h, l, c, 0, |i, a| realbody(o, c, i) - a[0]),
-                each_bar_avg2([BODY_LONG, SHADOW_SHORT], 11, o, h, l, c, 0, |_, a, b| a[0] + b[1]),
-                each_bar_avg_n::<2, 3>([NEAR, SHADOW_LONG], 12, o, h, l, c, 0, |_, x| x[2][0] + x[1][1]),
-                each_bar(5, o, h, l, c, |i| c[i] - o[i - 5]),
+                admit_candles(each_bar_avg([BODY_DOJI], 10, o, h, l, c, 0, |i, a| realbody(o, c, i) - a[0]), o, h, l, c, 10),
+                admit_candles(each_bar_avg2([BODY_LONG, SHADOW_SHORT], 11, o, h, l, c, 0, |_, a, b| a[0] + b[1]), o, h, l, c, 11),
+                admit_candles(each_bar_avg_n::<2, 3>([NEAR, SHADOW_LONG], 12, o, h, l, c, 0, |_, x| x[2][0] + x[1][1]), o, h, l, c, 12),
+                admit_candles(each_bar(5, o, h, l, c, |i| c[i] - o[i - 5]), o, h, l, c, 5),
             ]
         };
         let clean = run(&o, &h, &l, &c);

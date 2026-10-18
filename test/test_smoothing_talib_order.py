@@ -102,7 +102,10 @@ def _assert_bits(got, want, what):
 @pytest.mark.parametrize('directive', list(CASES))
 def test_every_path_is_the_c_source_order_bit_for_bit(directive, kind):
     data = _ohlcv(kind)
-    want = CASES[directive](data)
+    # External infinities are missing inputs; the independent C transcription
+    # still preserves IEEE arithmetic inside each indicator.
+    oracle_data = {k: np.where(np.isfinite(v), v, np.nan) for k, v in data.items()}
+    want = CASES[directive](oracle_data)
     _assert_bits(_frame(data).exec(directive), want, f'{directive} {kind} full')
     head = 70
     live = _frame(data, 0, head)

@@ -32,6 +32,9 @@ use std::borrow::Cow;
 
 pub use volas_core::missing::{any_missing, is_missing};
 
+mod pointwise;
+pub(crate) use pointwise::{map_terms, map_terms_packed, map_terms_with, repair_slots, repair_terms, Finiteness};
+
 /// Whether any of `reads` — the inputs one per-row term reads — is missing.
 /// Branch-free, so a term's check compiles to a select.
 #[inline(always)]
@@ -44,6 +47,26 @@ pub fn any_of(reads: &[f64]) -> bool {
 #[inline(always)]
 pub fn term(reads: &[f64], value: f64) -> f64 {
     if any_of(reads) { f64::NAN } else { value }
+}
+
+// Scalar adapters keep cold admission's array materialization out of the caller.
+// The missing rule itself remains solely in `term`.
+#[cold]
+#[inline(never)]
+pub(crate) fn nonfinite_term2(a: f64, b: f64, value: f64) -> f64 {
+    term(&[a, b], value)
+}
+
+#[cold]
+#[inline(never)]
+pub(crate) fn nonfinite_term3(a: f64, b: f64, c: f64, value: f64) -> f64 {
+    term(&[a, b, c], value)
+}
+
+#[cold]
+#[inline(never)]
+pub(crate) fn nonfinite_term4(a: f64, b: f64, c: f64, d: f64, value: f64) -> f64 {
+    term(&[a, b, c, d], value)
 }
 
 /// [`term`] for a term of several values (all missing together).
@@ -63,21 +86,49 @@ pub fn holds_missing(window: &[f64]) -> bool {
 /// reduction that is not a running sum (an extremum, its position, a tracker's count):
 /// its clean windows are already exact, and this leaves them alone. One scan when `x`
 /// has a missing value, otherwise the scan that finds none.
+#[inline(never)]
 pub fn blank_windows(out: &mut [f64], x: &[f64], span: usize) {
     let n = out.len().min(x.len());
     if !any_missing(&x[..n]) {
         return;
     }
-    let first = x[..n].iter().position(|&v| is_missing(v)).unwrap_or(n);
+    blank_missing_windows(out, &x[..n], span);
+}
+
+#[cold]
+#[inline(never)]
+fn blank_missing_windows(out: &mut [f64], x: &[f64], span: usize) {
+    blank_missing_slots(x, span, |i| out[i] = f64::NAN);
+}
+
+#[cold]
+#[inline(never)]
+fn blank_missing_slots(x: &[f64], span: usize, mut blank: impl FnMut(usize)) {
+    let n = x.len();
+    let first = x.iter().position(|&v| is_missing(v)).unwrap_or(n);
     let mut last = first;
-    for i in first..n {
-        if is_missing(x[i]) {
-            last = i;
-        }
-        if i - last < span {
-            out[i] = f64::NAN;
-        }
+    for (i, &value) in x.iter().enumerate().skip(first) {
+        if is_missing(value) { last = i; }
+        if i - last < span { blank(i); }
     }
+}
+
+/// Repair fully written slots before the output's poison check and publication.
+/// The kernel gives the output and source the same length.
+#[inline(never)]
+pub(crate) fn blank_window_output<const SPAN: usize>(mut out: crate::buf::OutBuf, x: &[f64]) -> Vec<f64> {
+    if any_missing(x) {
+        blank_missing_slots(x, SPAN, |i| out.set(i, f64::NAN));
+    }
+    out.finish()
+}
+
+/// Return an owned window result after applying the input rule. Keeping ownership
+/// here also keeps repair's unwind cleanup outside the numerical kernel.
+#[inline(never)]
+pub(crate) fn blank_owned_windows(mut out: Vec<f64>, x: &[f64], span: usize) -> Vec<f64> {
+    blank_windows(&mut out, x, span);
+    out
 }
 
 /// Whether row `i` is complete: every input is present there.

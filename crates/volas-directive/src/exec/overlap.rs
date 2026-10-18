@@ -198,13 +198,10 @@ pub(super) fn dispatch(
             let volume = ops.f64(1, "volume")?;
             f64col(ind::vr(&close, &volume, arg_usize(args, 0), ops.origin()))
         }
-        ("coppock", _) => f64col(ind::coppock(
-            &close(0)?,
-            arg_usize(args, 0),
-            arg_usize(args, 1),
-            arg_usize(args, 2),
-            ops.origin(),
-        )),
+        ("coppock", _) => {
+            let c = close(0)?;
+            f64col(ind::coppock_pass_with(&c, arg_usize(args, 0), arg_usize(args, 1), arg_usize(args, 2), ops.origin(), ops.clean(), &mut ()))
+        }
         ("relative_vigor", sub) => {
             let open = ops.f64(0, "open")?;
             let high = ops.f64(1, "high")?;
@@ -234,7 +231,7 @@ pub(super) fn dispatch(
             let low = ops.f64(2, "low")?;
             let close = ops.f64(3, "close")?;
             let volume = ops.f64(4, "volume")?;
-            f64col(ind::wvad(&open, &high, &low, &close, &volume, arg_usize(args, 0), ops.origin()))
+            f64col(ind::wvad_pass_with(&open, &high, &low, &close, &volume, arg_usize(args, 0), ops.origin(), ops.clean(), &mut ()))
         }
         ("cdp", sub) => {
             let high = ops.f64(0, "high")?;
@@ -247,7 +244,7 @@ pub(super) fn dispatch(
                 Some("al") => ind::CdpLine::Al,
                 _ => ind::CdpLine::Cdp,
             };
-            f64col(ind::cdp(&high, &low, &close, line))
+            f64col(ind::cdp_with(&high, &low, &close, line, ops.clean()))
         }
         ("mike", sub) => {
             let high = ops.f64(0, "high")?;
@@ -261,7 +258,7 @@ pub(super) fn dispatch(
                 Some("strongs") => ind::MikeLine::StrongS,
                 _ => ind::MikeLine::WeakR,
             };
-            f64col(ind::mike(&high, &low, &close, arg_usize(args, 0), line))
+            f64col(ind::mike_with(&high, &low, &close, arg_usize(args, 0), line, ops.clean()))
         }
         ("keltner", sub) => {
             let ema_period = arg_usize(args, 0);
@@ -334,7 +331,7 @@ pub(super) fn dispatch(
                 Some("s3") => ind::PivotLine::S3,
                 _ => ind::PivotLine::Pp,
             };
-            f64col(ind::pivot_points(&high, &low, &close, line))
+            f64col(ind::pivot_points_with(&high, &low, &close, line, ops.clean()))
         }
         ("ichimoku", sub) => {
             let high = ops.f64(0, "high")?;
@@ -347,7 +344,7 @@ pub(super) fn dispatch(
                 Some("chikou") => ind::IchimokuLine::Chikou,
                 _ => ind::IchimokuLine::Tenkan,
             };
-            f64col(ind::ichimoku(
+            f64col(ind::ichimoku_with(
                 &high,
                 &low,
                 &close,
@@ -355,6 +352,7 @@ pub(super) fn dispatch(
                 arg_usize(args, 1),
                 arg_usize(args, 2),
                 line,
+                matches!(line, ind::IchimokuLine::Chikou) && ops.clean(),
             ))
         }
         ("wad", _) => {
