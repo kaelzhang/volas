@@ -43,15 +43,20 @@ impl Momentum {
     /// never turns a missing value into `0`.
     #[inline(always)]
     pub fn value(self, current: f64, prior: f64) -> f64 {
-        let v = match self {
-            Momentum::Mom => current - prior,
-            _ if prior == 0.0 => 0.0,
+        missing::term(&[current, prior], self.ieee_value(current, prior))
+    }
+
+    /// Arithmetic for admitted inputs, shared with the unchanged clean batch loop.
+    #[inline(always)]
+    fn ieee_value(self, current: f64, prior: f64) -> f64 {
+        let value = match self {
+            Momentum::Mom => return current - prior,
             Momentum::Roc => (current / prior - 1.0) * 100.0,
             Momentum::Rocp => current / prior - 1.0,
             Momentum::Rocr => current / prior,
             Momentum::Rocr100 => current / prior * 100.0,
         };
-        missing::term(&[current, prior], v)
+        std::hint::select_unpredictable(prior == 0.0, 0.0, value)
     }
 
     /// The value at row `i` of `data` (NaN while `i < period`).
@@ -64,13 +69,24 @@ impl Momentum {
     /// the valid region written once (no `vec![NaN; n]` re-write; these tiny
     /// division-bound kernels are dominated by their result-buffer writes).
     fn series(self, data: &[f64], period: usize) -> Vec<f64> {
+        self.series_with(data, period, false)
+    }
+
+    /// Batch evaluation using the caller's input admission fact. `complete` requires
+    /// every input to be finite; otherwise admission is folded into this pass.
+    pub fn series_with(self, data: &[f64], period: usize, complete: bool) -> Vec<f64> {
         let n = data.len();
         if period >= n {
             return vec![f64::NAN; n];
         }
-        let mut out = vec![f64::NAN; period];
-        out.extend(data[period..].iter().zip(&data[..n - period]).map(|(&c, &p)| self.value(c, p)));
-        out
+        let reads = |i| [data[i], data[i - period]];
+        match self {
+            Self::Mom => missing::map_terms(n, period, complete, reads, |_, [c, p]| Self::Mom.ieee_value(c, p)),
+            Self::Roc => if complete { roc_with::<false, true>(data, period) } else { roc_with::<false, false>(data, period) },
+            Self::Rocp => missing::map_terms(n, period, complete, reads, |_, [c, p]| Self::Rocp.ieee_value(c, p)),
+            Self::Rocr => missing::map_terms(n, period, complete, reads, |_, [c, p]| Self::Rocr.ieee_value(c, p)),
+            Self::Rocr100 => missing::map_terms(n, period, complete, reads, |_, [c, p]| Self::Rocr100.ieee_value(c, p)),
+        }
     }
 }
 
@@ -79,15 +95,14 @@ pub fn mom(data: &[f64], period: usize) -> Vec<f64> {
     Momentum::Mom.series(data, period)
 }
 
-/// One rate of change `100·(current/prior − 1)` ([`Momentum::Roc`]), for TRIX's full
-/// computation and resumes.
-#[inline(always)]
-fn roc_value(current: f64, prior: f64) -> f64 {
-    Momentum::Roc.value(current, prior)
-}
-
 /// Rate of change: `100 * (data/data[period ago] - 1)` (TA-Lib ROC).
 pub fn roc(data: &[f64], period: usize) -> Vec<f64> {
+    roc_with::<false, false>(data, period)
+}
+
+// One call per column keeps dispatch temporaries outside the numerical frame.
+#[inline(never)]
+fn roc_with<const INTERNAL: bool, const COMPLETE: bool>(data: &[f64], period: usize) -> Vec<f64> {
     let n = data.len();
     if period >= n {
         return vec![f64::NAN; n];
@@ -103,11 +118,18 @@ pub fn roc(data: &[f64], period: usize) -> Vec<f64> {
     let mut prior_ptr = data_ptr;
     let mut out_write = unsafe { out_ptr.add(period) };
     let mut remaining = n - period;
+    let mut inputs = missing::Finiteness::default();
     while remaining > 0 {
         // The three pointers advance together over `[period, n)`, `[0, n-period)`,
         // and the valid output region. This keeps the hot loop in TA-Lib's
         // trailing-index shape without recomputing `i` and `i-period` addresses.
-        let value = roc_value(unsafe { *cur_ptr }, unsafe { *prior_ptr });
+        let current = unsafe { *cur_ptr };
+        let prior = unsafe { *prior_ptr };
+        let value = if INTERNAL { roc_internal_value(current, prior) } else { Momentum::Roc.ieee_value(current, prior) };
+        if !INTERNAL && !COMPLETE {
+            inputs.record(current);
+            inputs.record(prior);
+        }
         unsafe {
             *out_write = value;
             cur_ptr = cur_ptr.add(1);
@@ -116,7 +138,34 @@ pub fn roc(data: &[f64], period: usize) -> Vec<f64> {
         }
         remaining -= 1;
     }
+    if !inputs.all_finite() {
+        missing::repair_slots(n, period, |i| [data[i], data[i - period]], |i, value| out.set(i, value));
+    }
     out.finish()
+}
+
+/// ROC of an internal cascade term: warm-up NaN is unpublished; infinity
+/// produced by the cascade retains the indicator's IEEE arithmetic.
+#[inline(always)]
+fn roc_internal_value(current: f64, prior: f64) -> f64 {
+    // A select keeps the batch loop vectorisable even when period is the known
+    // constant 1 in TRIX. Canonical NaN and the internal infinity/zero rules are
+    // identical to the scalar branch, including a NaN over a zero prior.
+    std::hint::select_unpredictable(current.is_nan() | prior.is_nan(), f64::NAN, Momentum::Roc.ieee_value(current, prior))
+}
+
+/// ROC terms of KST / Coppock have IEEE division at a zero base. Their batch
+/// callers can admit the inputs once; scalar steps retain per-row admission.
+#[inline]
+pub(super) fn unguarded_roc<const COMPLETE: bool>(close: &[f64], p: usize, i: usize) -> f64 {
+    if i < p { return f64::NAN; }
+    let value = unguarded_roc_value(close[i], close[i - p]);
+    if COMPLETE { value } else { missing::term(&[close[i], close[i - p]], value) }
+}
+
+#[inline(always)]
+pub(super) fn unguarded_roc_value(current: f64, prior: f64) -> f64 {
+    (current / prior - 1.0) * 100.0
 }
 
 /// Rate of change percentage: `data/data[period ago] - 1` (TA-Lib ROCP).
@@ -223,16 +272,15 @@ fn willr_value(highest: f64, lowest: f64, close: f64) -> f64 {
 /// Balance of Power: `(close − open)/(high − low)` (TA-Lib BOP). A bar with no
 /// range (`high − low < ε`) yields 0. Lookback 0.
 pub fn bop(open: &[f64], high: &[f64], low: &[f64], close: &[f64]) -> Vec<f64> {
-    (0..close.len())
-        .map(|i| {
-            let range = high[i] - low[i];
-            if range < 1e-14 {
-                0.0
-            } else {
-                (close[i] - open[i]) / range
-            }
-        })
-        .collect()
+    (0..close.len()).map(|i| bop_value(open[i], high[i], low[i], close[i])).collect()
+}
+
+/// Balance of power of one bar, shared by batch and scalar evaluation.
+#[inline]
+pub fn bop_value(open: f64, high: f64, low: f64, close: f64) -> f64 {
+    let range = high - low;
+    let value = if range < 1e-14 { 0.0 } else { (close - open) / range };
+    missing::term(&[open, high, low, close], value)
 }
 
 /// Intraday Momentum Index (TA-Lib IMI): `100·upSum/(upSum+downSum)` over `period`,
@@ -287,13 +335,18 @@ pub fn imi_pass<S: crate::pass::StateSink>(open: &[f64], close: &[f64], period: 
     if clean && up_sum.value().is_finite() && down_sum.value().is_finite() {
         return out.finish();
     }
+    imi_nonfinite(open, close, period, origin, states)
+}
+
+#[cold]
+#[inline(never)]
+fn imi_nonfinite(open: &[f64], close: &[f64], period: usize, origin: usize, states: &mut impl crate::pass::StateSink) -> Vec<f64> {
+    let n = close.len();
+    let lookback = period - 1;
     states.restart();
     // A non-finite bar entered: window-local careful path (see `crate::guard`).
     let mut out = crate::buf::OutBuf::warmup(n, lookback);
-    crate::guard::window_sums_pass(n, period, Order::AddReadDrop, origin, |i| {
-        let (u, d) = updown(i);
-        [u, d]
-    }, |i, [u, d]| out.set(i, imi_value(u, d)), states);
+    crate::guard::window_sums_pass(n, period, Order::AddReadDrop, origin, |i| imi_term(open[i], close[i]), |i, [u, d]| out.set(i, imi_value(u, d)), states);
     out.finish()
 }
 
@@ -343,6 +396,13 @@ pub fn cci_pass(high: &[f64], low: &[f64], close: &[f64], period: usize, origin:
     if clean && sum.value().is_finite() {
         return out.finish();
     }
+    cci_nonfinite(&tp, period, origin, states)
+}
+
+#[cold]
+#[inline(never)]
+fn cci_nonfinite(tp: &[f64], period: usize, origin: usize, states: &mut impl crate::pass::StateSink) -> Vec<f64> {
+    let n = tp.len();
     states.restart();
     // A non-finite bar entered: window-local careful path (see `crate::guard`).
     let mut slide = Slide::<1>::at(origin);
@@ -371,7 +431,7 @@ fn cci_row(slide: &mut Slide<1>, period: usize, i: usize, tp: impl Fn(usize) -> 
 /// `roc` finishes it. Bit-identical to chaining three `ema_seeded` calls.
 pub fn trix(close: &[f64], period: usize) -> Vec<f64> {
     let e3 = kernels::ema_cascade::<3>(close, period);
-    roc(&e3, 1)
+    roc_with::<true, true>(&e3, 1)
 }
 
 /// Final TRIX state `[e0, e1, e2]` — the three cascaded EMAs as of the last row (the
@@ -402,14 +462,19 @@ pub fn trix_resume(
     for &x in &close[from..n] {
         let prev = e[2]; // the cascade output at the previous row (ROC's denominator)
         kernels::ema_cascade_step(&mut e, x, period);
-        out.push(roc_value(e[2], prev));
+        out.push(roc_internal_value(e[2], prev));
     }
     e.to_vec()
 }
 
 /// Aroon Up (TA-Lib AROON, up output): NaN while the `period + 1`-bar window holds a
 /// missing high. Lookback `period`.
-pub fn aroon_up(high: &[f64], _low: &[f64], period: usize) -> Vec<f64> {
+pub fn aroon_up(high: &[f64], low: &[f64], period: usize) -> Vec<f64> {
+    aroon_up_with(high, low, period, false)
+}
+
+/// Aroon over inputs whose missing-value fact is already known.
+pub fn aroon_up_with(high: &[f64], _low: &[f64], period: usize, complete: bool) -> Vec<f64> {
     let n = high.len();
     if period == 0 || period >= n {
         return vec![f64::NAN; n];
@@ -441,13 +506,18 @@ pub fn aroon_up(high: &[f64], _low: &[f64], period: usize) -> Vec<f64> {
         trailing += 1;
         today += 1;
     }
-    missing::blank_windows(&mut out, high, period + 1);
+    if !complete { missing::blank_windows(&mut out, high, period + 1); }
     out
 }
 
 /// Aroon Down (TA-Lib AROON, down output): NaN while the `period + 1`-bar window holds
 /// a missing low. Lookback `period`.
-pub fn aroon_down(_high: &[f64], low: &[f64], period: usize) -> Vec<f64> {
+pub fn aroon_down(high: &[f64], low: &[f64], period: usize) -> Vec<f64> {
+    aroon_down_with(high, low, period, false)
+}
+
+/// Aroon over inputs whose missing-value fact is already known.
+pub fn aroon_down_with(_high: &[f64], low: &[f64], period: usize, complete: bool) -> Vec<f64> {
     let n = low.len();
     if period == 0 || period >= n {
         return vec![f64::NAN; n];
@@ -479,7 +549,7 @@ pub fn aroon_down(_high: &[f64], low: &[f64], period: usize) -> Vec<f64> {
         trailing += 1;
         today += 1;
     }
-    missing::blank_windows(&mut out, low, period + 1);
+    if !complete { missing::blank_windows(&mut out, low, period + 1); }
     out
 }
 
@@ -614,19 +684,37 @@ pub fn ultosc_pass<S: crate::pass::StateSink>(high: &[f64],
     origin: usize, states: &mut S) -> Vec<f64> {
     let n = close.len();
     let periods = [p1, p2, p3];
-    if periods.contains(&0) || p1.max(p2).max(p3) >= n {
+    let lookback = p1.max(p2).max(p3);
+    if periods.contains(&0) || lookback >= n {
         return vec![f64::NAN; n];
     }
     // The terms once (term `j` is bar `j + 1`'s): every window reads each twice.
-    let terms: Vec<[f64; 2]> = (1..n).map(|i| ultosc_term(high, low, close, i)).collect();
+    let terms = ultosc_terms(high, low, close);
     let mut slides = [Slide::<2>::at(origin); 3];
     (0..n).map(|row| {
-        let value = ultosc_row(|j| terms[j], periods, row, &mut slides);
+        let value = ultosc_row(|j| terms[j], periods, lookback, row, &mut slides);
         states.record(row, n, |out| {
             for slide in &slides { slide.append_state(out); }
         });
         value
     }).collect()
+}
+
+// The numerical recurrence needs only the prepared terms. Keep their input
+// witness and cold repair outside its register frame, once per column.
+#[inline(never)]
+fn ultosc_terms(high: &[f64], low: &[f64], close: &[f64]) -> Vec<[f64; 2]> {
+    let n = close.len();
+    let mut witness = missing::Finiteness::default();
+    let mut terms: Vec<[f64; 2]> = (1..n).map(|i| {
+        let inputs = [high[i], low[i], close[i], close[i - 1]];
+        witness.record(ultosc_witness(inputs));
+        ultosc_values(inputs)
+    }).collect();
+    if !witness.all_finite() {
+        ultosc_repair_terms(&mut terms, high, low, close);
+    }
+    terms
 }
 
 /// ULTOSC's `[buying pressure, true range]` of bar `i >= 1`: `close − min(low, prev
@@ -635,14 +723,43 @@ pub fn ultosc_pass<S: crate::pass::StateSink>(high: &[f64],
 /// close.
 #[inline]
 fn ultosc_term(high: &[f64], low: &[f64], close: &[f64], i: usize) -> [f64; 2] {
-    let (c, l, prev_close) = (close[i], low[i], close[i - 1]);
-    let bp = c - l.min(prev_close);
-    missing::terms(&[c, l, prev_close], [bp, super::tr_at(high, low, close, i)])
+    let (h, l, c, prev) = (high[i], low[i], close[i], close[i - 1]);
+    let values = ultosc_values([h, l, c, prev]);
+    // Any missing input makes this witness non-finite. Finite-input overflow
+    // can do so too: only the cold path checks admission, preserving IEEE terms.
+    if ultosc_witness([h, l, c, prev]).is_finite() { values }
+    else { ultosc_nonfinite_terms(h, l, c, prev, values[0], values[1]) }
+}
+
+#[inline(always)]
+fn ultosc_values([h, l, c, prev]: [f64; 4]) -> [f64; 2] {
+    [c - l.min(prev), super::tr_value([h, l, prev])]
+}
+
+#[inline(always)]
+fn ultosc_witness([h, l, c, prev]: [f64; 4]) -> f64 {
+    (h + l) + c + prev
+}
+
+#[cold]
+#[inline(never)]
+fn ultosc_repair_terms(terms: &mut [[f64; 2]], high: &[f64], low: &[f64], close: &[f64]) {
+    for (j, values) in terms.iter_mut().enumerate() {
+        let i = j + 1;
+        *values = ultosc_nonfinite_terms(high[i], low[i], close[i], close[i - 1], values[0], values[1]);
+    }
+}
+
+#[cold]
+#[inline(never)]
+fn ultosc_nonfinite_terms(h: f64, l: f64, c: f64, prev: f64, bp: f64, tr: f64) -> [f64; 2] {
+    let tr = missing::term(&[h, l, prev], tr);
+    missing::terms(&[c, l, prev], [bp, tr])
 }
 
 /// One row of [`ultosc`] (its terms are term `row - 1`; add, read, drop per period),
 /// advancing the three periods' slides.
-fn ultosc_row(term: impl Fn(usize) -> [f64; 2], periods: [usize; 3], row: usize, slides: &mut [Slide<2>; 3]) -> f64 {
+fn ultosc_row(term: impl Fn(usize) -> [f64; 2], periods: [usize; 3], lookback: usize, row: usize, slides: &mut [Slide<2>; 3]) -> f64 {
     if row == 0 {
         return f64::NAN;
     }
@@ -656,7 +773,7 @@ fn ultosc_row(term: impl Fn(usize) -> [f64; 2], periods: [usize; 3], row: usize,
         };
         sums[2 * k..2 * k + 2].copy_from_slice(&w);
     }
-    if row >= periods[0].max(periods[1]).max(periods[2]) { ultosc_value(sums) } else { f64::NAN }
+    if row >= lookback { ultosc_value(sums) } else { f64::NAN }
 }
 
 /// [`ultosc`]'s state after the rows (row 0 at absolute position `origin`): its three
@@ -698,7 +815,7 @@ pub fn ultosc_step(
     for (k, slide) in slides.iter_mut().enumerate() {
         *slide = Slide::from_state(&state[k * S..(k + 1) * S])?;
     }
-    let value = ultosc_row(|j| ultosc_term(high, low, close, j + 1), periods, row, &mut slides);
+    let value = ultosc_row(|j| ultosc_term(high, low, close, j + 1), periods, p1.max(p2).max(p3), row, &mut slides);
     for (k, slide) in slides.iter().enumerate() {
         slide.write_state(&mut next[k * S..(k + 1) * S]);
     }
@@ -718,9 +835,13 @@ pub fn imi_step(open: &[f64], close: &[f64], period: usize, row: usize, state: &
     if period == 0 || row >= close.len() || open.len() != close.len() || next.len() != Slide::<2>::STATE {
         return None;
     }
-    let term = |i: usize| imi_updown(open[i], close[i]);
+    let term = |i: usize| imi_term(open[i], close[i]);
     let mut slide = Slide::<2>::from_state(state)?;
-    let value = match slide.row(Order::AddReadDrop, period, row, |j| all_finite(term(j))) {
+    let value = match slide.row(Order::AddReadDrop, period, row, |j| {
+        // A missing price makes the selected difference non-finite. The slide
+        // rejects it; only the cold re-sum needs original-price admission.
+        all_finite(imi_updown(open[j], close[j]))
+    }) {
         Window::Partial => f64::NAN,
         Window::Sums([u, d]) => imi_value(u.value(), d.value()),
         Window::Bad => {
@@ -736,6 +857,12 @@ pub fn imi_step(open: &[f64], close: &[f64], period: usize, row: usize, state: &
 #[inline]
 fn imi_updown(o: f64, c: f64) -> [f64; 2] {
     if c > o { [c - o, 0.0] } else { [0.0, o - c] }
+}
+
+/// Admit the original prices; a generated up/down infinity remains IEEE.
+#[inline]
+fn imi_term(o: f64, c: f64) -> [f64; 2] {
+    missing::terms(&[o, c], imi_updown(o, c))
 }
 
 /// IMI from a window's up / down sums: `100·up/(up+down)`.
@@ -784,7 +911,7 @@ pub fn trix_resume_one(
     let prev = e[2]; // cascade output at row-1 (ROC's denominator)
     kernels::ema_cascade_step(&mut e, close[row], period);
     next.copy_from_slice(&e);
-    Some(roc_value(e[2], prev))
+    Some(roc_internal_value(e[2], prev))
 }
 
 
@@ -841,3 +968,8 @@ pub fn cci_step(
 
 mod mfi;
 pub use mfi::*;
+
+/// Momentum over inputs already admitted as finite.
+pub fn mom_complete(data: &[f64], period: usize) -> Vec<f64> { Momentum::Mom.series_with(data, period, true) }
+/// ROCP over inputs already admitted as finite.
+pub fn rocp_complete(data: &[f64], period: usize) -> Vec<f64> { Momentum::Rocp.series_with(data, period, true) }

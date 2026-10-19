@@ -137,11 +137,14 @@ def test_dm_period_one_starts_at_bar_one(name, fn):
 
 # --- OBV: a flat bar adds nothing — its volume is never multiplied by 0 ---------------
 
-def test_obv_flat_bar_with_infinite_volume_leaves_the_total_unchanged():
+def test_obv_skips_a_flat_bar_with_infinite_volume():
     close, volume = np.array([1, 1, 2, 3.0]), np.array([10, np.inf, 3, 4.0])
-    _same(_exec({'close': close, 'volume': volume}, 'obv'), talib.OBV(close, volume), exact=True)
-    _same(_exec({'close': close, 'volume': volume}, 'obv'), [10.0, 10.0, 13.0, 17.0])
-    _same(_appended({'close': close, 'volume': volume}, 'obv', 1), [10.0, 10.0, 13.0, 17.0], exact=True)
+    keep = np.isfinite(close) & np.isfinite(volume)
+    want = np.full(len(close), np.nan)
+    want[keep] = talib.OBV(close[keep], volume[keep])
+    _same(_exec({'close': close, 'volume': volume}, 'obv'), want, exact=True)
+    _same(want, [10.0, np.nan, 13.0, 17.0], exact=True)
+    _same(_appended({'close': close, 'volume': volume}, 'obv', 1), want, exact=True)
 
 
 # --- AD / ADOSC / CMF / III / WVAD: one range-flow rule, zero flow when H == L ----------

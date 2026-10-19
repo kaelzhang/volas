@@ -1,7 +1,7 @@
-//! Missing values: what a missing (NaN) input does to every kind of computation.
+//! Missing values: what a non-finite input does to every kind of computation.
 //!
-//! An infinity is a value, not a missing one. A missing value affects exactly the
-//! outputs whose definition reads it, by one of three rules owned here:
+//! NaN and both infinity signs are missing inputs. A missing value affects exactly
+//! the outputs whose definition reads it, by one of three rules owned here:
 //!
 //! - **A per-row term** (a true range, a signed money flow, an up / down flag, a clamped
 //!   difference, a rate of change, …) that reads a missing input is itself missing:
@@ -30,11 +30,10 @@
 
 use std::borrow::Cow;
 
-/// Whether `x` is a missing value. An infinity is a value.
-#[inline]
-pub fn is_missing(x: f64) -> bool {
-    x.is_nan()
-}
+pub use volas_core::missing::{any_missing, is_missing};
+
+mod pointwise;
+pub(crate) use pointwise::{map_terms, map_terms_packed, map_terms_with, repair_slots, repair_terms, Finiteness};
 
 /// Whether any of `reads` — the inputs one per-row term reads — is missing.
 /// Branch-free, so a term's check compiles to a select.
@@ -48,6 +47,26 @@ pub fn any_of(reads: &[f64]) -> bool {
 #[inline(always)]
 pub fn term(reads: &[f64], value: f64) -> f64 {
     if any_of(reads) { f64::NAN } else { value }
+}
+
+// Scalar adapters keep cold admission's array materialization out of the caller.
+// The missing rule itself remains solely in `term`.
+#[cold]
+#[inline(never)]
+pub(crate) fn nonfinite_term2(a: f64, b: f64, value: f64) -> f64 {
+    term(&[a, b], value)
+}
+
+#[cold]
+#[inline(never)]
+pub(crate) fn nonfinite_term3(a: f64, b: f64, c: f64, value: f64) -> f64 {
+    term(&[a, b, c], value)
+}
+
+#[cold]
+#[inline(never)]
+pub(crate) fn nonfinite_term4(a: f64, b: f64, c: f64, d: f64, value: f64) -> f64 {
+    term(&[a, b, c, d], value)
 }
 
 /// [`term`] for a term of several values (all missing together).
@@ -67,47 +86,55 @@ pub fn holds_missing(window: &[f64]) -> bool {
 /// reduction that is not a running sum (an extremum, its position, a tracker's count):
 /// its clean windows are already exact, and this leaves them alone. One scan when `x`
 /// has a missing value, otherwise the scan that finds none.
+#[inline(never)]
 pub fn blank_windows(out: &mut [f64], x: &[f64], span: usize) {
-    blank_windows_where(out, x, span, is_missing);
-}
-
-/// [`blank_windows`] for a row test of the caller's (`bad`), for a computation whose
-/// own rule widens what makes a row unusable (candle patterns: any non-finite price).
-pub(crate) fn blank_windows_where(out: &mut [f64], x: &[f64], span: usize, bad: impl Fn(f64) -> bool) {
     let n = out.len().min(x.len());
-    // Branch-free over fixed chunks first, so the common clean scan vectorises.
-    let clean = x[..n].chunks(8).all(|chunk| !chunk.iter().fold(false, |acc, &v| acc | bad(v)));
-    if clean {
+    if !any_missing(&x[..n]) {
         return;
     }
-    let first = x[..n].iter().position(|&v| bad(v)).unwrap_or(n);
+    blank_missing_windows(out, &x[..n], span);
+}
+
+#[cold]
+#[inline(never)]
+fn blank_missing_windows(out: &mut [f64], x: &[f64], span: usize) {
+    blank_missing_slots(x, span, |i| out[i] = f64::NAN);
+}
+
+#[cold]
+#[inline(never)]
+fn blank_missing_slots(x: &[f64], span: usize, mut blank: impl FnMut(usize)) {
+    let n = x.len();
+    let first = x.iter().position(|&v| is_missing(v)).unwrap_or(n);
     let mut last = first;
-    for i in first..n {
-        if bad(x[i]) {
-            last = i;
-        }
-        if i - last < span {
-            out[i] = f64::NAN;
-        }
+    for (i, &value) in x.iter().enumerate().skip(first) {
+        if is_missing(value) { last = i; }
+        if i - last < span { blank(i); }
     }
+}
+
+/// Repair fully written slots before the output's poison check and publication.
+/// The kernel gives the output and source the same length.
+#[inline(never)]
+pub(crate) fn blank_window_output<const SPAN: usize>(mut out: crate::buf::OutBuf, x: &[f64]) -> Vec<f64> {
+    if any_missing(x) {
+        blank_missing_slots(x, SPAN, |i| out.set(i, f64::NAN));
+    }
+    out.finish()
+}
+
+/// Return an owned window result after applying the input rule. Keeping ownership
+/// here also keeps repair's unwind cleanup outside the numerical kernel.
+#[inline(never)]
+pub(crate) fn blank_owned_windows(mut out: Vec<f64>, x: &[f64], span: usize) -> Vec<f64> {
+    blank_windows(&mut out, x, span);
+    out
 }
 
 /// Whether row `i` is complete: every input is present there.
 #[inline]
 fn complete(inputs: &[&[f64]], i: usize) -> bool {
     inputs.iter().all(|x| !is_missing(x[i]))
-}
-
-/// Whether any value of `x` is missing. Branch-free over fixed chunks so the common,
-/// fully-present scan vectorises.
-fn any_missing(x: &[f64]) -> bool {
-    let mut chunks = x.chunks_exact(8);
-    for c in &mut chunks {
-        if c.iter().fold(false, |acc, &v| acc | is_missing(v)) {
-            return true;
-        }
-    }
-    chunks.remainder().iter().any(|&v| is_missing(v))
 }
 
 /// One input of a recursive computation: its values and, when its column already
@@ -484,10 +511,10 @@ mod tests {
     /// came out as (a `max`, a comparison or a zero-base branch would step over it).
     #[test]
     fn a_term_reading_a_missing_input_is_missing() {
-        assert!(any_of(&[1.0, NAN]) && !any_of(&[1.0, f64::INFINITY]) && !any_of(&[]));
+        assert!(any_of(&[1.0, NAN]) && any_of(&[1.0, f64::INFINITY]) && !any_of(&[]));
         assert_eq!(term(&[1.0, 2.0], 3.0), 3.0);
         assert!(term(&[1.0, NAN], NAN.max(1.0)).is_nan());
-        assert_eq!(term(&[f64::INFINITY], 0.0), 0.0); // an infinity is a value
+        assert!(term(&[f64::INFINITY], 0.0).is_nan());
         assert_eq!(terms(&[1.0], [1.0, 2.0]), [1.0, 2.0]);
         assert!(terms(&[NAN], [1.0, 2.0]).iter().all(|x| x.is_nan()));
     }
@@ -508,17 +535,40 @@ mod tests {
         let mut out = [9.0; 3];
         blank_windows(&mut out, &[1.0, 2.0, 3.0], 2);
         assert_eq!(out, [9.0; 3]);
-        // a caller's own row test: any non-finite value
+        // Infinities use the same window rule as NaN.
         let mut out = [9.0; 4];
-        blank_windows_where(&mut out, &[1.0, f64::INFINITY, 3.0, 4.0], 2, |v| !v.is_finite());
+        blank_windows(&mut out, &[1.0, f64::INFINITY, 3.0, 4.0], 2);
         assert_eq!(bits(&out), bits(&[9.0, NAN, NAN, 9.0]));
     }
 
     #[test]
-    fn an_infinity_is_a_value_not_a_missing_row() {
+    fn scan_checks_every_lane_and_tail() {
+        for len in 0..=70 {
+            let clean: Vec<f64> = (0..len)
+                .map(|i| match i % 4 {
+                    0 => f64::MAX,
+                    1 => -f64::MAX,
+                    2 => -0.0,
+                    _ => 0.0,
+                })
+                .collect();
+            assert!(!any_missing(&clean), "clean length {len}");
+            for i in 0..len {
+                for bad in [f64::NAN, -f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+                    let mut x = clean.clone();
+                    x[i] = bad;
+                    assert!(any_missing(&x), "length {len}, lane {i}, {bad}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn either_infinity_is_a_missing_row() {
         let x = [f64::INFINITY, 1.0, f64::NEG_INFINITY];
-        assert_eq!(CompleteRows::of(&ins(&[&x[..]])), CompleteRows::All);
-        assert!(!is_missing(f64::INFINITY));
+        assert_eq!(CompleteRows::of(&ins(&[&x[..]])), CompleteRows::Kept(vec![1]));
+        assert!(is_missing(f64::INFINITY));
+        assert!(is_missing(f64::NEG_INFINITY));
         assert!(is_missing(NAN));
     }
 

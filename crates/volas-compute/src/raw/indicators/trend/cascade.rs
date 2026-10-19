@@ -176,7 +176,7 @@ fn trima_composed<S: crate::pass::StateSink>(data: &[f64], period: usize, origin
     let (a, b) = trima_windows(period);
     let (mut inner_state, mut outer_state) = (states.child(), states.child());
     let inner = kernels::sma_pass(data, a, origin, &mut inner_state);
-    let out = kernels::sma_pass(&inner, b, origin, &mut outer_state);
+    let out = kernels::sma_internal_pass(&inner, b, origin, &mut outer_state);
     states.compose(data.len(), &[&inner_state, &outer_state], |end, state| {
         state.extend_from_slice(&inner[end.saturating_sub(b)..end]);
     });
@@ -446,7 +446,7 @@ pub(crate) fn trima_row(
     let inner = kernels::sma_step(a, row, term, s_in, n_in)?;
     // the inner mean at row j: `ring` holds rows `row-b .. row-1`, oldest first
     let means = |j: usize| if j == row { inner } else { ring[b - (row - j)] };
-    let value = kernels::sma_step(b, row, means, s_out, n_out)?;
+    let value = kernels::sma_internal_step(b, row, means, s_out, n_out)?;
     ring_push(ring, inner, n_ring);
     Some(value)
 }

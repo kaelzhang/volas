@@ -9,6 +9,37 @@ fn frame() -> DataFrame {
     DataFrame::new(vec!["close".into()], vec![Column::f64(vec![1.0, 2.0, 3.0])], None).unwrap()
 }
 
+#[test]
+fn a_read_records_a_finite_fact_only_for_its_pass() {
+    let df = frame();
+    let ops = Operands::over(&df, &[], 0, vec![Some(Cow::Owned(vec![1.0, 2.0, 3.0]))]);
+    ops.f64(0, "close").unwrap();
+    assert!(!ops.clean());
+    let read = ops.reads().next().unwrap().1;
+    assert_eq!(read.known_has_nonfinite(), None);
+    assert!(!read.has_nonfinite());
+    assert_eq!(read.known_has_nonfinite(), Some(false));
+    assert!(ops.all_finite());
+    assert!(ops.clean());
+    let next = Operands::over(&df, &[], 0, vec![Some(Cow::Owned(vec![1.0, 2.0, 3.0]))]);
+    assert_eq!(next.reads().next().unwrap().1.known_has_nonfinite(), None);
+}
+
+#[test]
+fn a_read_records_a_nonfinite_fact_only_for_its_pass() {
+    let df = frame();
+    let ops = Operands::over(&df, &[], 0, vec![Some(Cow::Owned(vec![1.0, f64::INFINITY, 3.0]))]);
+    ops.f64(0, "close").unwrap();
+    let read = ops.reads().next().unwrap().1;
+    assert_eq!(read.known_has_nonfinite(), None);
+    assert!(read.has_nonfinite());
+    assert_eq!(read.known_has_nonfinite(), Some(true));
+    assert!(!ops.all_finite());
+    assert!(!ops.clean());
+    let next = Operands::over(&df, &[], 0, vec![Some(Cow::Owned(vec![1.0, 2.0, 3.0]))]);
+    assert_eq!(next.reads().next().unwrap().1.known_has_nonfinite(), None);
+}
+
 /// Every input a rerun hands out is as long as the others; a shorter one is a shape
 /// error, never a slice a kernel reads past.
 #[test]
@@ -79,15 +110,15 @@ fn a_window_reads_only_its_rows() {
     assert_eq!(&*ops.f64(1, "n").unwrap(), &[3.0, 4.0]);
     assert_eq!(&*ops.f64(2, "close").unwrap(), &[3.0, 4.0]);
     assert_eq!(&*ops.f64(0, "close").unwrap(), &[6.0, 8.0]);
-    assert!(ops.reads().all(|(_, r)| !r.has_nan()));
+    assert!(ops.reads().all(|(_, r)| !r.has_nonfinite()));
     // a window of a column known to hold a NaN does not know whether it holds one
     let gap = DataFrame::new(vec!["close".into()], vec![Column::f64(vec![f64::NAN, 1.0, 2.0])], None).unwrap();
-    assert!(gap.column("close").unwrap().has_nan());
+    assert!(gap.column("close").unwrap().has_nonfinite());
     let ops = Operands::window(&gap, &[], 1);
     assert_eq!(&*ops.f64(0, "close").unwrap(), &[1.0, 2.0]);
     let (_, read) = ops.reads().next().unwrap();
-    assert_eq!(read.known_has_nan(), None);
-    assert!(!read.has_nan());
+    assert_eq!(read.known_has_nonfinite(), None);
+    assert!(!read.has_nonfinite());
     // an int64 past 2^53 inside the window is rejected; outside it, not read
     let big = DataFrame::new(vec!["v".into()], vec![Column::i64(vec![1 << 60, 1, 2])], None).unwrap();
     assert!(Operands::window(&big, &[], 0).f64(0, "v").is_err());
@@ -109,4 +140,35 @@ fn bound_data_operand_borrows_the_column_and_preserves_missing_facts() {
     let (_, read) = window.reads().next().unwrap();
     assert!(matches!(read.values, Cow::Borrowed(_)));
     assert!(read.column.is_none());
+}
+
+/// Repeated batch calls must reuse the input owner's admission fact, rather
+/// than treating a freshly owned column as unknown forever.
+#[test]
+fn price_and_aroon_calls_learn_owned_input_facts() {
+    let mut unknown = Vec::new();
+    for (command, inputs) in [
+        ("avgprice", &["open", "high", "low", "close"][..]),
+        ("medprice", &["high", "low"][..]),
+        ("typprice", &["high", "low", "close"][..]),
+        ("wclprice", &["high", "low", "close"][..]),
+        ("aroon.up:14", &["high", "low"][..]),
+        ("aroon.down:14", &["high", "low"][..]),
+    ] {
+        let names = ["open", "high", "low", "close"];
+        let columns = [0.0, 2.0, -2.0, 0.5].map(|offset| {
+            Column::f64((0..32).map(|i| 20.0 + i as f64 + offset).collect())
+        });
+        let df = DataFrame::new(names.map(str::to_owned).to_vec(), columns.to_vec(), None).unwrap();
+        for input in inputs {
+            assert_eq!(df.column(input).unwrap().known_has_nonfinite(), None);
+        }
+        crate::exec::execute(&df, &parse(command).unwrap()).unwrap();
+        for input in inputs {
+            if df.column(input).unwrap().known_has_nonfinite() != Some(false) {
+                unknown.push(format!("{command}: {input}"));
+            }
+        }
+    }
+    assert!(unknown.is_empty(), "facts still unknown: {}", unknown.join(", "));
 }

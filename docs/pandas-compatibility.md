@@ -75,10 +75,11 @@ s.ewm(com=|span=|halflife=|alpha=, min_periods=0, adjust=True, ignore_na=False)
 ```
 
 With `min_periods=0`, empty rolling / expanding windows return 0 for `sum`
-and `nunique`; statistics without an empty identity remain missing. EWM treats
-NaN and both infinity signs as missing, following pandas 3.0.3. Rolling / expanding
-methods treat infinities as values; see the
-[per-method infinity policy](https://github.com/kaelzhang/volas/blob/main/PANDAS-DIFFERENCES.md#window-aggregations-rolling--expanding-deliberate-divergences).
+and `nunique`; statistics without an empty identity remain missing. Rolling,
+expanding and EWM treat NaN and both infinity signs as missing computation inputs.
+The window preparation matches pandas 3.0.3; volas also excludes infinities in
+`count()`, whereas pandas builds that method's non-NA mask before window preparation.
+pandas `sem()` uses the same raw count as its denominator; volas excludes infinities there too.
 
 Scalar `replace` preserves dtypes: a matched column that cannot hold the new value
 raises and leaves the source frame unchanged. Numeric membership and replacement
@@ -322,3 +323,10 @@ volas.DataFrame({'a': [10, 20, 30]})['a'].shift(1).to_list()   # [<NA>, 10, 20]
   exception: `s != value` therefore *includes* missing rows.
 
 [PDEP-16]: https://github.com/pandas-dev/pandas/pull/58988
+
+Window computations treat NaN and ±inf as missing inputs. One intentional pandas
+3.0.3 exception is `rolling.count()` / `expanding.count()`: pandas builds a
+`notna()` mask before preparing numeric window values and therefore counts raw
+infinities; volas excludes them. pandas `sem()` inherits that raw-infinity
+count in its `std / sqrt(count)` denominator. Compare `count()` and `sem()`
+against pandas after replacing ±inf with NaN. Element-wise column arithmetic and comparisons keep IEEE behavior.

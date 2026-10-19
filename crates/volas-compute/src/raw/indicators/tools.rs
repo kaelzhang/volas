@@ -10,6 +10,7 @@
 /// is in the window, `true` when the window is full and every truth in it is `true`,
 /// missing otherwise (rows before the series start are missing). `k == 0` has no
 /// window: every row is missing (the directive boundary rejects it).
+use crate::missing;
 pub fn all_of_last(truths: &[Option<bool>], k: usize) -> Vec<Option<bool>> {
     (0..truths.len())
         .map(|i| {
@@ -39,7 +40,8 @@ pub fn increase(data: &[f64], repeat: usize, direction: i32) -> Vec<Option<bool>
     let steps: Vec<Option<bool>> = (0..data.len())
         .map(|j| {
             let prev = data.get(j.wrapping_sub(1))?; // the first value has no step
-            data[j].partial_cmp(prev).map(|o| Some(o) == want)
+            if missing::any_of(&[data[j], *prev]) { None }
+            else { data[j].partial_cmp(prev).map(|o| Some(o) == want) }
         })
         .collect();
     all_of_last(&steps, repeat)
@@ -62,7 +64,10 @@ pub fn style(style: Style, open: &[f64], close: &[f64]) -> Vec<Option<bool>> {
         Style::Bullish => std::cmp::Ordering::Greater,
         Style::Bearish => std::cmp::Ordering::Less,
     };
-    (0..open.len()).map(|i| close[i].partial_cmp(&open[i]).map(|o| o == want)).collect()
+    (0..open.len()).map(|i| {
+        if missing::any_of(&[open[i], close[i]]) { None }
+        else { close[i].partial_cmp(&open[i]).map(|o| o == want) }
+    }).collect()
 }
 
 /// Whether a boolean condition holds for `repeat` consecutive periods (the Kleene
@@ -86,7 +91,7 @@ pub fn change(data: &[f64], period: usize) -> Vec<f64> {
         // An exact zero test, as TA-Lib's ROCP / ROCR: an absolute threshold would
         // drop the real changes of a tiny-priced series. A zero base stays NaN.
         if prev != 0.0 {
-            result[i] = data[i] / prev - 1.0;
+            result[i] = missing::term(&[data[i], prev], data[i] / prev - 1.0);
         }
     }
     result

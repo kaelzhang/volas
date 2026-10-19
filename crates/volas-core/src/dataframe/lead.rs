@@ -165,12 +165,11 @@ impl DataFrame {
         let mut history = Vec::with_capacity(self.width());
         for (i, col) in self.columns.iter().enumerate() {
             let clean = col.known_has_nan() == Some(false);
+            let finite = col.known_has_nonfinite() == Some(false);
             let buffer = |range| {
-                let values = if clean {
-                    crate::buffer::Buffer::from_shared_nan_free_range(Arc::clone(&owner), range)
-                } else {
-                    crate::buffer::Buffer::from_shared_range(Arc::clone(&owner), range)
-                }.expect("copied prefix slab range");
+                let values = crate::buffer::Buffer::from_shared_known_range(
+                    Arc::clone(&owner), range, clean, finite,
+                ).expect("copied prefix slab range");
                 Column::F64(values)
             };
             let from = if i < raw { i * (rows + lead_rows) } else { i * rows + raw * lead_rows };
@@ -205,11 +204,10 @@ impl DataFrame {
         let columns = self.columns.iter().enumerate().map(|(i, col)| data(i).then(|| {
             let range = offset..offset + rows;
             offset += rows;
-            let buffer = if col.known_has_nan() == Some(false) {
-                crate::buffer::Buffer::from_shared_nan_free_range(Arc::clone(&owner), range)
-            } else {
-                crate::buffer::Buffer::from_shared_range(Arc::clone(&owner), range)
-            }.expect("copied lead slab range");
+            let buffer = crate::buffer::Buffer::from_shared_known_range(
+                        Arc::clone(&owner), range, col.known_has_nan() == Some(false),
+                        col.known_has_nonfinite() == Some(false),
+                    ).expect("copied lead slab range");
             Column::F64(buffer)
         })).collect();
         let lead = Lead { name_to_idx: Arc::clone(&self.name_to_idx), columns, height: rows, from: 0, to: rows };

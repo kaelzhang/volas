@@ -142,7 +142,7 @@ it, the departure is deliberate and listed here.
   TA-Lib builds and platforms as well.
 - **The directional family**'s Wilder sums `s − s/p + term` of ±DM and the true range,
   ±DI and DX have no multiply-add to fuse and are bit-identical to every TA-Lib build,
-  including after an infinite movement, which turns every later sum into NaN, and on
+  on complete finite input rows, and on
   TA-Lib's zero guards: where the true-range sum or the DI sum is ~0 (a long flat or
   halted stretch), ±DI is 0, DX repeats its previous value and ADX keeps its average.
 

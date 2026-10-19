@@ -5,7 +5,7 @@
 //! This module applies it to a bound recursive command. The command's arm runs in
 //! place first, reading its inputs through [`Operands`], which records exactly what it
 //! read: when every column read is known complete (the column's own remembered fact,
-//! `Column::has_nan`) that result stands with no scan at all; otherwise the record says
+//! `Column::has_nonfinite`) that result stands with no scan at all; otherwise the record says
 //! which rows are complete, and the arm runs again over just those rows of the same
 //! inputs, its outputs scattered back. The arms and kernels are unchanged. A read that
 //! failed leaves the record without that input, so the arm's own result — the error —
@@ -42,14 +42,14 @@ struct Recorded<'v> {
     slot: usize,
     values: Cow<'v, [f64]>,
     /// Whether the values hold a NaN, if known.
-    has_nan: Option<bool>,
+    has_missing: Option<bool>,
 }
 
 impl Recorded<'_> {
     /// The rows `[..end)`, with the NaN fact (which a complete whole implies for them).
     fn input(&self, end: usize) -> Input<'_> {
         let v = &self.values[..end.min(self.values.len())];
-        self.has_nan.map_or_else(|| Input::new(v), |k| Input::known(v, k))
+        self.has_missing.map_or_else(|| Input::new(v), |k| Input::known(v, k))
     }
 }
 
@@ -60,7 +60,7 @@ fn recorded<'o>(ops: &'o Operands, remember: bool) -> Vec<Recorded<'o>> {
         .map(|(slot, read)| Recorded {
             slot,
             values: Cow::Borrowed(read.view()),
-            has_nan: if remember { Some(read.has_nan()) } else { read.known_has_nan() },
+            has_missing: if remember { Some(read.has_nonfinite()) } else { read.known_has_nonfinite() },
         })
         .collect()
 }
@@ -197,7 +197,7 @@ mod tests {
         assert_eq!(format!("{first:?}"), format!("{again:?}"));
         // a clean frame column, once known clean, is read in place with no scan
         let clean = frame((0..12).map(|i| 40.0 + i as f64).collect());
-        assert!(!clean.column("open").unwrap().has_nan());
+        assert!(!clean.column("open").unwrap().has_nonfinite());
         runs.borrow_mut().clear();
         super::compute(&clean, &[], run).unwrap();
         assert_eq!(*runs.borrow(), vec![12]);
@@ -272,7 +272,7 @@ mod tests {
             // column) or known (the run stops at close; the probe fails)
             let close = Column::f64(vec![1.0, f64::NAN, 3.0, 4.0]);
             if known {
-                assert!(close.has_nan());
+                assert!(close.has_nonfinite());
             }
             let df = DataFrame::new(vec!["close".into()], vec![close], None).unwrap();
             for d in ["nvi", "pvi", "pvt", "obv", "efi:2", "ad", "adosc"] {

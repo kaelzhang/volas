@@ -11,9 +11,15 @@ use crate::guard::{NonFiniteRows, RowGuard, Unguarded};
 fn linreg_fit_pass(data: &[f64], period: usize, origin: usize, states: &mut impl crate::pass::StateSink, project: impl Fn(f64, f64) -> f64) -> Vec<f64> {
     let (out, finite) = linreg_fit_with::<Unguarded>(data, period, origin, states, &project);
     if finite { out } else {
-        states.restart();
-        linreg_fit_with::<NonFiniteRows>(data, period, origin, states, &project).0
+        linreg_nonfinite(data, period, origin, states, &project)
     }
+}
+
+#[cold]
+#[inline(never)]
+fn linreg_nonfinite(data: &[f64], period: usize, origin: usize, states: &mut impl crate::pass::StateSink, project: &impl Fn(f64, f64) -> f64) -> Vec<f64> {
+    states.restart();
+    linreg_fit_with::<NonFiniteRows>(data, period, origin, states, project).0
 }
 
 /// The sliding fit under a row guard (row 0 at absolute position `origin`); also returns
@@ -48,9 +54,9 @@ fn linreg_fit_with<G: RowGuard>(data: &[f64], period: usize, origin: usize, stat
             k = data[i];
         }
         let entering = data[i];
-        let came_in = guard.enter(entering.is_finite());
+        let came_in = guard.enter(!crate::missing::is_missing(entering));
         let leaving = (i >= period).then(|| data[i - period]);
-        let went_out = leaving.is_some_and(|l| guard.leave(l.is_finite()));
+        let went_out = leaving.is_some_and(|l| guard.leave(!crate::missing::is_missing(l)));
         linreg_slide(&mut sum_d, &mut sum_ad, p, came_in.then_some(entering), leaving.filter(|_| went_out));
         let full = i + 1 >= period;
         let rows = &data[(i + 1).saturating_sub(period)..=i];
@@ -59,7 +65,7 @@ fn linreg_fit_with<G: RowGuard>(data: &[f64], period: usize, origin: usize, stat
             // pass recomputes every row); the careful pass always re-sums.
             finite &= sum_d.value().is_finite() && sum_ad.value().is_finite();
             if finite || !guard.counts(false) {
-                (sum_d, sum_ad) = linreg_sums(rows, |y| guard.counts(y.is_finite()));
+                (sum_d, sum_ad) = linreg_sums(rows, |y| guard.counts(!crate::missing::is_missing(y)));
             }
         }
         states.record(i, n, |out| {
@@ -72,8 +78,7 @@ fn linreg_fit_with<G: RowGuard>(data: &[f64], period: usize, origin: usize, stat
         let (m, b) = if guard.clean() {
             linreg_fit_of(p, sum_x, divisor, k, &sum_d, &sum_ad)
         } else {
-            let (sd, sad) = linreg_sums(rows, |_| true);
-            linreg_fit_of(p, sum_x, divisor, k, &sd, &sad)
+            (f64::NAN, f64::NAN)
         };
         out.set(i, project(m, b));
     }
@@ -112,13 +117,24 @@ fn linreg_sums_in<A: Accumulator>(rows: &[f64], admit: &impl Fn(f64) -> bool) ->
 #[inline(always)]
 fn linreg_fit_of(p: f64, sum_x: f64, divisor: f64, k: f64, sum_y: &Csum, sum_xy: &Csum) -> (f64, f64) {
     let total = sum_y.value();
-    if !total.is_finite() {
-        let m = (p * sum_xy.value() - sum_x * total) / divisor;
-        return (m, (total - m * sum_x) / p);
+    let total_xy = sum_xy.value();
+    // Self-subtraction is zero exactly for finite sums; unlike is_finite this
+    // needs no integer infinity threshold materialized on each full window.
+    #[allow(clippy::eq_op)]
+    let finite = total - total == 0.0;
+    if !finite {
+        return linreg_ieee_fit(p, sum_x, divisor, total, total_xy);
     }
     let dy = deviation(sum_y, p, k);
     let m = (p * deviation(sum_xy, sum_x, k) - sum_x * dy) / divisor;
     (m, k + (dy - m * sum_x) / p)
+}
+
+#[cold]
+#[inline(never)]
+fn linreg_ieee_fit(p: f64, sum_x: f64, divisor: f64, total: f64, total_xy: f64) -> (f64, f64) {
+    let m = (p * total_xy - sum_x * total) / divisor;
+    (m, (total - m * sum_x) / p)
 }
 
 /// The fit's closed-form `x` sums over ages `0..period`: `(Σx, Σx·Σx − period·Σx²)`.
@@ -194,9 +210,15 @@ pub fn var_pass(data: &[f64], period: usize, origin: usize, states: &mut impl cr
     if finite {
         out
     } else {
-        states.restart();
-        rolling_var_with::<NonFiniteRows>(data, period, origin, states).0
+        var_nonfinite(data, period, origin, states)
     }
+}
+
+#[cold]
+#[inline(never)]
+fn var_nonfinite(data: &[f64], period: usize, origin: usize, states: &mut impl crate::pass::StateSink) -> Vec<f64> {
+    states.restart();
+    rolling_var_with::<NonFiniteRows>(data, period, origin, states).0
 }
 
 /// The sliding variance under a row guard (row 0 at absolute position `origin`); also
@@ -222,7 +244,7 @@ fn rolling_var_with<G: RowGuard>(data: &[f64], period: usize, origin: usize, sta
         if anchor {
             k = x;
         }
-        if guard.enter(x.is_finite()) {
+        if guard.enter(!crate::missing::is_missing(x)) {
             for (s, t) in sums.iter_mut().zip(shifted_terms(x, k)) {
                 s.add(t);
             }
@@ -233,7 +255,7 @@ fn rolling_var_with<G: RowGuard>(data: &[f64], period: usize, origin: usize, sta
             // the fast pass stops re-summing once poisoned (see `linreg_fit_with`)
             finite &= sums.iter().all(|s| s.value().is_finite());
             if finite || !guard.counts(false) {
-                let window = rows.iter().filter(|x| guard.counts(x.is_finite()));
+                let window = rows.iter().filter(|&&x| guard.counts(!crate::missing::is_missing(x)));
                 sums = Csum::of_rows(window.map(|&x| shifted_terms(x, k)));
             }
         }
@@ -242,7 +264,7 @@ fn rolling_var_with<G: RowGuard>(data: &[f64], period: usize, origin: usize, sta
         }
         let value = if guard.clean() { var_of_sums(&sums, k, p) } else { var_of_window(rows, k, p) };
         let old = data[i + 1 - period];
-        if guard.leave(old.is_finite()) {
+        if guard.leave(!crate::missing::is_missing(old)) {
             for (s, t) in sums.iter_mut().zip(shifted_terms(old, k)) {
                 s.sub(t);
             }
@@ -353,6 +375,13 @@ pub fn correl_pass<S: crate::pass::StateSink>(x: &[f64], y: &[f64], period: usiz
     if clean && s.iter().all(|a| a.value().is_finite()) {
         return out.finish();
     }
+    correl_nonfinite(x, y, period, origin, states)
+}
+
+#[cold]
+#[inline(never)]
+fn correl_nonfinite(x: &[f64], y: &[f64], period: usize, origin: usize, states: &mut impl crate::pass::StateSink) -> Vec<f64> {
+    let n = x.len();
     states.restart();
     // A non-finite row entered: window-local careful path (see `crate::guard`).
     let mut slide = Slide::<5>::at(origin);
@@ -393,7 +422,7 @@ fn correl_row(slide: &mut Slide<5>, x: &[f64], y: &[f64], period: usize, i: usiz
     let a = shift_row(i, slide.pos(), period);
     let k = (x[a], y[a]);
     let term = |j: usize| correl_terms(x[j], y[j], k);
-    match slide.row_shifted(Order::DropAdd, period, i, |j| (term(j), x[j].is_finite() && y[j].is_finite())) {
+    match slide.row_shifted(Order::DropAdd, period, i, |j| (term(j), !crate::missing::is_missing(x[j]) && !crate::missing::is_missing(y[j]))) {
         Window::Partial => f64::NAN,
         Window::Sums(s) => correl_of_sums(&s, k, period as f64),
         Window::Bad => correl_of_sums(&Csum::of_rows((i + 1 - period..=i).map(term)), k, period as f64),
@@ -458,6 +487,13 @@ pub fn beta_pass<S: crate::pass::StateSink>(x: &[f64], y: &[f64], period: usize,
     if clean && s.iter().all(|a| a.value().is_finite()) {
         return out.finish();
     }
+    beta_nonfinite(x, y, period, origin, states)
+}
+
+#[cold]
+#[inline(never)]
+fn beta_nonfinite(x: &[f64], y: &[f64], period: usize, origin: usize, states: &mut impl crate::pass::StateSink) -> Vec<f64> {
+    let n = x.len();
     states.restart();
     // A non-finite return entered: window-local careful path (see `crate::guard`).
     let mut out = crate::buf::OutBuf::warmup(n, period);
@@ -510,7 +546,7 @@ fn beta_row(slide: &mut Slide<4>, x: &[f64], y: &[f64], period: usize, j: usize)
     let term = |t: usize| beta_terms(beta_returns(x, y, t), k);
     let finite = |t: usize| {
         let (rx, ry) = beta_returns(x, y, t);
-        rx.is_finite() && ry.is_finite()
+        !crate::missing::is_missing(rx) && !crate::missing::is_missing(ry)
     };
     match slide.row_shifted(Order::AddReadDrop, period, j, |t| (term(t), finite(t))) {
         Window::Partial => f64::NAN,
@@ -579,18 +615,18 @@ pub fn linreg_step(
     let (sum_x, divisor) = linreg_x_sums(period);
     let k = data[shift_row(row, pos, period)];
     let y = data[row];
-    if !y.is_finite() {
+    if crate::missing::is_missing(y) {
         bad += 1;
     }
     let leaving = (seen >= period).then(|| data[row - period]);
-    if leaving.is_some_and(|l| !l.is_finite()) {
+    if leaving.is_some_and(crate::missing::is_missing) {
         bad -= 1;
     }
-    linreg_slide(&mut sum_d, &mut sum_ad, p, y.is_finite().then_some(y), leaving.filter(|l| l.is_finite()));
+    linreg_slide(&mut sum_d, &mut sum_ad, p, (!crate::missing::is_missing(y)).then_some(y), leaving.filter(|&l| !crate::missing::is_missing(l)));
     let full = seen + 1 >= period;
     let rows = &data[(row + 1).saturating_sub(period)..=row];
     if full && !(sum_d.is_exact() && sum_ad.is_exact()) {
-        (sum_d, sum_ad) = linreg_sums(rows, f64::is_finite);
+        (sum_d, sum_ad) = linreg_sums(rows, |v| !crate::missing::is_missing(v));
     }
     let value = if !full {
         f64::NAN
@@ -598,8 +634,7 @@ pub fn linreg_step(
         let (m, b) = if bad == 0 {
             linreg_fit_of(p, sum_x, divisor, k, &sum_d, &sum_ad)
         } else {
-            let (sd, sad) = linreg_sums(rows, |_| true);
-            linreg_fit_of(p, sum_x, divisor, k, &sd, &sad)
+            (f64::NAN, f64::NAN)
         };
         match line {
             LinregLine::Value => b + m * period.saturating_sub(1) as f64,
@@ -643,7 +678,7 @@ pub fn var_step(
     let k = data[shift_row(row, slide.pos(), period)];
     let variance = match slide.row_shifted(Order::AddReadDrop, period, row, |j| {
         let x = data[j];
-        (shifted_terms(x, k), x.is_finite())
+        (shifted_terms(x, k), !crate::missing::is_missing(x))
     }) {
         Window::Partial => f64::NAN,
         Window::Sums(sums) => var_of_sums(&sums, k, p),

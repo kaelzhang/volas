@@ -16,6 +16,24 @@ pub fn mfi(high: &[f64], low: &[f64], close: &[f64], volume: &[f64], period: usi
 
 /// MFI batch pass with terminal-state publication.
 pub fn mfi_pass<S: crate::pass::StateSink>(high: &[f64], low: &[f64], close: &[f64], volume: &[f64], period: usize, origin: usize, states: &mut S) -> Vec<f64> {
+    mfi_pass_with(high, low, close, volume, period, origin, false, states)
+}
+
+/// Batch pass using the caller's remembered all-finite input fact.
+#[allow(clippy::too_many_arguments)]
+pub fn mfi_pass_with<S: crate::pass::StateSink>(high: &[f64], low: &[f64], close: &[f64], volume: &[f64], period: usize, origin: usize, complete: bool, states: &mut S) -> Vec<f64> {
+    if complete {
+        return mfi_pass_rows::<true, S>(high, low, close, volume, period, origin, states);
+    }
+    mfi_pass_rows::<false, S>(high, low, close, volume, period, origin, states)
+}
+
+/// MFI on input columns already admitted as finite.
+pub fn mfi_complete(high: &[f64], low: &[f64], close: &[f64], volume: &[f64], period: usize, origin: usize) -> Vec<f64> {
+    mfi_pass_rows::<true, ()>(high, low, close, volume, period, origin, &mut ())
+}
+
+fn mfi_pass_rows<const COMPLETE: bool, S: crate::pass::StateSink>(high: &[f64], low: &[f64], close: &[f64], volume: &[f64], period: usize, origin: usize, states: &mut S) -> Vec<f64> {
     // The flow loop reads its inputs unchecked: inputs of unequal length line up no row.
     if !super::super::same_len(&[high, low, close, volume]) {
         return Vec::new();
@@ -42,6 +60,10 @@ pub fn mfi_pass<S: crate::pass::StateSink>(high: &[f64], low: &[f64], close: &[f
         / 3.0;
     let mut pos_sum = Csum::default();
     let mut neg_sum = Csum::default();
+    // Unknown inputs are admitted in the existing read pass. A non-finite
+    // typical-price/volume witness enters the window-local fallback, whose flow
+    // owner checks the original operands and preserves finite-input overflow.
+    let mut clean = COMPLETE || prev_tp.is_finite();
     // Warm up the first window — bars `1..=period` fill ring slots `0..period`.
     let mut i = 1usize;
     while i <= period {
@@ -51,7 +73,8 @@ pub fn mfi_pass<S: crate::pass::StateSink>(high: &[f64], low: &[f64], close: &[f
             / 3.0;
         // Match TA-Lib's signed-flow branch shape; on real price series adjacent
         // typical-price direction is predictable enough to beat boolean-to-float masks.
-        let [p, ng] = signed_flow(tp, prev_tp, unsafe { *volume.get_unchecked(i) });
+        let volume = unsafe { *volume.get_unchecked(i) };
+        let [p, ng] = signed_flow_with::<COMPLETE>(tp, prev_tp, volume, &mut clean);
         ring_pos[i - 1] = p;
         ring_neg[i - 1] = ng;
         pos_sum.add(p);
@@ -60,7 +83,6 @@ pub fn mfi_pass<S: crate::pass::StateSink>(high: &[f64], low: &[f64], close: &[f
         i += 1;
     }
     // Re-anchor from the ring: the window's flows, oldest (slot `oldest`) first.
-    let mut clean = true;
     let exact = |a: &Csum, b: &Csum| a.is_exact() && b.is_exact();
     if !exact(&pos_sum, &neg_sum) {
         mfi_reanchor(period, &mut clean, &mut pos_sum, &mut neg_sum, &ring_pos, &ring_neg, 0);
@@ -71,13 +93,20 @@ pub fn mfi_pass<S: crate::pass::StateSink>(high: &[f64], low: &[f64], close: &[f
     let mut from = period + 1;
     while from < n {
         let end = states.next_end(from + 1, n).clamp(from + 1, n);
-        running = mfi_span(running, [high, low, close, volume], period, from..end);
+        running = mfi_span::<COMPLETE>(running, [high, low, close, volume], period, from..end);
         states.record(end - 1, n, |out| Slide::append_components(out, [running.pos_sum, running.neg_sum], 0, origin + end - 1));
         from = end;
     }
     if running.clean && running.pos_sum.value().is_finite() && running.neg_sum.value().is_finite() {
         return running.out.finish();
     }
+    mfi_nonfinite(high, low, close, volume, period, origin, states)
+}
+
+#[cold]
+#[inline(never)]
+fn mfi_nonfinite<S: crate::pass::StateSink>(high: &[f64], low: &[f64], close: &[f64], volume: &[f64], period: usize, origin: usize, states: &mut S) -> Vec<f64> {
+    let n = close.len();
     states.restart();
     // A non-finite flow entered: window-local careful path (see `crate::guard`). Flows
     // exist for bars `1..n`; flow `j` is bar `j + 1`'s.
@@ -115,7 +144,7 @@ struct MfiLoop {
 // The publication arena must not share the numerical loop's register frame.
 // Both value-only and capturing calls run this same arithmetic owner.
 #[inline(never)]
-fn mfi_span(running: MfiLoop, [high, low, close, volume]: [&[f64]; 4], period: usize, rows: std::ops::Range<usize>) -> MfiLoop {
+fn mfi_span<const COMPLETE: bool>(running: MfiLoop, [high, low, close, volume]: [&[f64]; 4], period: usize, rows: std::ops::Range<usize>) -> MfiLoop {
     let MfiLoop { mut out, mut ring_pos, mut ring_neg, mut pos_sum, mut neg_sum, mut prev_tp, mut slot, mut clean } = running;
     let exact = |a: &Csum, b: &Csum| a.is_exact() && b.is_exact();
     for i in rows {
@@ -125,7 +154,8 @@ fn mfi_span(running: MfiLoop, [high, low, close, volume]: [&[f64]; 4], period: u
             + unsafe { *low.get_unchecked(i) }
             + unsafe { *close.get_unchecked(i) })
             / 3.0;
-        let [p, ng] = signed_flow(tp, prev_tp, unsafe { *volume.get_unchecked(i) });
+        let volume = unsafe { *volume.get_unchecked(i) };
+        let [p, ng] = signed_flow_with::<COMPLETE>(tp, prev_tp, volume, &mut clean);
         ring_pos[slot] = p; // bar entering
         ring_neg[slot] = ng;
         pos_sum.add(p);
@@ -147,7 +177,8 @@ fn mfi_span(running: MfiLoop, [high, low, close, volume]: [&[f64]; 4], period: u
 #[inline]
 fn mfi_flow(high: &[f64], low: &[f64], close: &[f64], volume: &[f64], j: usize) -> [f64; 2] {
     let (now, prev) = (typical(high, low, close, j + 1), typical(high, low, close, j));
-    signed_flow(now, prev, volume[j + 1])
+    missing::terms(&[high[j], low[j], close[j], high[j + 1], low[j + 1], close[j + 1], volume[j + 1]],
+        signed_flow(now, prev, volume[j + 1]))
 }
 
 /// A bar's money flow `tp·volume`, signed by the typical price `tp`'s direction against
@@ -157,15 +188,26 @@ fn mfi_flow(high: &[f64], low: &[f64], close: &[f64], volume: &[f64], j: usize) 
 /// [`missing::terms`]): a comparison with a missing value would read as "flat".
 #[inline(always)]
 fn signed_flow(tp: f64, prev_tp: f64, volume: f64) -> [f64; 2] {
+    let signed = signed_flow_with::<true>(tp, prev_tp, volume, &mut true);
+    if tp.is_nan() | prev_tp.is_nan() | volume.is_nan() { [f64::NAN; 2] } else { signed }
+}
+
+// Finite original operands make the typical price finite or infinite, never NaN:
+// its additions can overflow, but add no opposite infinite input. Keep that IEEE
+// overflow in the same arithmetic; only unadmitted inputs need the NaN guard.
+#[inline(always)]
+fn signed_flow_with<const COMPLETE: bool>(tp: f64, prev_tp: f64, volume: f64, clean: &mut bool) -> [f64; 2] {
     let flow = tp * volume;
-    let signed = if tp > prev_tp {
+    if tp > prev_tp {
         [flow, 0.0]
     } else if tp < prev_tp {
         [0.0, flow]
     } else {
+        // A moving non-finite flow is already caught by the running sum before
+        // publication. Only this flat branch can hide a missing input behind zero.
+        if !COMPLETE { *clean &= flow.is_finite(); }
         [0.0, 0.0]
-    };
-    missing::terms(&[tp, prev_tp, volume], signed)
+    }
 }
 
 /// MFI from its window's flow sums: `100·pos/(pos+neg)`, 0 when no money flowed (both

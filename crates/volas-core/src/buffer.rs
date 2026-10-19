@@ -105,6 +105,7 @@ pub struct Buffer<T: Element> {
     data: Data<T>,
     /// The memoized NaN fact (`UNKNOWN` / `NO_NAN` / `SOME_NAN`) of a float buffer.
     nan: T::Nan,
+    missing: T::Nan,
 }
 
 // SAFETY: `Borrowed` is only constructed (via `from_foreign`) with a `Send + Sync`
@@ -118,6 +119,7 @@ impl<T: Element> Buffer<T> {
         Buffer {
             data,
             nan: T::Nan::new(nan),
+            missing: T::Nan::new(if nan == IMMUTABLE_UNKNOWN { IMMUTABLE_UNKNOWN } else { UNKNOWN }),
         }
     }
 
@@ -202,10 +204,14 @@ impl<T: Element + Send + Sync + 'static> Buffer<T> {
         Some(Buffer::with(Data::Borrowed { ptr, len, guard: owner }, IMMUTABLE_UNKNOWN))
     }
 
-    /// Preserve the fact from a NaN-free source when copying one selected range.
-    pub(crate) fn from_shared_nan_free_range(owner: Arc<Vec<T>>, range: std::ops::Range<usize>) -> Option<Self> {
+    /// Carry only absence facts into a copied subrange. A present bad value may be
+    /// outside the selected rows, so presence facts remain unknown.
+    pub(crate) fn from_shared_known_range(
+        owner: Arc<Vec<T>>, range: std::ops::Range<usize>, nan_free: bool, all_finite: bool,
+    ) -> Option<Self> {
         let buffer = Self::from_shared_range(owner, range)?;
-        buffer.set_nan_state(NO_NAN);
+        if nan_free || all_finite { buffer.set_nan_state(NO_NAN); }
+        if all_finite { buffer.missing.set(NO_NAN); }
         Some(buffer)
     }
 
@@ -229,6 +235,7 @@ impl<T: Element + Clone> Buffer<T> {
     #[inline]
     pub fn make_mut(&mut self) -> &mut Vec<T> {
         self.set_nan_state(UNKNOWN);
+        self.missing.set(UNKNOWN);
         if self.is_borrowed() {
             let owned = self.as_slice().to_vec();
             self.data = Data::Owned(Arc::new(owned));
@@ -256,10 +263,12 @@ impl<T: Element + Clone> Buffer<T> {
         } else {
             UNKNOWN
         };
-        Buffer::with(
+        let out = Buffer::with(
             Data::Owned(Arc::new(self.as_slice()[start..end].to_vec())),
             nan,
-        )
+        );
+        if self.missing.get() == NO_NAN { out.missing.set(NO_NAN); }
+        out
     }
 }
 
@@ -267,9 +276,15 @@ impl<T: Element + Clone> Buffer<T> {
 pub trait Float: Element + Copy {
     /// Whether this value is NaN.
     fn is_nan_value(self) -> bool;
+    /// Whether this is a missing computation input.
+    fn is_missing_value(self) -> bool;
+    /// The shared non-finite scan.
+    fn scan_missing(values: &[Self]) -> bool;
 }
 
 impl Float for f64 {
+    fn is_missing_value(self) -> bool { crate::missing::is_missing(self) }
+    fn scan_missing(values: &[Self]) -> bool { crate::missing::any_missing(values) }
     #[inline]
     fn is_nan_value(self) -> bool {
         self.is_nan()
@@ -277,6 +292,8 @@ impl Float for f64 {
 }
 
 impl Float for f32 {
+    fn is_missing_value(self) -> bool { crate::missing::is_missing_f32(self) }
+    fn scan_missing(values: &[Self]) -> bool { crate::missing::any_missing_f32(values) }
     #[inline]
     fn is_nan_value(self) -> bool {
         self.is_nan()
@@ -296,6 +313,39 @@ fn scan_nan<T: Float>(x: &[T]) -> bool {
 }
 
 impl<T: Float> Buffer<T> {
+    /// Whether any computation input is non-finite. Remember only Rust-owned bytes.
+    pub fn has_nonfinite(&self) -> bool {
+        let state = self.missing.get();
+        match state {
+            NO_NAN => false,
+            SOME_NAN => true,
+            _ => {
+                let found = T::scan_missing(self.as_slice());
+                if state == IMMUTABLE_UNKNOWN || !self.is_borrowed() {
+                    self.missing.set(if found { SOME_NAN } else { NO_NAN });
+                    // All-finite proves structural NaN absence without another scan.
+                    // A bad input may be infinity alone: learn the separate NaN fact
+                    // only on that cold path, when it was not already known.
+                    if !found {
+                        self.set_nan_state(NO_NAN);
+                    } else if self.known_has_nan().is_none() {
+                        self.set_nan_state(if scan_nan(self.as_slice()) { SOME_NAN } else { NO_NAN });
+                    }
+                }
+                found
+            }
+        }
+    }
+
+    /// The computation input fact without a scan.
+    pub fn known_has_nonfinite(&self) -> Option<bool> {
+        match self.missing.get() {
+            NO_NAN => Some(false),
+            SOME_NAN => Some(true),
+            _ => None,
+        }
+    }
+
     /// Whether any value is NaN. Scans once, then remembers until the values change —
     /// except for immutable borrowed memory, whose fact is conservatively scanned
     /// on every query rather than remembered.
@@ -339,6 +389,7 @@ impl<T: Float> Buffer<T> {
         let state = if scan_nan(&owned) { SOME_NAN } else { NO_NAN };
         self.data = Data::Owned(Arc::new(owned));
         self.set_nan_state(state);
+        self.missing.set(if T::scan_missing(self.as_slice()) { SOME_NAN } else { NO_NAN });
     }
 
     /// Append `other`'s values (copy-on-write), keeping the NaN fact in O(`other`): it
@@ -346,15 +397,18 @@ impl<T: Float> Buffer<T> {
     /// ordered `UNKNOWN < NO_NAN < SOME_NAN`, so that is one `max`.)
     pub fn append(&mut self, other: &[T]) {
         self.own();
+        let missing = self.missing.get().max(if T::scan_missing(other) { SOME_NAN } else { UNKNOWN });
         let added = if scan_nan(other) { SOME_NAN } else { UNKNOWN };
         let state = self.nan_state().max(added);
         self.make_mut().extend_from_slice(other);
         self.set_nan_state(state);
+        self.missing.set(missing);
     }
 
     /// Append `len` copies of `value` (copy-on-write), keeping the NaN fact.
     pub fn append_repeated(&mut self, value: T, len: usize) {
         self.own();
+        let missing = self.missing.get().max(if len > 0 && value.is_missing_value() { SOME_NAN } else { UNKNOWN });
         let added = if len > 0 && value.is_nan_value() {
             SOME_NAN
         } else {
@@ -363,6 +417,7 @@ impl<T: Float> Buffer<T> {
         let state = self.nan_state().max(added);
         self.make_mut().extend(std::iter::repeat_n(value, len));
         self.set_nan_state(state);
+        self.missing.set(missing);
     }
 
     /// Overwrite the value at `i` (copy-on-write), keeping the NaN fact where one
@@ -384,15 +439,20 @@ impl<T: Float> Buffer<T> {
     pub fn scatter(&mut self, positions: &[usize], value: impl Fn(usize) -> T) {
         self.own();
         let before = self.nan_state();
+        let missing_before = self.missing.get();
         let w = self.make_mut();
         // Inspect the old cells before any write: a repeated position may hold a
         // temporary NaN which a later write removes, without touching an old NaN.
         let covered_nan = before == SOME_NAN
             && positions.iter().any(|&p| w[p].is_nan_value());
+        let covered_missing = missing_before == SOME_NAN
+            && positions.iter().any(|&p| w[p].is_missing_value());
         for (k, &p) in positions.iter().enumerate() {
             w[p] = value(k);
         }
+        let left_missing = positions.iter().any(|&p| w[p].is_missing_value());
         let left_nan = positions.iter().any(|&p| w[p].is_nan_value());
+        self.missing.set(if left_missing { SOME_NAN } else if covered_missing { UNKNOWN } else { missing_before });
         self.set_nan_state(if left_nan {
             SOME_NAN
         } else if covered_nan {
@@ -423,7 +483,9 @@ impl<T: Element + Clone> Clone for Buffer<T> {
                 guard: Arc::clone(guard),
             },
         };
-        Buffer::with(data, self.nan_state())
+        let out = Buffer::with(data, self.nan_state());
+        out.missing.set(self.missing.get());
+        out
     }
 }
 
@@ -450,6 +512,73 @@ impl<T: Element> From<Vec<T>> for Buffer<T> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn copied_ranges_preserve_absence_facts_and_forget_presence() {
+        let owner = Arc::new(vec![1.0, f64::INFINITY, 3.0]);
+        let structural = Buffer::from_shared_known_range(Arc::clone(&owner), 0..3, true, false).unwrap();
+        assert_eq!(structural.known_has_nan(), Some(false));
+        assert_eq!(structural.known_has_nonfinite(), None);
+        assert!(structural.has_nonfinite());
+        let mut clean = Buffer::from_shared_known_range(Arc::clone(&owner), 2..3, true, true).unwrap();
+        assert_eq!(clean.known_has_nonfinite(), Some(false));
+        clean.set(0, f64::NEG_INFINITY);
+        assert_eq!(clean.known_has_nonfinite(), Some(true));
+        assert_eq!(owner[2], 3.0);
+        let selected = structural.slice(2, 3);
+        assert_eq!(selected.known_has_nonfinite(), None);
+        assert!(!selected.has_nonfinite());
+        assert!(Buffer::from_shared_known_range(owner, 0..4, false, false).is_none());
+    }
+
+    #[test]
+    fn immutable_and_foreign_ranges_keep_distinct_computation_facts() {
+        let mut foreign = borrowed(vec![1.0, f64::INFINITY]);
+        assert!(foreign.has_nonfinite());
+        assert_eq!(foreign.known_has_nonfinite(), None);
+        assert_eq!(foreign.clone().known_has_nonfinite(), None);
+        foreign.set(1, 2.0);
+        assert!(!foreign.has_nonfinite());
+        assert_eq!(foreign.known_has_nonfinite(), Some(false));
+        let owner = Arc::new(vec![1.0, f64::NEG_INFINITY, 3.0]);
+        let clean = Buffer::from_shared_range(owner.clone(), 2..3).unwrap();
+        assert!(!clean.has_nonfinite());
+        assert_eq!(clean.known_has_nonfinite(), Some(false));
+        let dirty = Buffer::from_shared_range(owner, 0..3).unwrap();
+        assert!(dirty.has_nonfinite());
+        assert_eq!(dirty.known_has_nonfinite(), Some(true));
+        assert_eq!(dirty.slice(2, 3).known_has_nonfinite(), None);
+        assert!(!dirty.has_nan());
+    }
+
+    #[test]
+    fn computation_facts_follow_every_write_and_leave_nan_validity_alone() {
+        let mut b = Buffer::from_vec(vec![1.0, 2.0, 3.0]);
+        assert_eq!(b.known_has_nonfinite(), None);
+        assert!(!b.has_nonfinite());
+        assert_eq!(b.known_has_nonfinite(), Some(false));
+        b.append(&[f64::INFINITY]);
+        assert!(b.has_nonfinite());
+        assert!(!b.has_nan());
+        b.set(3, 4.0);
+        assert_eq!(b.known_has_nonfinite(), None);
+        assert!(!b.has_nonfinite());
+        let clean = b.clone();
+        b.scatter(&[1, 1], |i| if i == 0 { f64::NEG_INFINITY } else { 2.0 });
+        assert_eq!(b.known_has_nonfinite(), Some(false));
+        b.append_repeated(f64::NEG_INFINITY, 2);
+        assert!(b.has_nonfinite());
+        assert_eq!(clean.known_has_nonfinite(), Some(false));
+        assert_eq!(clean.slice(0, 2).known_has_nonfinite(), Some(false));
+        b.make_mut().truncate(4);
+        assert_eq!(b.known_has_nonfinite(), None);
+        assert!(!b.has_nonfinite());
+        let mut f = Buffer::from_vec(vec![1.0f32]);
+        assert!(!f.has_nonfinite());
+        f.set(0, f32::INFINITY);
+        assert!(f.has_nonfinite());
+        assert!(!f.has_nan());
+    }
 
     #[test]
     fn shared_ranges_keep_only_their_values_independent_of_owner_writes() {
@@ -497,7 +626,7 @@ mod tests {
         assert!(!clean.has_nan());
         assert_eq!(missing.clone().known_has_nan(), Some(true));
         assert_eq!(clean.clone().known_has_nan(), Some(false));
-        let known = Buffer::from_shared_nan_free_range(owner, 1..2).unwrap();
+        let known = Buffer::from_shared_known_range(owner, 1..2, true, false).unwrap();
         assert_eq!(known.known_has_nan(), Some(false));
     }
 
@@ -576,7 +705,7 @@ mod tests {
         assert_eq!(c.known_has_nan(), Some(true));
         assert!(c.has_nan()); // remembered
         assert!(borrowed(vec![1.0, NAN]).has_nan());
-        assert!(!Buffer::from_vec(vec![f32::INFINITY]).has_nan()); // an infinity is a value
+        assert!(!Buffer::from_vec(vec![f32::INFINITY]).has_nan()); // structural NaN validity keeps IEEE infinity
         assert!(Buffer::from_vec(vec![f32::NAN]).has_nan());
     }
 

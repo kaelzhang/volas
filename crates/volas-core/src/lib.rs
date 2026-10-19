@@ -12,6 +12,7 @@ pub mod dtype;
 pub mod error;
 pub mod fxhash;
 pub mod index;
+pub mod missing;
 pub mod numeric;
 pub mod series;
 pub mod stats;

@@ -4,16 +4,19 @@
 //! accumulators publish their continuation states from the batch pass; recursive
 //! members carry a `*_final_state` / `*_resume` pair like Group A.
 
+use crate::missing;
 use crate::raw::kernels;
 
 mod resume;
+mod levels;
+pub use levels::*;
 pub use resume::*;
-use resume::{br_terms, dkx_mid, roc_at, swma4_at, vr_volumes, wvad_term};
+use resume::{br_terms, dkx_mid, swma4_at, vr_volumes};
 
 /// Rolling `n`-window sum that skips a leading-NaN prefix — so a series with an undefined
 /// first bar (`tr`, prev-close diffs) sums from its first finite value — via `sma * n`.
 fn rolling_sum(x: &[f64], n: usize, origin: usize) -> Vec<f64> {
-    let mut out = kernels::sma(x, n, origin);
+    let mut out = kernels::sma_internal(x, n, origin);
     for x in &mut out { *x *= n as f64; }
     out
 }
@@ -29,9 +32,9 @@ pub fn vortex(high: &[f64], low: &[f64], close: &[f64], n: usize, plus: bool, or
             if i == 0 {
                 f64::NAN
             } else if plus {
-                (high[i] - low[i - 1]).abs()
+                missing::term(&[high[i], low[i - 1]], (high[i] - low[i - 1]).abs())
             } else {
-                (low[i] - high[i - 1]).abs()
+                missing::term(&[low[i], high[i - 1]], (low[i] - high[i - 1]).abs())
             }
         })
         .collect();
@@ -44,8 +47,8 @@ pub fn vortex(high: &[f64], low: &[f64], close: &[f64], n: usize, plus: bool, or
 /// Source: 通达信 / MBA智库 — 人气意愿指标 (BRAR).
 pub fn brar_ar(open: &[f64], high: &[f64], low: &[f64], n: usize, origin: usize) -> Vec<f64> {
     let len = high.len();
-    let ho: Vec<f64> = (0..len).map(|i| high[i] - open[i]).collect();
-    let ol: Vec<f64> = (0..len).map(|i| open[i] - low[i]).collect();
+    let ho: Vec<f64> = (0..len).map(|i| missing::term(&[high[i], open[i]], high[i] - open[i])).collect();
+    let ol: Vec<f64> = (0..len).map(|i| missing::term(&[open[i], low[i]], open[i] - low[i])).collect();
     let (s_ho, s_ol) = (rolling_sum(&ho, n, origin), rolling_sum(&ol, n, origin));
     (0..len).map(|i| s_ho[i] / s_ol[i] * 100.0).collect()
 }
@@ -75,7 +78,7 @@ pub fn vr_pass<S: crate::pass::StateSink>(close: &[f64], volume: &[f64], n: usiz
         [uv[i], dv[i], pv[i]] = vr_volumes(close, volume, i);
     }
     let (mut a, mut b, mut c) = (states.child(), states.child(), states.child());
-    let (mut suv, mut sdv, mut spv) = (kernels::sma_pass(&uv, n, origin, &mut a), kernels::sma_pass(&dv, n, origin, &mut b), kernels::sma_pass(&pv, n, origin, &mut c));
+    let (mut suv, mut sdv, mut spv) = (kernels::sma_internal_pass(&uv, n, origin, &mut a), kernels::sma_internal_pass(&dv, n, origin, &mut b), kernels::sma_internal_pass(&pv, n, origin, &mut c));
     for values in [&mut suv, &mut sdv, &mut spv] { for x in values { *x *= n as f64; } }
     states.compose(len, &[&a, &b, &c], |_, _| {});
     (0..len)
@@ -91,9 +94,16 @@ pub fn coppock(close: &[f64], w: usize, roc_long: usize, roc_short: usize, origi
 
 /// Batch computation with terminal-state publication.
 pub fn coppock_pass<S: crate::pass::StateSink>(close: &[f64], w: usize, roc_long: usize, roc_short: usize, origin: usize, states: &mut S) -> Vec<f64> {
+    coppock_pass_with(close, w, roc_long, roc_short, origin, false, states)
+}
+
+/// Batch pass using the caller's remembered all-finite input fact.
+#[allow(clippy::too_many_arguments)]
+pub fn coppock_pass_with<S: crate::pass::StateSink>(close: &[f64], w: usize, roc_long: usize, roc_short: usize, origin: usize, complete: bool, states: &mut S) -> Vec<f64> {
     let len = close.len();
-    let sum: Vec<f64> =
-        (0..len).map(|i| roc_at(close, roc_long, i) + roc_at(close, roc_short, i)).collect();
+    let sum = missing::map_terms(len, roc_long.max(roc_short), complete,
+        |i| [close[i], close[i - roc_long], close[i - roc_short]],
+        |_, [c, long, short]| super::momentum::unguarded_roc_value(c, long) + super::momentum::unguarded_roc_value(c, short));
     super::wma_pass(&sum, w, origin, states)
 }
 
@@ -124,11 +134,11 @@ pub fn relative_vigor_pass<S: crate::pass::StateSink>(open: &[f64],
     n: usize,
     origin: usize, states: &mut S) -> Vec<f64> {
     let len = close.len();
-    let co: Vec<f64> = (0..len).map(|i| close[i] - open[i]).collect();
-    let hl: Vec<f64> = (0..len).map(|i| high[i] - low[i]).collect();
+    let co: Vec<f64> = (0..len).map(|i| missing::term(&[close[i], open[i]], close[i] - open[i])).collect();
+    let hl: Vec<f64> = (0..len).map(|i| missing::term(&[high[i], low[i]], high[i] - low[i])).collect();
     let (mut a, mut b) = (states.child(), states.child());
-    let num = kernels::sma_pass(&swma4(&co), n, origin, &mut a);
-    let den = kernels::sma_pass(&swma4(&hl), n, origin, &mut b);
+    let num = kernels::sma_internal_pass(&swma4(&co), n, origin, &mut a);
+    let den = kernels::sma_internal_pass(&swma4(&hl), n, origin, &mut b);
     states.compose(len, &[&a, &b], |_, _| {});
     (0..len).map(|i| num[i] / den[i]).collect()
 }
@@ -207,42 +217,23 @@ pub fn wvad_pass<S: crate::pass::StateSink>(open: &[f64],
     volume: &[f64],
     n: usize,
     origin: usize, states: &mut S) -> Vec<f64> {
-    let w: Vec<f64> = (0..close.len()).map(|i| wvad_term(open, high, low, close, volume, i)).collect();
-    let mut out = kernels::sma_pass(&w, n, origin, states);
+    wvad_pass_with(open, high, low, close, volume, n, origin, false, states)
+}
+
+/// Batch pass using the caller's remembered all-finite input fact.
+#[allow(clippy::too_many_arguments)]
+pub fn wvad_pass_with<S: crate::pass::StateSink>(open: &[f64],
+    high: &[f64],
+    low: &[f64],
+    close: &[f64],
+    volume: &[f64],
+    n: usize,
+    origin: usize, complete: bool, states: &mut S) -> Vec<f64> {
+    let w = missing::map_terms(close.len(), 0, complete, |i| [open[i], high[i], low[i], close[i], volume[i]],
+        |_, [o, h, l, c, v]| super::volume::range_flow_complete(c - o, h, l, v));
+    let mut out = kernels::sma_internal_pass(&w, n, origin, states);
     for x in &mut out { *x *= n as f64; }
     out
-}
-
-/// Which CDP support/resistance line to emit.
-#[derive(Clone, Copy)]
-pub enum CdpLine {
-    Cdp,
-    Ah,
-    Nh,
-    Nl,
-    Al,
-}
-
-/// CDP 逆势操作: from the PRIOR bar, `CDP = (H + L + 2C) / 4`, then `AH = CDP + (H − L)`,
-/// `NH = 2·CDP − L`, `NL = 2·CDP − H`, `AL = CDP − (H − L)` — five intraday levels.
-/// Source: 百度百科 / 维基 — 逆势操作 (CDP).
-pub fn cdp(high: &[f64], low: &[f64], close: &[f64], line: CdpLine) -> Vec<f64> {
-    (0..high.len())
-        .map(|i| {
-            if i == 0 {
-                return f64::NAN;
-            }
-            let (h, l, c) = (high[i - 1], low[i - 1], close[i - 1]);
-            let cdp = (h + l + 2.0 * c) / 4.0;
-            match line {
-                CdpLine::Cdp => cdp,
-                CdpLine::Ah => cdp + (h - l),
-                CdpLine::Nh => 2.0 * cdp - l,
-                CdpLine::Nl => 2.0 * cdp - h,
-                CdpLine::Al => cdp - (h - l),
-            }
-        })
-        .collect()
 }
 
 /// WAD Williams Accumulation/Distribution (威廉多空力度线), cumulative: on an up close
@@ -378,42 +369,6 @@ pub fn asi_resume(
     vec![acc, pc, po]
 }
 
-/// Which standard pivot-point level to emit.
-#[derive(Clone, Copy)]
-pub enum PivotLine {
-    Pp,
-    R1,
-    S1,
-    R2,
-    S2,
-    R3,
-    S3,
-}
-
-/// Standard floor Pivot Points, from the PRIOR bar: `PP = (H + L + C) / 3`; `R1 = 2·PP − L`,
-/// `S1 = 2·PP − H`, `R2 = PP + (H − L)`, `S2 = PP − (H − L)`, `R3 = H + 2·(PP − L)`,
-/// `S3 = L − 2·(H − PP)`. Source: Investopedia / floor-trader standard — Pivot Points.
-pub fn pivot_points(high: &[f64], low: &[f64], close: &[f64], line: PivotLine) -> Vec<f64> {
-    (0..high.len())
-        .map(|i| {
-            if i == 0 {
-                return f64::NAN;
-            }
-            let (h, l, c) = (high[i - 1], low[i - 1], close[i - 1]);
-            let pp = (h + l + c) / 3.0;
-            match line {
-                PivotLine::Pp => pp,
-                PivotLine::R1 => 2.0 * pp - l,
-                PivotLine::S1 => 2.0 * pp - h,
-                PivotLine::R2 => pp + (h - l),
-                PivotLine::S2 => pp - (h - l),
-                PivotLine::R3 => h + 2.0 * (pp - l),
-                PivotLine::S3 => l - 2.0 * (h - pp),
-            }
-        })
-        .collect()
-}
-
 /// Which MIKE support / resistance line to emit.
 #[derive(Clone, Copy)]
 pub enum MikeLine {
@@ -428,24 +383,46 @@ pub enum MikeLine {
 /// MIKE 麦克支撑压力: `TYP = (H+L+C)/3`, `HH`/`LL` = n-day high-of-high / low-of-low.
 /// Resistance WEKR = TYP+(TYP−LL), MIDR = TYP+(HH−LL), STOR = 2·HH−LL; support mirrors them:
 /// WEKS = TYP−(HH−TYP), MIDS = TYP−(HH−LL), STOS = 2·LL−HH. Source: 百度百科 / MBA智库 — 麦克指标.
-pub fn mike(high: &[f64], low: &[f64], close: &[f64], n: usize, line: MikeLine) -> Vec<f64> {
-    let len = high.len();
+pub fn mike(high: &[f64], low: &[f64], close: &[f64], n: usize, line: MikeLine) -> Vec<f64> { mike_with(high, low, close, n, line, false) }
+
+/// MIKE using the caller's all-finite fact (`true` requires finite inputs).
+pub fn mike_with(high: &[f64], low: &[f64], close: &[f64], n: usize, line: MikeLine, complete: bool) -> Vec<f64> {
     let hh = super::hhv(high, n);
     let ll = super::llv(low, n);
-    (0..len)
-        .map(|i| {
-            let typ = (high[i] + low[i] + close[i]) / 3.0;
-            let (hi, lo) = (hh[i], ll[i]);
-            match line {
-                MikeLine::WeakR => typ + (typ - lo),
-                MikeLine::MidR => typ + (hi - lo),
-                MikeLine::StrongR => 2.0 * hi - lo,
-                MikeLine::WeakS => typ - (hi - typ),
-                MikeLine::MidS => typ - (hi - lo),
-                MikeLine::StrongS => 2.0 * lo - hi,
-            }
-        })
-        .collect()
+    match line {
+        MikeLine::WeakR => mike_level(high, low, close, &hh, &ll, complete, |t, h, l| mike_value(t, h, l, MikeLine::WeakR)),
+        MikeLine::MidR => mike_level(high, low, close, &hh, &ll, complete, |t, h, l| mike_value(t, h, l, MikeLine::MidR)),
+        MikeLine::StrongR => (0..high.len()).map(|i| mike_value(0.0, hh[i], ll[i], MikeLine::StrongR)).collect(),
+        MikeLine::WeakS => mike_level(high, low, close, &hh, &ll, complete, |t, h, l| mike_value(t, h, l, MikeLine::WeakS)),
+        MikeLine::MidS => mike_level(high, low, close, &hh, &ll, complete, |t, h, l| mike_value(t, h, l, MikeLine::MidS)),
+        MikeLine::StrongS => (0..high.len()).map(|i| mike_value(0.0, hh[i], ll[i], MikeLine::StrongS)).collect(),
+    }
+}
+
+// Distinct formula closure types keep the selected line static even when LLVM
+// outlines the iterator. Specialize admission once per column, outside its loop.
+#[inline(always)]
+fn mike_level(high: &[f64], low: &[f64], close: &[f64], hh: &[f64], ll: &[f64], complete: bool, value: impl Fn(f64, f64, f64) -> f64) -> Vec<f64> {
+    if complete { mike_rows::<true, _>(high, low, close, hh, ll, value) }
+    else { mike_rows::<false, _>(high, low, close, hh, ll, value) }
+}
+
+#[inline(never)]
+fn mike_rows<const COMPLETE: bool, F: Fn(f64, f64, f64) -> f64>(high: &[f64], low: &[f64], close: &[f64], hh: &[f64], ll: &[f64], value: F) -> Vec<f64> {
+    missing::map_terms(high.len(), 0, COMPLETE, |i| [high[i], low[i], close[i]],
+        |i, [h, l, c]| value((h + l + c) / 3.0, hh[i], ll[i]))
+}
+
+#[inline(always)]
+fn mike_value(typ: f64, hi: f64, lo: f64, line: MikeLine) -> f64 {
+    match line {
+        MikeLine::WeakR => typ + (typ - lo),
+        MikeLine::MidR => typ + (hi - lo),
+        MikeLine::StrongR => 2.0 * hi - lo,
+        MikeLine::WeakS => typ - (hi - typ),
+        MikeLine::MidS => typ - (hi - lo),
+        MikeLine::StrongS => 2.0 * lo - hi,
+    }
 }
 
 /// Keltner Channel band (modern convention): `EMA(close, ema_period) ± mult · ATR(atr_period)`.
@@ -591,6 +568,21 @@ pub fn ichimoku(
     senkou_b: usize,
     line: IchimokuLine,
 ) -> Vec<f64> {
+    ichimoku_with(high, low, close, tenkan, kijun, senkou_b, line, false)
+}
+
+/// Ichimoku with an admitted Chikou copy (`true` requires finite inputs).
+#[allow(clippy::too_many_arguments)]
+pub fn ichimoku_with(
+    high: &[f64],
+    low: &[f64],
+    close: &[f64],
+    tenkan: usize,
+    kijun: usize,
+    senkou_b: usize,
+    line: IchimokuLine,
+    complete: bool,
+) -> Vec<f64> {
     let midpoint = |period: usize| -> Vec<f64> {
         let hh = super::hhv(high, period);
         let ll = super::llv(low, period);
@@ -605,7 +597,7 @@ pub fn ichimoku(
             shift_forward(&raw, kijun)
         }
         IchimokuLine::SenkouB => shift_forward(&midpoint(senkou_b), kijun),
-        IchimokuLine::Chikou => close.to_vec(),
+        IchimokuLine::Chikou => missing::map_terms(close.len(), 0, complete, |i| [close[i]], |_, [c]| c),
     }
 }
 
@@ -646,7 +638,7 @@ pub fn ttm_squeeze_on(
     let sma = super::ma(close, n, origin);
     let sd = super::stddev(close, n, 1.0, origin);
     let tr = super::tr(high, low, close);
-    let atr = kernels::sma(&tr, n, origin); // SMA of TR (skips the leading-NaN tr[0])
+    let atr = kernels::sma_internal(&tr, n, origin); // SMA of TR (skips the leading-NaN tr[0])
     (0..len)
         .map(|i| {
             let bb_u = sma[i] + bb_mult * sd[i];

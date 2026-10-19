@@ -2,7 +2,7 @@
 //! python `rolling` / `expanding` / `ewm` API surface.
 //!
 //! Distinct from [`crate::raw::indicators`] (TA-Lib semantics: a NaN poisons its
-//! window): here `NaN` means *missing* and is skipped, and a row emits a value
+//! window): here NaN and ±inf mean *missing* and is skipped, and a row emits a value
 //! once the window holds at least `min_periods` present values — exactly
 //! pandas's window model. `window == usize::MAX` is an expanding window.
 //!
@@ -37,7 +37,7 @@ fn per_window(
     for i in 0..n {
         buf.clear();
         for &x in &data[win_start(i, window)..=i] {
-            if !x.is_nan() {
+            if !crate::missing::is_missing(x) {
                 buf.push(x);
             }
         }
@@ -74,43 +74,14 @@ pub fn count(
                 if covered < min_periods.max(1) {
                     return f64::NAN;
                 }
-                data[start..=end].iter().filter(|x| !x.is_nan()).count() as f64
+                data[start..=end].iter().filter(|&&x| !crate::missing::is_missing(x)).count() as f64
             })
             .collect()
     })
 }
 
-/// The infinities of the current window: counts of `+inf` and `-inf`.
-#[derive(Default, Clone, Copy)]
-struct Infinities {
-    pos: usize,
-    neg: usize,
-}
-
-impl Infinities {
-    /// Count `x` (an infinity) entering (`entering`) or leaving the window.
-    #[inline(always)]
-    fn count(&mut self, x: f64, entering: bool) {
-        let c = if x > 0.0 { &mut self.pos } else { &mut self.neg };
-        *c = if entering { *c + 1 } else { *c - 1 };
-    }
-
-    /// Their IEEE sum: `0` when there are none, else `+inf`, `-inf`, or NaN for both.
-    #[inline(always)]
-    fn value(&self) -> f64 {
-        match (self.pos > 0, self.neg > 0) {
-            (false, false) => 0.0,
-            (true, false) => f64::INFINITY,
-            (false, true) => f64::NEG_INFINITY,
-            (true, true) => f64::NAN,
-        }
-    }
-}
-
-/// Slide the present values of each window over `data` and `read` every window holding
-/// at least `min_periods` of them (NaN otherwise) — NaN is missing and skipped, ±inf is
-/// a value. `K` exact sums of `terms(x)` over the window's finite values are kept, and
-/// its infinities are counted apart, so an infinity never outlives its window. The
+/// Slide finite present values, skipping NaN and both infinity signs. Read each
+/// window with at least `min_periods` present values, otherwise emit NaN. The
 /// running sums are the exact ones of [`crate::accum`], re-summed whenever one went
 /// inexact, so each window's sums are the correctly rounded sums of its own terms
 /// (`math.fsum`), however long the slide — and depend on the window's values alone,
@@ -119,15 +90,15 @@ impl Infinities {
 /// hold them — after an extreme value (its magnitude far from the rest's), every later
 /// row is added to the expansion and rounded from it, an `O(expansion words)` step with
 /// inline storage for common expansions instead of the compensated add, for the rest of that series.
-/// `read(sums, infinities, count)`.
+/// `read(sums, count)`.
 fn present_sums<const K: usize>(
     data: &[f64],
     window: usize,
     min_periods: usize,
     terms: impl Fn(f64) -> [f64; K],
-    read: impl Fn(&[Csum; K], f64, usize) -> f64,
+    read: impl Fn(&[Csum; K], usize) -> f64,
 ) -> Vec<f64> {
-    present_sums_at(data, window, min_periods, terms, |_, sums, inf, count| read(sums, inf, count))
+    present_sums_at(data, window, min_periods, terms, |_, sums, count| read(sums, count))
 }
 
 /// The same exact slide, with the window's endpoint available to its reader.
@@ -136,34 +107,29 @@ fn present_sums_at<const K: usize>(
     window: usize,
     min_periods: usize,
     terms: impl Fn(f64) -> [f64; K],
-    mut read: impl FnMut(usize, &[Csum; K], f64, usize) -> f64,
+    mut read: impl FnMut(usize, &[Csum; K], usize) -> f64,
 ) -> Vec<f64> {
     let rolling = window != usize::MAX;
     let mut sums = [Csum::default(); K];
     let mut expansion: Option<[Exact; K]> = None;
-    let mut inf = Infinities::default();
     let mut count = 0usize;
     let mut out = Vec::with_capacity(data.len());
     for i in 0..data.len() {
         if rolling && i >= window {
             let x = data[i - window];
-            if !x.is_nan() {
+            if !crate::missing::is_missing(x) {
                 count -= 1;
-                if x.is_finite() {
+                {
                     for (s, t) in sums.iter_mut().zip(terms(x)) {
                         s.sub(t);
                     }
-                } else {
-                    inf.count(x, false);
                 }
             }
         }
         let x = data[i];
-        if !x.is_nan() {
+        if !crate::missing::is_missing(x) {
             count += 1;
-            if !x.is_finite() {
-                inf.count(x, true);
-            } else if let Some(e) = &mut expansion {
+            if let Some(e) = &mut expansion {
                 for (e, t) in e.iter_mut().zip(terms(x)) {
                     e.add(t);
                 }
@@ -175,10 +141,10 @@ fn present_sums_at<const K: usize>(
         }
         if expansion.is_none() && !sums.iter().all(Csum::is_exact) {
             let rows = &data[win_start(i, window)..=i];
-            sums = Csum::of_rows(rows.iter().filter(|x| x.is_finite()).map(|&x| terms(x)));
+            sums = Csum::of_rows(rows.iter().filter(|&&x| !crate::missing::is_missing(x)).map(|&x| terms(x)));
             if !rolling && !sums.iter().all(Csum::is_exact) {
                 let mut e: [Exact; K] = std::array::from_fn(|_| Exact::default());
-                for &x in rows.iter().filter(|x| x.is_finite()) {
+                for &x in rows.iter().filter(|&&x| !crate::missing::is_missing(x)) {
                     for (e, t) in e.iter_mut().zip(terms(x)) {
                         e.add(t);
                     }
@@ -189,24 +155,23 @@ fn present_sums_at<const K: usize>(
         if let Some(e) = &expansion {
             sums = std::array::from_fn(|j| e[j].to_csum());
         }
-        out.push(if count >= min_periods { read(i, &sums, inf.value(), count) } else { f64::NAN });
+        out.push(if count >= min_periods { read(i, &sums, count) } else { f64::NAN });
     }
     out
 }
 
 /// Rolling / expanding sum of the present values (pandas `sum`): the exact sum of the
-/// finite ones, or the IEEE value of the window's infinities.
+/// finite ones; missing inputs are skipped.
 pub fn sum(data: &[f64], window: usize, min_periods: usize) -> Result<Vec<f64>, WindowError> {
     validate_window(window, min_periods)?;
-    Ok(present_sums(data, window, min_periods, |x| [x], |[s], inf, _| if inf != 0.0 { inf } else { s.value() }))
+    Ok(present_sums(data, window, min_periods, |x| [x], |[s], _| s.value()))
 }
 
 /// Rolling / expanding mean of the present values (pandas `mean`): the exact sum over
-/// the count ([`Csum::mean`] — a flat window has its value as mean), or the IEEE value
-/// of the window's infinities.
+/// the count ([`Csum::mean`] — a flat window has its value as mean).
 pub fn mean(data: &[f64], window: usize, min_periods: usize) -> Result<Vec<f64>, WindowError> {
     validate_window(window, min_periods)?;
-    Ok(present_sums(data, window, min_periods, |x| [x], |[s], inf, n| if inf != 0.0 { inf } else { s.mean(n as f64) }))
+    Ok(present_sums(data, window, min_periods, |x| [x], |[s], n| s.mean(n as f64)))
 }
 
 // --- min / max (monotonic deque, O(n)) ---------------------------------------
@@ -218,7 +183,7 @@ fn extremum(data: &[f64], window: usize, min_periods: usize, is_min: bool) -> Ve
     let better = |a: f64, b: f64| if is_min { a <= b } else { a >= b };
     let mut nobs = 0usize;
     for i in 0..n {
-        if window != usize::MAX && i >= window && !data[i - window].is_nan() {
+        if window != usize::MAX && i >= window && !crate::missing::is_missing(data[i - window]) {
             nobs -= 1;
         }
         if let Some(&front) = deque.front() {
@@ -226,7 +191,7 @@ fn extremum(data: &[f64], window: usize, min_periods: usize, is_min: bool) -> Ve
                 deque.pop_front();
             }
         }
-        if !data[i].is_nan() {
+        if !crate::missing::is_missing(data[i]) {
             nobs += 1;
             while let Some(&back) = deque.back() {
                 if better(data[i], data[back]) {
@@ -292,8 +257,8 @@ fn buf_var(b: &[f64], ddof: usize) -> f64 {
 /// alone (no shift by an absolute position: this API is a stateless snapshot). O(n):
 /// one exact sliding pass, no per-window rescan.
 fn present_var(data: &[f64], window: usize, min_periods: usize, ddof: usize, read: impl Fn(f64, usize) -> f64) -> Vec<f64> {
-    present_sums(data, window, min_periods, square_terms, |sums, inf, n| {
-        if inf != 0.0 || n <= ddof {
+    present_sums(data, window, min_periods, square_terms, |sums, n| {
+        if n <= ddof {
             return f64::NAN;
         }
         let nf = n as f64;
@@ -364,8 +329,8 @@ pub fn mode(data: &[f64], window: usize, min_periods: usize) -> Result<Vec<f64>,
 /// Central moments still reduce in the original row order. Missing/non-finite
 /// inputs retain the present-value gather and direct exact mean.
 fn per_moment(data: &[f64], window: usize, min_periods: usize, mut f: impl FnMut(&[f64], f64) -> f64) -> Vec<f64> {
-    if data.iter().all(|x| x.is_finite()) {
-        present_sums_at(data, window, min_periods, |x| [x], |i, sums, _, count| {
+    if !crate::missing::any_missing(data) {
+        present_sums_at(data, window, min_periods, |x| [x], |i, sums, count| {
             f(&data[win_start(i, window)..=i], sums[0].mean(count as f64))
         })
     } else {
@@ -479,14 +444,14 @@ fn per_sorted_window(
     for i in 0..n {
         if window != usize::MAX && i >= window {
             let leaving = data[i - window];
-            if !leaving.is_nan() {
+            if !crate::missing::is_missing(leaving) {
                 // the very value leaving (total order: a `-0.0` is not a `+0.0`)
                 let pos = sorted.partition_point(|v| v.total_cmp(&leaving).is_lt());
                 sorted.remove(pos);
             }
         }
         let x = data[i];
-        if !x.is_nan() {
+        if !crate::missing::is_missing(x) {
             let pos = sorted.partition_point(|v| v.total_cmp(&x).is_lt());
             sorted.insert(pos, x);
         }
@@ -556,7 +521,7 @@ pub fn rank_padded(
     if data_len > data.len() || (data_len == 0 && !data.is_empty()) { return Err(WindowError::Padding); }
     Ok(per_sorted_window(data, window, min_periods, |s, i| {
         let x = data[i.min(data_len.saturating_sub(1))];
-        if x.is_nan() {
+        if crate::missing::is_missing(x) {
             return f64::NAN;
         }
         let below = s.partition_point(|&v| v < x);
@@ -601,7 +566,7 @@ pub fn nunique(data: &[f64], window: usize, min_periods: usize) -> Result<Vec<f6
         for i in 0..n {
             if window != usize::MAX && i >= window {
                 let leaving = data[i - window];
-                if !leaving.is_nan() {
+                if !crate::missing::is_missing(leaving) {
                     nobs -= 1;
                     let k = value_key(leaving);
                     let c = counts.get_mut(&k).expect("leaving value was inserted");
@@ -612,7 +577,7 @@ pub fn nunique(data: &[f64], window: usize, min_periods: usize) -> Result<Vec<f6
                 }
             }
             let x = data[i];
-            if !x.is_nan() {
+            if !crate::missing::is_missing(x) {
                 nobs += 1;
                 *counts.entry(value_key(x)).or_insert(0) += 1;
             }
@@ -671,7 +636,7 @@ fn pairwise(
         by.clear();
         for k in win_start(i, window)..=i {
             // pandas pairwise rule: a row counts only when BOTH sides are present
-            if !x[k].is_nan() && !y[k].is_nan() {
+            if !crate::missing::is_missing(x[k]) && !crate::missing::is_missing(y[k]) {
                 bx.push(x[k]);
                 by.push(y[k]);
             }
@@ -752,7 +717,7 @@ pub fn ewm_mean(
         let mut nobs = 0usize;
         data.iter()
             .map(|&x| {
-                let is_obs = x.is_finite();
+                let is_obs = !crate::missing::is_missing(x);
                 nobs += is_obs as usize;
                 if !avg.is_nan() {
                     if is_obs || !ignore_na {
@@ -794,7 +759,7 @@ pub fn ewm_sum(data: &[f64], alpha: f64, ignore_na: bool, min_periods: usize) ->
         let mut nobs = 0usize;
         data.iter()
             .map(|&x| {
-                let is_obs = x.is_finite();
+                let is_obs = !crate::missing::is_missing(x);
                 nobs += is_obs as usize;
                 if !s.is_nan() {
                     if is_obs || !ignore_na {
@@ -840,7 +805,7 @@ pub fn ewm_cov(
         x.iter()
             .zip(y)
             .map(|(&xi, &yi)| {
-                let is_obs = xi.is_finite() && yi.is_finite();
+                let is_obs = !crate::missing::is_missing(xi) && !crate::missing::is_missing(yi);
                 nobs += is_obs as usize;
                 if !mean_x.is_nan() {
                     if is_obs || !ignore_na {
@@ -925,7 +890,7 @@ pub fn ewm_corr(
         let n = x.len();
         let (mut xp, mut yp) = (vec![f64::NAN; n], vec![f64::NAN; n]);
         for i in 0..n {
-            if x[i].is_finite() && y[i].is_finite() {
+            if !crate::missing::is_missing(x[i]) && !crate::missing::is_missing(y[i]) {
                 xp[i] = x[i];
                 yp[i] = y[i];
             }

@@ -2,8 +2,9 @@
 
 Wilder's sums are `s − s/p + term` (`ta_PLUS_DM.c`, `ta_DX.c`, `ta_ADX.c`), ±DI is
 `100·(dm/tr)`, DX is `100·(|−DI − +DI| / (−DI + +DI))` and the ADX average
-`((adx·(p−1)) + dx) / p` — so an infinite movement poisons every later sum into NaN
-exactly as TA-Lib does, and finite values agree to the last bit. TA-Lib's zero guards
+`((adx·(p−1)) + dx) / p` — finite inputs agree to the last bit. Non-finite input
+bars are skipped before the recurrence; overflow of its own arithmetic keeps IEEE.
+TA-Lib's zero guards
 (`TA_IS_ZERO`, |x| < 1e-14) hold too: ±DI is 0 on a ~0 true-range sum; DX keeps its
 previous value on a ~0 true-range sum or a ~0 DI sum (0 on its first row), and ADX leaves
 its average untouched there (adding nothing to its seed sum). ±DM / ±DI / DX contain no
@@ -189,15 +190,17 @@ def test_resume_paths_are_talib_bit_for_bit(name):
 
 
 @pytest.mark.parametrize('name', FAMILY)
-def test_an_infinite_movement_poisons_the_sums_like_talib(name):
-    # TA-Lib's `s − s/p` turns an infinite sum into NaN for good; a reassociated
-    # `s·(1 − 1/p) + term` would keep it infinite
+def test_an_infinite_input_is_skipped_and_recursion_continues(name):
+    # Non-finite input bars are skipped before the TA-Lib-ordered arithmetic.
+    # Delete then reinsert the missing rows into the independent finite oracle.
     p, n = 5, 120
     h, l, c = _ohlc(n, 11)
     h[40] = np.inf
     l[70] = -np.inf
-    want = _oracle(name, h, l, c, p)
-    assert np.isnan(want[80:]).all()
+    keep = np.isfinite(h) & np.isfinite(l) & np.isfinite(c)
+    want = np.full(n, np.nan)
+    want[keep] = _oracle(name, h[keep], l[keep], c[keep], p)
+    assert np.isfinite(want[80:]).all()
     _assert_bits(_frame(h, l, c).exec(f'{name}:{p}'), want, f'{name}:{p} full')
     live = _frame(h[:30], l[:30], c[:30])
     live[f'{name}:{p}']

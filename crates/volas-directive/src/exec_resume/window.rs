@@ -145,24 +145,23 @@ pub(crate) fn step(
         // a formula of its own row (and a fixed prior one)
         ("avgprice", _) => {
             let (o, h, l, c) = ohlc()?;
-            Some((o[row] + h[row] + l[row] + c[row]) / 4.0)
+            Some(ind::avgprice_value(o[row], h[row], l[row], c[row]))
         }
         ("medprice", _) => {
             let (h, l) = hl()?;
-            Some((h[row] + l[row]) / 2.0)
+            Some(ind::medprice_value(h[row], l[row]))
         }
         ("bop", _) => {
             let (o, h, l, c) = ohlc()?;
-            let range = h[row] - l[row];
-            Some(if range < 1e-14 { 0.0 } else { (c[row] - o[row]) / range })
+            Some(ind::bop_value(o[row], h[row], l[row], c[row]))
         }
         ("typprice", _) => {
             let (h, l, c) = hlc()?;
-            Some((h[row] + l[row] + c[row]) / 3.0)
+            Some(ind::typprice_value(h[row], l[row], c[row]))
         }
         ("wclprice", _) => {
             let (h, l, c) = hlc()?;
-            Some((h[row] + l[row] + 2.0 * c[row]) / 4.0)
+            Some(ind::wclprice_value(h[row], l[row], c[row]))
         }
         ("tr", _) => {
             let (h, l, c) = hlc()?;
@@ -242,7 +241,8 @@ pub(crate) fn step(
         ("stoch", Some("k" | "d")) | ("stochf", Some("d")) => {
             let (h, l, c) = hlc()?;
             let (stages, k) = stoch_stages(name, sub, args);
-            ind::stoch_step(&h, &l, &c, p(0), &stages[..k], row, prev, next)
+            let step = if ops.all_finite() { ind::stoch_step_complete } else { ind::stoch_step };
+            step(&h, &l, &c, p(0), &stages[..k], row, prev, next)
         }
         ("apo" | "ppo" | "bias" | "dma" | "macdext" | "mavp", _) => {
             composite_step(ops, name, sub, args, prev, row, next)

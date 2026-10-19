@@ -2,6 +2,24 @@
 #[path = "support/allocation.rs"]
 mod allocation;
 use volas_core::{Column, DType};
+
+#[test]
+fn c_data_float_export_keeps_values_and_owner() {
+    for dtype in [DType::F64, DType::F32] {
+        for values in [vec![-0., f64::INFINITY, f64::NEG_INFINITY], vec![1., f64::NAN, 3.]] {
+            let expected = Column::f64(values.clone()).cast(dtype).unwrap();
+            let col = Column::f64(values).cast(dtype).unwrap();
+            let (array, schema) = volas_arrow::column_to_c_data(&col).unwrap();
+            drop(col);
+            // SAFETY: the fresh C-Data pair owns its buffers even after the source drops.
+            let back = unsafe { volas_arrow::column_from_c_data(array, &schema) }.unwrap();
+            assert!(back.equals(&expected));
+            assert_eq!(back.get_f64(0).to_bits(), expected.get_f64(0).to_bits());
+            assert_eq!(back.has_nan(), expected.has_nan());
+        }
+    }
+}
+
 #[test]
 fn dense_float_export_does_not_allocate_a_bitmap() {
     for dtype in [DType::F64, DType::F32] {
@@ -11,6 +29,13 @@ fn dense_float_export_does_not_allocate_a_bitmap() {
         assert_eq!(array.null_count(), 0);
         assert!(array.nulls().is_none());
         assert!(bytes < 1024, "{dtype}: {bytes} bytes");
+        let (direct, calls, bytes) = allocation::measure(|| volas_arrow::column_to_c_data(&c));
+        let (indirect, old_calls, old_bytes) = allocation::measure(|| {
+            arrow_array::ffi::to_ffi(&volas_arrow::column_to_arrow(&c).to_data())
+        });
+        assert!(direct.is_ok() && indirect.is_ok());
+        assert_eq!(calls + 1, old_calls);
+        assert!(bytes < old_bytes);
     }
 }
 

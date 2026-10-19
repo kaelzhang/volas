@@ -16,9 +16,9 @@ fn true_range_keeps_the_initial_nan_and_zero_sign() {
         same(&tr, &[f64::NAN, f64::NAN, 2.]);
     }
     same(&raw::tr(&[0., -0.], &[0., 0.], &[0., 0.]), &[f64::NAN, -0.]);
-    // A NaN in a later gap does not replace the initial infinite high-low range.
+    // A missing input blanks every true-range term that reads it.
     same(&raw::tr(&[3., f64::INFINITY], &[1., 1.], &[f64::INFINITY, 2.]),
-         &[f64::NAN, f64::INFINITY]);
+         &[f64::NAN, f64::NAN]);
 }
 
 #[test]
@@ -73,19 +73,20 @@ fn atr_and_natr_captures_and_both_resumes_match_full_at_every_split() {
 }
 
 #[test]
-fn smma_one_preserves_input_and_resumes_after_infinity() {
+fn smma_one_skips_missing_inputs_and_resumes() {
     let x = [-0., f64::INFINITY, 2., f64::NAN, f64::NEG_INFINITY, 3., -0.];
-    same(&ind::smma(&x, 1), &x);
+    let want = x.map(|v| if v.is_finite() { v } else { f64::NAN });
+    same(&ind::smma(&x, 1), &want);
     for from in 1..x.len() {
         let state = ind::smma_final_state(&x[..from], 1).unwrap();
         let mut tail = Vec::new();
         let end = ind::smma_resume(&x, 1, from, &state, &mut tail);
-        same(&tail, &x[from..]);
+        same(&tail, &want[from..]);
         same(&end, &[-0.]);
         let mut live = state;
         for row in from..x.len() {
             let mut next = [0.];
-            same(&[ind::smma_resume_one(&x, 1, row, &live, &mut next).unwrap()], &x[row..=row]);
+            same(&[ind::smma_resume_one(&x, 1, row, &live, &mut next).unwrap()], &want[row..=row]);
             live.copy_from_slice(&next);
         }
         same(&live, &end);

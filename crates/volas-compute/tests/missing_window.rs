@@ -131,8 +131,10 @@ fn the_true_range_term_is_missing_when_an_input_it_reads_is() {
     assert_eq!(ind::tr_at(&h, &l, &c, 1), 2.0); // reads the prior close, not its own
     assert!(ind::tr_at(&h, &l, &c, 2).is_nan());
     assert!(same(&ind::tr(&h, &l, &c), &[NAN, 2.0, NAN]));
-    // an infinity is a value
-    assert_eq!(ind::tr_at(&[0.0, f64::INFINITY], &[0.0, 0.0], &[0.0, 0.0], 1), f64::INFINITY);
+    // Either infinity is a missing computation input.
+    for bad in [f64::INFINITY, f64::NEG_INFINITY] {
+        assert!(ind::tr_at(&[0.0, bad], &[0.0, 0.0], &[0.0, 0.0], 1).is_nan());
+    }
 }
 
 #[test]

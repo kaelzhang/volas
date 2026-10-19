@@ -18,7 +18,7 @@ use crate::raw::smoothing;
 
 mod sma;
 pub use sma::{sma, sma_pass};
-pub(crate) use sma::{sma_row, sma_step, SMA_STATE};
+pub(crate) use sma::{sma_row, sma_step, sma_internal, sma_internal_pass, sma_internal_step, SMA_STATE};
 
 /// The seed of an SMA-seeded smoother over `data` (TA-Lib's EMA / Wilder shape): the row
 /// of its `period`-th present (non-NaN) value and the mean of the first `period` present
@@ -486,7 +486,7 @@ pub(crate) fn mean_std_row(
     let k = term(shift_row(i, slide.pos(), period));
     match slide.row_shifted(Order::AddDrop, period, i, |j| {
         let x = term(j);
-        (dispersion::shifted_terms(x, k), x.is_finite())
+        (dispersion::shifted_terms(x, k), !crate::missing::is_missing(x))
     }) {
         Window::Partial => (f64::NAN, f64::NAN),
         Window::Sums(sums) => dispersion::mean_std_of_sums(&sums, k, p, denom),
@@ -503,7 +503,7 @@ pub fn diff(data: &[f64]) -> Vec<f64> {
     let n = data.len();
     let mut result = vec![f64::NAN; n];
     for i in 1..n {
-        if !data[i].is_nan() && !data[i - 1].is_nan() {
+        if !crate::missing::is_missing(data[i]) && !crate::missing::is_missing(data[i - 1]) {
             result[i] = data[i] - data[i - 1];
         }
     }

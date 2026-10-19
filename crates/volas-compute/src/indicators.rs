@@ -6,7 +6,7 @@
 //! computation, its carried-state capture (`*_final_state` / `*_state`), a resume over
 //! new rows (`*_resume`) or a single-row resume (`*_resume_one`) — runs the raw function
 //! on the complete rows of its inputs (see [`crate::missing`]): a row where any input is
-//! NaN outputs NaN, and the recursion continues from the last complete row as if that
+//! non-finite outputs NaN, and the recursion continues from the last complete row as if that
 //! row did not exist. So a carried state describes the last complete row; a resume's
 //! `state` is the state as of the last complete row before its first new row; and a
 //! missing row a single-row resume is asked for is NaN — its state does not advance

@@ -11,7 +11,7 @@ pub(super) fn recursive_pass(df: &volas_core::DataFrame, cmd: &BoundCommand, mar
     super::initial_state::state_of(&ops, cmd.name, cmd.sub, cmd.args);
     if ops.failed() { return None; }
     let reads: Vec<_> = ops.reads().collect();
-    let inputs: Vec<_> = reads.iter().map(|(_, r)| Input::known(r.view(), r.has_nan())).collect();
+    let inputs: Vec<_> = reads.iter().map(|(_, r)| Input::known(r.view(), r.has_nonfinite())).collect();
     let rows = CompleteRows::of(&inputs);
     let mut views: Vec<Option<Cow<'_, [f64]>>> = vec![None; 8];
     for (slot, r) in &reads { views[*slot] = Some(rows.gather(r.view())); }
@@ -22,7 +22,7 @@ pub(super) fn recursive_pass(df: &volas_core::DataFrame, cmd: &BoundCommand, mar
     let pass = compute(&complete, cmd, &counts)?;
     let encoder = super::state::FrameEncoder::new(&ops, cmd, true, Some(&rows)).with_kernel(&pass.after);
     let n = df.height();
-    let before_kernel = if reads.iter().any(|(_, r)| r.view()[n - 1].is_nan()) { &pass.after } else { &pass.before };
+    let before_kernel = if reads.iter().any(|(_, r)| volas_compute::missing::is_missing(r.view()[n - 1])) { &pass.after } else { &pass.before };
     let after = encoder.capture(n, &pass.after)?;
     let before = encoder.capture(n - 1, before_kernel)?;
     let mut points = super::state::FramedPoints::with_capacity(marks.len(), after.len());
@@ -133,7 +133,7 @@ pub(super) fn compute(ops: &Operands, cmd: &BoundCommand, marks: &[usize]) -> Op
             let l = ops.f64(1, "low").ok()?;
             let c = ops.f64(2, "close").ok()?;
             let v = ops.f64(3, "volume").ok()?;
-            KernelPass::run_marked(marks, |s| ind::mfi_pass(&h, &l, &c, &v, p(0), origin, s))
+            KernelPass::run_marked(marks, |s| ind::mfi_pass_with(&h, &l, &c, &v, p(0), origin, ops.clean(), s))
         }
         ("accbands", Some(band)) => {
             let h = ops.f64(0, "high").ok()?;
@@ -147,8 +147,8 @@ pub(super) fn compute(ops: &Operands, cmd: &BoundCommand, marks: &[usize]) -> Op
                 "hma" => ind::hma_pass(&x, p(0), origin, s),
                 "bbi" => ind::bbi_pass(&x, p(0), p(1), p(2), p(3), origin, s),
                 "dpo" => ind::dpo_pass(&x, p(0), origin, s),
-                "kst" => ind::kst_pass(&x, origin, s),
-                "coppock" => ind::coppock_pass(&x, p(0), p(1), p(2), origin, s),
+                "kst" => ind::kst_pass_with(&x, origin, ops.clean(), s),
+                "coppock" => ind::coppock_pass_with(&x, p(0), p(1), p(2), origin, ops.clean(), s),
                 _ => ind::cog_pass(&x, p(0), origin, s),
             })
         }
@@ -170,7 +170,7 @@ pub(super) fn compute(ops: &Operands, cmd: &BoundCommand, marks: &[usize]) -> Op
             let h = ops.f64(0, "high").ok()?;
             let l = ops.f64(1, "low").ok()?;
             let v = ops.f64(2, "volume").ok()?;
-            KernelPass::run_marked(marks, |s| ind::emv_pass(&h, &l, &v, p(0), origin, s))
+            KernelPass::run_marked(marks, |s| ind::emv_pass_with(&h, &l, &v, p(0), origin, ops.clean(), s))
         }
         ("cmf" | "ultosc", _) => {
             let h = ops.f64(0, "high").ok()?;
@@ -180,7 +180,7 @@ pub(super) fn compute(ops: &Operands, cmd: &BoundCommand, marks: &[usize]) -> Op
                 KernelPass::run_marked(marks, |s| ind::ultosc_pass(&h, &l, &c, p(0), p(1), p(2), origin, s))
             } else {
                 let v = ops.f64(3, "volume").ok()?;
-                KernelPass::run_marked(marks, |s| ind::cmf_pass(&h, &l, &c, &v, p(0), origin, s))
+                KernelPass::run_marked(marks, |s| ind::cmf_pass_with(&h, &l, &c, &v, p(0), origin, ops.clean(), s))
             }
         }
         ("relative_vigor" | "dkx" | "wvad", sub) => {
@@ -190,7 +190,7 @@ pub(super) fn compute(ops: &Operands, cmd: &BoundCommand, marks: &[usize]) -> Op
             let c = ops.f64(3, "close").ok()?;
             if cmd.name == "wvad" {
                 let v = ops.f64(4, "volume").ok()?;
-                KernelPass::run_marked(marks, |s| ind::wvad_pass(&o, &h, &l, &c, &v, p(0), origin, s))
+                KernelPass::run_marked(marks, |s| ind::wvad_pass_with(&o, &h, &l, &c, &v, p(0), origin, ops.clean(), s))
             } else {
                 KernelPass::run_marked(marks, |s| match (cmd.name, sub) {
                     ("relative_vigor", None) => ind::relative_vigor_pass(&o, &h, &l, &c, p(0), origin, s),

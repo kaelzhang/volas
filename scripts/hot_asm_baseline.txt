@@ -5,3 +5,10 @@ fold_forming_row max 119
 combine_at max 495
 rolling_max max 306
 rolling_min max 306
+# SIMD input scan: whole main back-edge loop, including the length check, per 32 rows.
+# Old NaN scan: 12 / 8 = 1.5 instructions/row. New scan must be <= 1.5/row:
+# 32 rows * 12 / 8 = 48 instructions (reviewed loop currently 45 / 32 = 1.40625).
+any_missing loop32 48
+# Old f32 NaN scan: whole loop 10 / 8 = 1.25 instructions/row.
+# Native f32 scan: 25 / 32 = 0.78125; upper bound 32 * 10 / 8 = 40.
+any_missing_f32 loop32 40

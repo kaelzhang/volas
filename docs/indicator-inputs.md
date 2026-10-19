@@ -1,7 +1,7 @@
 # Missing values and exact window sums
 
 How every built-in indicator (see [INDICATORS.md](https://github.com/kaelzhang/volas/blob/main/INDICATORS.md))
-treats its input data: what a missing (NaN) or infinite input does to the outputs, how
+treats its input data: what a missing (NaN or infinite) input does to the outputs, how
 sliding sums stay exact over any history, and how variances and correlations are taken.
 These rules hold on every path that computes an indicator: a full computation, a resume
 from carried state, a live append, a `time_frame` frame's forming bar and a bounded
@@ -9,18 +9,16 @@ from carried state, a live append, a `time_frame` frame's forming bar and a boun
 
 ## Missing and non-finite inputs
 
-A missing row (NaN) or an infinite one affects only the outputs whose definition reads
-it:
+NaN and both infinity signs are missing computation inputs. A missing row affects
+only the outputs whose definition reads it:
 
 - An indicator over a **finite window** (a moving average, a rolling sum / variance /
-  regression, an oscillator built from windowed sums, …) gives, for a window holding
-  a bad row, the value its formula takes on that window — NaN when the window holds a
-  NaN, the mathematical result when it holds an infinity (`±inf` for a sum or mean,
-  NaN for a variance). Once that row has left the window, every output is exactly
+  regression, an oscillator built from windowed sums, …) outputs NaN for a window
+  holding a missing row. Once that row has left the window, every output is exactly
   what clean data gives. This holds for every finite-window reduction, not only sums:
   a highest / lowest value and its position (`hhv`, `llv`, `donchian`, `midpoint`,
   `maxindex`, `aroon`, `willr`, `rsv`, `stoch`, `mike`, `ichimoku`, …) and a count
-  (`psy`) are NaN while their window holds a NaN — they never step over it. A per-row
+  (`psy`) are NaN while their window holds a missing input — they never step over it. A per-row
   term that reads a missing input is missing too, whatever its formula would make of
   it: a true range (`tr`, and so `chop`, `vortex`, `ultosc`), a signed money flow
   (`mfi`), an up / down split (`vr`, `psy`), a clamped difference (`brar.br`), a rate
@@ -43,30 +41,40 @@ it:
   TRIX / MACD —, Wilder smoothing — RSI / ATR / ADX / CMO —, cumulative lines such as
   OBV / AD / PVT / NVI / PVI / WAD / ASI, KAMA, SAR, Supertrend, Keltner, TSI, KDJ,
   Connors RSI, the Hilbert transform and MAMA, and any command whose MA-type argument
-  selects a recursive average) skips a missing row: a row where **any** of its inputs is NaN
+  selects a recursive average) skips a missing row: a row where **any** of its inputs is non-finite
   outputs NaN, and the recursion continues from the last complete row as if that row
   did not exist. Its output equals the indicator run on the series with those rows
   deleted, NaN put back at their positions. The live paths follow the same rule — an
   append, the forming bar of a `time_frame` frame and a period rollover all leave the
-  carried state at the last complete row when a new bar is missing. An infinity is a
-  value, not a missing row. This diverges from TA-Lib, which carries a NaN into every
+  carried state at the last complete row when a new bar is missing.
+  This diverges from TA-Lib, which carries a NaN into every
   later output of a recursive indicator.
+
+The pandas-style `rolling` / `expanding` / `ewm` APIs skip non-finite inputs and
+count finite observations toward `min_periods`. Element-wise column arithmetic and
+comparisons keep IEEE behavior (`close * 2` can remain infinite); the separate
+[cumulation aggregation rule](cumulation.md#cumulation-and-datetimeindex) is unchanged.
+
+The missing-input rule applies at computation boundaries. Arithmetic terms produced
+inside one indicator keep IEEE behavior: for example, Mass Index can form an infinite
+EMA ratio from finite subnormal ranges when its denominator underflows to zero. Its
+rolling ratio sum publishes that infinity and recovers when it leaves the window;
+batch, captured-state, and single-row continuation use the same exact slide. An output
+passed as an explicit input to another indicator or moving-average stage follows the
+missing-input rule again.
 
 ## True range and period-one smoothing
 
 True range follows [TA-Lib's comparison order](https://github.com/TA-Lib/ta-lib/blob/v0.6.4/src/ta_func/ta_TRANGE.c):
 start with `high − low`, compare `abs(previous_close − high)`, then compare
 `abs(previous_close − low)`, replacing the range only on a strictly greater value.
-In particular, `high == low == +inf` (or both `−inf`) produces NaN; a later comparison
-cannot replace it with an infinity. A NaN produced by a later gap does not replace
-the initial range, and ties keep its zero sign. A missing input still makes its
-whole term missing under the input rule above.
+Ties keep the initial range's zero sign. A non-finite input makes the whole term
+missing under the input rule above, before a comparison can produce a value.
 
 ATR seeds from the first `period` true ranges after the first complete price bar.
-A NaN **computed** from infinite prices counts in this seed and propagates through
-the smoothing; it does not postpone the seed. At period 1 there is no smoothing:
-`atr:1` is the current true range and `smma:1` is the current input, including after
-an infinity or an arithmetic NaN. NATR uses this same ATR; its documented period-1
+At period 1 there is no smoothing: `atr:1` is the current true range and `smma:1`
+is the current input on complete rows; a non-finite price row is skipped as above.
+NATR uses this same ATR; its documented period-1
 normalization remains `TR/close·100`. The period-1 directional sums likewise use
 the current movement; a direction with no movement has DI zero without dividing by
 TR, including when that TR is NaN (volas keeps its documented ×100 DI scale).
@@ -178,4 +186,3 @@ MFI returns `0` whenever the window's total flow is below `1.0`, an absolute thr
 price × volume units, so its result changes with the volume's unit (a feed quoting
 volume in thousands, or a low-priced instrument, reads `0`); volas's MFI is the same
 for the same prices whatever the volume's scale.
-

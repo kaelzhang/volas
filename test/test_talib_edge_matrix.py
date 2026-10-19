@@ -6,7 +6,7 @@ The oracle is TA-Lib itself, applied under volas's documented missing-value rule
 
 * a recursive command skips a missing row and continues as if the bar did not exist,
   so its oracle is TA-Lib over the complete rows, scattered back (NaN on the missing
-  rows); an infinity is a value, so TA-Lib reads it as given;
+  rows); NaN and both infinity signs are missing;
 * a finite-window command's value depends on its own window only, so its oracle is
   TA-Lib over exactly that window (NaN when the window holds a missing value).
 
@@ -118,7 +118,7 @@ def _oracle(directive, data):
     lookback = volas.directive_lookback(directive)
     out = np.full(N, np.nan)
     if recursive:
-        keep = ~np.any([np.isnan(x) for x in cols], axis=0)
+        keep = np.all([np.isfinite(x) for x in cols], axis=0)
         rows = np.flatnonzero(keep)
         if len(rows):
             got = np.asarray(fn(*[x[keep] for x in cols]), float)
@@ -133,7 +133,8 @@ def _oracle(directive, data):
             for k, name in enumerate(inputs):
                 if name in (H, L):
                     window[k][0] = data[C][i - lookback]
-        out[i] = np.asarray(fn(*window), float)[-1]
+        if all(np.isfinite(x).all() for x in window):
+            out[i] = np.asarray(fn(*window), float)[-1]
     return out
 
 

@@ -11,7 +11,7 @@ use crate::raw::kernels::{self, SMA_STATE};
 /// The `p`-bar rate of change of `close` at `i` (NaN before `p` bars exist).
 #[inline]
 pub(super) fn roc_at(close: &[f64], p: usize, i: usize) -> f64 {
-    if i >= p { (close[i] / close[i - p] - 1.0) * 100.0 } else { f64::NAN }
+    super::super::momentum::unguarded_roc::<false>(close, p, i)
 }
 
 /// The 4-bar symmetric weighted average of `x` at `i`, weights `[1, 2, 2, 1] / 6`
@@ -31,7 +31,8 @@ pub(super) fn dkx_mid(open: &[f64], high: &[f64], low: &[f64], close: &[f64], i:
 /// ([`super::super::volume::range_flow`]), so a bar without range carries no flow.
 #[inline]
 pub(super) fn wvad_term(open: &[f64], high: &[f64], low: &[f64], close: &[f64], volume: &[f64], i: usize) -> f64 {
-    super::super::volume::range_flow(close[i] - open[i], high[i], low[i], volume[i])
+    missing::term(&[open[i], high[i], low[i], close[i], volume[i]],
+        super::super::volume::range_flow(close[i] - open[i], high[i], low[i], volume[i]))
 }
 
 /// VR's per-bar `(up, down, flat)` volumes at `i` (NaN at the first bar). They read the
@@ -69,7 +70,7 @@ pub(super) fn br_terms(high: &[f64], low: &[f64], close: &[f64], i: usize) -> [f
 /// One row of the `n`-bar rolling sum (`SMA · n`) of `term`, from `state` into `next`.
 #[inline]
 fn rolling_sum_row(n: usize, row: usize, term: impl Fn(usize) -> f64, state: &[f64], next: &mut [f64]) -> Option<f64> {
-    Some(kernels::sma_step(n, row, term, state, next)? * n as f64)
+    Some(kernels::sma_internal_step(n, row, term, state, next)? * n as f64)
 }
 
 /// [`super::coppock`]'s state after the rows of `close`: its WMA's.
@@ -143,12 +144,12 @@ pub fn relative_vigor_step(
     if row >= close.len() || state.len() != rvi_state_len(signal) || next.len() != state.len() {
         return None;
     }
-    let co = |j: usize| close[j] - open[j];
-    let hl = |j: usize| high[j] - low[j];
+    let co = |j: usize| missing::term(&[close[j], open[j]], close[j] - open[j]);
+    let hl = |j: usize| missing::term(&[high[j], low[j]], high[j] - low[j]);
     let (n_num, rest) = next.split_at_mut(S);
     let (n_den, n_ring) = rest.split_at_mut(S);
-    let num = kernels::sma_step(n, row, |j| swma4_at(co, j), &state[..S], n_num)?;
-    let den = kernels::sma_step(n, row, |j| swma4_at(hl, j), &state[S..2 * S], n_den)?;
+    let num = kernels::sma_internal_step(n, row, |j| swma4_at(co, j), &state[..S], n_num)?;
+    let den = kernels::sma_internal_step(n, row, |j| swma4_at(hl, j), &state[S..2 * S], n_den)?;
     let rvi = num / den;
     if !signal {
         return Some(rvi);

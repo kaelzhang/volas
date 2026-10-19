@@ -97,8 +97,9 @@ pub fn adosc_final_state(
         return None;
     }
     let mut a = Adosc::seed(high, low, close, volume);
+    let weights = adosc_weights(fast, slow);
     for i in 1..close.len() {
-        a.step(high, low, close, volume, i, fast, slow);
+        a.step(high, low, close, volume, i, weights);
     }
     Some(a.state())
 }
@@ -179,9 +180,10 @@ pub fn adosc_resume(
     out: &mut Vec<f64>,
 ) -> Vec<f64> {
     let mut a = Adosc { ad_line: state[0], fast_ema: state[1], slow_ema: state[2] };
+    let weights = adosc_weights(fast, slow);
     out.reserve(close.len().saturating_sub(from));
     out.extend((from..close.len()).map(|i| {
-        a.step(high, low, close, volume, i, fast, slow);
+        a.step(high, low, close, volume, i, weights);
         a.value(i, fast, slow)
     }));
     a.state()
@@ -195,23 +197,71 @@ pub fn adosc_resume(
 /// does not blank the windows that hold it. Missing when an input is (the per-row term
 /// rule, [`missing::term`]): with a positive range a missing input propagates through
 /// the arithmetic; without one, the "no flow" branch would launder it, so that branch
-/// checks (a missing high or low leaves the range missing). The one owner of that
-/// convention.
+/// checks the original high, low and volume operands. `location` and `range` are
+/// internal arithmetic and retain IEEE; callers admit their original close/open
+/// inputs. The one owner of that convention.
 #[inline]
 pub(super) fn range_flow(location: f64, high: f64, low: f64, volume: f64) -> f64 {
+    range_flow_with::<false>(location, high, low, volume)
+}
+
+/// Range flow after admission of the original inputs, including a generated
+/// infinite location or range: the no-flow branch is still exactly zero.
+#[inline]
+pub(super) fn range_flow_complete(location: f64, high: f64, low: f64, volume: f64) -> f64 {
+    range_flow_with::<true>(location, high, low, volume)
+}
+
+#[inline(always)]
+fn range_flow_with<const COMPLETE: bool>(location: f64, high: f64, low: f64, volume: f64) -> f64 {
     let range = high - low;
-    if range > 0.0 {
-        location / range * volume
-    } else {
-        missing::term(&[location, range, volume], 0.0)
+    if COMPLETE {
+        // Evaluate before selecting: the clean batch loop can use vector division.
+        // A non-positive range still selects exactly +0, including internal NaN.
+        std::hint::select_unpredictable(range > 0.0, range_flow_value(location, range, volume), 0.0)
     }
+    else if range > 0.0 { range_flow_value(location, range, volume) }
+    else { missing::nonfinite_term3(high, low, volume, 0.0) }
+}
+
+#[inline(always)]
+fn range_flow_value(location: f64, range: f64, volume: f64) -> f64 {
+    location / range * volume
+}
+
+#[inline(always)]
+fn money_flow_location(high: f64, low: f64, close: f64) -> f64 {
+    (close - low) - (high - close)
+}
+
+#[inline]
+pub(super) fn money_flow_volume_complete(high: f64, low: f64, close: f64, volume: f64) -> f64 {
+    money_flow_volume_parts(high, low, close, volume).0
+}
+
+/// The same flow and its already-computed close location. A missing original
+/// price always makes the location non-finite, even when no range carries flow.
+#[inline(always)]
+pub(super) fn money_flow_volume_parts(high: f64, low: f64, close: f64, volume: f64) -> (f64, f64) {
+    let location = money_flow_location(high, low, close);
+    (range_flow_complete(location, high, low, volume), location)
 }
 
 /// Money flow volume for one bar (TA-Lib AD's term): the close location
 /// `((close − low) − (high − close))` as a [`range_flow`].
 #[inline]
 pub(super) fn money_flow_volume(high: f64, low: f64, close: f64, volume: f64) -> f64 {
-    range_flow((close - low) - (high - close), high, low, volume)
+    let range = high - low;
+    if range > 0.0 { range_flow_value(money_flow_location(high, low, close), range, volume) }
+    else { money_flow_no_range(high, low, close, volume) }
+}
+
+// A no-flow branch can conceal a missing original input. Keep admission here,
+// outside the positive-range arithmetic used by every normal AD / ADOSC row.
+#[cold]
+#[inline(never)]
+fn money_flow_no_range(high: f64, low: f64, close: f64, volume: f64) -> f64 {
+    missing::term(&[high, low, close, volume], 0.0)
 }
 
 /// Chaikin Accumulation/Distribution line (TA-Lib AD): the running total of each
@@ -250,9 +300,10 @@ pub fn adosc(
     // value on the fly and feed both EMAs, so the intermediate A/D array is never
     // materialised (TA-Lib computes ADOSC in one pass).
     let mut a = Adosc::seed(high, low, close, volume);
+    let weights = adosc_weights(fast, slow);
     out[0] = a.value(0, fast, slow);
     for (i, o) in out.iter_mut().enumerate().skip(1) {
-        a.step(high, low, close, volume, i, fast, slow);
+        a.step(high, low, close, volume, i, weights);
         *o = a.value(i, fast, slow);
     }
     out
@@ -267,6 +318,12 @@ struct Adosc {
     slow_ema: f64,
 }
 
+/// Fixed coefficients for one full pass or continuation.
+#[inline]
+fn adosc_weights(fast: usize, slow: usize) -> [smoothing::Weighted; 2] {
+    [fast, slow].map(|p| smoothing::Weighted::new(smoothing::ema_k(p)))
+}
+
 impl Adosc {
     /// The state at bar 0: both EMAs seeded with the first A/D value.
     fn seed(high: &[f64], low: &[f64], close: &[f64], volume: &[f64]) -> Self {
@@ -277,11 +334,9 @@ impl Adosc {
     /// Advance over bar `i`. The EMAs use `ta_ADOSC.c`'s weighted form
     /// `(k·ad) + ((1 − k)·ema)` ([`smoothing::Weighted`]); the two independent chains
     /// interleave (ILP).
-    #[inline]
-    #[allow(clippy::too_many_arguments)]
-    fn step(&mut self, high: &[f64], low: &[f64], close: &[f64], volume: &[f64], i: usize, fast: usize, slow: usize) {
-        let fastk = smoothing::Weighted::new(smoothing::ema_k(fast));
-        let slowk = smoothing::Weighted::new(smoothing::ema_k(slow));
+    #[inline(always)]
+    fn step(&mut self, high: &[f64], low: &[f64], close: &[f64], volume: &[f64], i: usize, weights: [smoothing::Weighted; 2]) {
+        let [fastk, slowk] = weights;
         self.ad_line += money_flow_volume(high[i], low[i], close[i], volume[i]);
         self.fast_ema = fastk.step(self.fast_ema, self.ad_line);
         self.slow_ema = slowk.step(self.slow_ema, self.ad_line);
@@ -303,8 +358,14 @@ impl Adosc {
 /// of AD ([`money_flow_volume`]), so a bar without range yields `0.0` as there. No
 /// window — a pointwise transform.
 pub fn iii(high: &[f64], low: &[f64], close: &[f64], volume: &[f64]) -> Vec<f64> {
-    (0..close.len()).map(|i| money_flow_volume(high[i], low[i], close[i], volume[i])).collect()
+    missing::map_terms(close.len(), 0, false, |i| [high[i], low[i], close[i], volume[i]], |_, [h, l, c, v]| money_flow_volume_complete(h, l, c, v))
 }
+
+/// Intraday intensity over inputs already admitted as finite.
+pub fn iii_complete(high: &[f64], low: &[f64], close: &[f64], volume: &[f64]) -> Vec<f64> {
+    (0..close.len()).map(|i| money_flow_volume_complete(high[i], low[i], close[i], volume[i])).collect()
+}
+
 
 
 /// Single-row OBV resume: the value at `row` from `state = [running_obv,

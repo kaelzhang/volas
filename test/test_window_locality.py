@@ -417,12 +417,12 @@ def _closes(xs):
 
 
 @pytest.mark.parametrize("directive,want", [
-    ("sum:2", [np.nan, 3.0, np.inf, np.inf, 9.0, 11.0]),
-    ("ma:2", [np.nan, 1.5, np.inf, np.inf, 4.5, 5.5]),
+    ("sum:2", [np.nan, 3.0, np.nan, np.nan, 9.0, 11.0]),
+    ("ma:2", [np.nan, 1.5, np.nan, np.nan, 4.5, 5.5]),
     ("var:2", [np.nan, 0.25, np.nan, np.nan, 0.25, 0.25]),
     ("stddev:2", [np.nan, 0.5, np.nan, np.nan, 0.5, 0.5]),
 ])
-def test_window_holding_inf_takes_the_formula_value(directive, want):
+def test_window_holding_inf_is_missing_then_recovers(directive, want):
     got = _closes([1, 2, np.inf, 4, 5, 6]).exec(directive).tolist()
     assert_exact(got, want)
 
@@ -436,14 +436,14 @@ def test_window_holding_nan_is_nan_then_recovers(directive):
 
 def test_opposite_infinities_in_one_window_are_nan():
     got = _closes([1, np.inf, -np.inf, 4, 5]).exec("sum:2").tolist()
-    assert_exact(got, [np.nan, np.inf, np.nan, -np.inf, 9.0])
+    assert_exact(got, [np.nan, np.nan, np.nan, np.nan, 9.0])
 
 
-# --- pandas-semantics rolling: NaN is missing (skipped), ±inf is a value ---
+# --- pandas-semantics rolling: NaN and ±inf are missing (skipped) ---
 
 @pytest.mark.parametrize("method,want", [
-    ("sum", [np.nan, 3.0, np.inf, np.inf, 9.0, 11.0]),
-    ("mean", [np.nan, 1.5, np.inf, np.inf, 4.5, 5.5]),
+    ("sum", [np.nan, 3.0, np.nan, np.nan, 9.0, 11.0]),
+    ("mean", [np.nan, 1.5, np.nan, np.nan, 4.5, 5.5]),
 ])
 def test_rolling_recovers_after_inf_leaves(method, want):
     s = DataFrame({"x": [1.0, 2.0, np.inf, 4.0, 5.0, 6.0]})["x"]
@@ -454,7 +454,7 @@ def test_rolling_recovers_after_inf_leaves(method, want):
 def test_rolling_mixed_infinities_are_nan_then_recover():
     s = DataFrame({"x": [1.0, np.inf, -np.inf, 4.0, 5.0]})["x"]
     got = s.rolling(2).sum().to_numpy().tolist()
-    assert_exact(got, [np.nan, np.inf, np.nan, -np.inf, 9.0])
+    assert_exact(got, [np.nan, np.nan, np.nan, np.nan, 9.0])
 
 
 @pytest.mark.parametrize("key", _FINITE_KEYS)
@@ -481,11 +481,10 @@ def test_mfi_flat_bars_next_to_an_infinity():
     data["close"] = data["close"].copy()
     data["close"][2] = np.inf
     got = np.asarray(DataFrame(data).exec("mfi:5", dtype='float64'), float)
-    # Only bar 2's flow is non-finite (bar 3's typical price is below +inf, a finite
-    # negative flow); the 5-flow windows holding it end at rows 5 and 6 (row 5 is the
-    # first output), and the flat bars around it take the zero-flow branch.
-    assert np.isnan(got[5:7]).all()
-    np.testing.assert_allclose(got[7:], clean[7:], rtol=1e-9, atol=1e-9)
+    # Both flows reading bar 2 (rows 2 and 3) are missing; the five-flow windows
+    # holding either reach row 7. Flat complete bars take the zero-flow branch.
+    assert np.isnan(got[5:8]).all()
+    np.testing.assert_allclose(got[8:], clean[8:], rtol=1e-9, atol=1e-9)
 
 
 # --- the incremental refresh continues the same recursion as a full recompute ---

@@ -48,7 +48,12 @@ pub fn hv_pass<S: crate::pass::StateSink>(close: &[f64], period: usize, annualiz
 /// The raw (pre-SMA) Acceleration Band edge for each bar: `high·(1 + 4·(h-l)/(h+l))`
 /// for the upper edge, `low·(1 − 4·(h-l)/(h+l))` for the lower. A zero `high+low`
 /// falls back to the bare high/low (TA-Lib's guard).
+#[inline(never)]
 fn accbands_raw(high: &[f64], low: &[f64], upper: bool) -> Vec<f64> {
+    // A missing original price always yields NaN here: its sum cannot enter the
+    // zero guard, and an infinite difference divided by an infinite sum is NaN.
+    // No extra admission mask is needed. Keep this one call per column outside
+    // the SMA's register frame so the original eight-row loop stays vectorised.
     (0..high.len()).map(|i| accband_edge(high[i], low[i], upper)).collect()
 }
 
@@ -86,7 +91,7 @@ pub fn accbands_upper(high: &[f64], low: &[f64], period: usize, origin: usize) -
 /// Batch computation with terminal-state publication.
 pub fn accbands_upper_pass<S: crate::pass::StateSink>(high: &[f64], low: &[f64], period: usize, origin: usize, states: &mut S) -> Vec<f64> {
     let raw = accbands_raw(high, low, true);
-    kernels::sma_pass(&raw, period, origin, states)
+    kernels::sma_internal_pass(&raw, period, origin, states)
 }
 
 /// Acceleration Bands lower (TA-Lib ACCBANDS lower) — SMA of the raw lower edge.
@@ -97,7 +102,7 @@ pub fn accbands_lower(high: &[f64], low: &[f64], period: usize, origin: usize) -
 /// Batch computation with terminal-state publication.
 pub fn accbands_lower_pass<S: crate::pass::StateSink>(high: &[f64], low: &[f64], period: usize, origin: usize, states: &mut S) -> Vec<f64> {
     let raw = accbands_raw(high, low, false);
-    kernels::sma_pass(&raw, period, origin, states)
+    kernels::sma_internal_pass(&raw, period, origin, states)
 }
 
 // ---------------------------------------------------------------------------
@@ -211,5 +216,5 @@ pub fn accbands_band_step(
     if row >= high.len() {
         return None;
     }
-    kernels::sma_step(period, row, |j| accband_edge(high[j], low[j], upper), state, next)
+    kernels::sma_internal_step(period, row, |j| accband_edge(high[j], low[j], upper), state, next)
 }

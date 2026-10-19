@@ -175,15 +175,21 @@ pub fn wma_pass<S: crate::pass::StateSink>(data: &[f64], period: usize, _origin:
     let values = if finite {
         values
     } else {
-        states.restart();
-        wma_publish_prefix(states, start, n);
-        wma_with::<NonFiniteRows>(&data[start..], period, states, start, n).0
+        wma_nonfinite(data, period, states, start)
     };
     if start == 0 { values } else {
         let mut out = vec![f64::NAN; n];
         out[start..].copy_from_slice(&values);
         out
     }
+}
+
+#[cold]
+#[inline(never)]
+fn wma_nonfinite<S: crate::pass::StateSink>(data: &[f64], period: usize, states: &mut S, start: usize) -> Vec<f64> {
+    states.restart();
+    wma_publish_prefix(states, start, data.len());
+    wma_with::<NonFiniteRows>(&data[start..], period, states, start, data.len()).0
 }
 
 /// Skipped leading NaNs carry the initial WMA state, including requested anchors.
@@ -207,13 +213,6 @@ fn wma_with<G: RowGuard>(data: &[f64], period: usize, states: &mut impl crate::p
     let mut out = vec![f64::NAN; n];
     let denom = wma_weight_sum(period);
     let pf = period as f64;
-    let window = |end: usize| {
-        data[end + 1 - period..=end]
-            .iter()
-            .enumerate()
-            .fold(0.0, |acc, (j, &x)| acc + x * (j + 1) as f64)
-            / denom
-    };
     let mut guard = G::default();
     let mut finite = true;
     // Re-sum at an anchor or when a sum went inexact. The fast pass stops once a
@@ -222,7 +221,7 @@ fn wma_with<G: RowGuard>(data: &[f64], period: usize, states: &mut impl crate::p
     let mut reanchor = |guard: &G, sum: &mut Csum, wsum: &mut Csum, end: usize| {
         finite &= sum.value().is_finite() && wsum.value().is_finite();
         if finite || !guard.counts(false) {
-            (*sum, *wsum) = wma_sums(data[end + 1 - period..=end].iter().copied(), |x| guard.counts(x.is_finite()));
+            (*sum, *wsum) = wma_sums(data[end + 1 - period..=end].iter().copied(), |x| guard.counts(!crate::missing::is_missing(x)));
         }
     };
     let exact = |a: &Csum, b: &Csum| a.is_exact() && b.is_exact();
@@ -231,7 +230,7 @@ fn wma_with<G: RowGuard>(data: &[f64], period: usize, states: &mut impl crate::p
     let mut wsum = Csum::default(); // weighted sum: newest bar * period ... oldest * 1
     #[allow(clippy::needless_range_loop)] // numeric kernel: index-loop kept for hot-path codegen stability
     for j in 0..period {
-        if guard.enter(data[j].is_finite()) {
+        if guard.enter(!crate::missing::is_missing(data[j])) {
             wma_seed(&mut sum, &mut wsum, j, data[j]);
         }
         if !exact(&sum, &wsum) && j + 1 == period {
@@ -239,18 +238,18 @@ fn wma_with<G: RowGuard>(data: &[f64], period: usize, states: &mut impl crate::p
         }
     }
     states.record(start + period - 1, len, |out| Slide::append_components(out, [sum, wsum], guard.bad(), period));
-    out[period - 1] = if guard.clean() { wsum.mean(denom) } else { window(period - 1) };
+    out[period - 1] = if guard.clean() { wsum.mean(denom) } else { f64::NAN };
     // Slide: dropping the oldest (weight 1) raises every retained weight by one.
     for i in period..n {
         let entering = data[i];
         let leaving = data[i - period];
-        let came_in = guard.enter(entering.is_finite());
-        let went_out = guard.leave(leaving.is_finite());
+        let came_in = guard.enter(!crate::missing::is_missing(entering));
+        let went_out = guard.leave(!crate::missing::is_missing(leaving));
         wma_slide(&mut sum, &mut wsum, pf, came_in.then_some(entering), went_out.then_some(leaving));
         if !exact(&sum, &wsum) {
             reanchor(&guard, &mut sum, &mut wsum, i);
         }
-        out[i] = if guard.clean() { wsum.mean(denom) } else { window(i) };
+        out[i] = if guard.clean() { wsum.mean(denom) } else { f64::NAN };
         states.record(start + i, len, |out| Slide::append_components(out, [sum, wsum], guard.bad(), period));
     }
     (out, finite && sum.value().is_finite() && wsum.value().is_finite())
@@ -348,9 +347,17 @@ pub fn vwma_pass(close: &[f64], volume: &[f64], period: usize, origin: usize, st
     if clean && pv.value().is_finite() && vv.value().is_finite() {
         return out;
     }
+    vwma_nonfinite(close, volume, period, origin, out, states)
+}
+
+// Keep admission and window-local IEEE recovery out of the numerical loop's body.
+#[cold]
+#[inline(never)]
+fn vwma_nonfinite(close: &[f64], volume: &[f64], period: usize, origin: usize, mut out: Vec<f64>, states: &mut impl crate::pass::StateSink) -> Vec<f64> {
+    let n = close.len();
     states.restart();
     // A non-finite bar entered: window-local careful path (see `crate::guard`).
-    crate::guard::window_sums_pass(n, period, Order::AddDrop, origin, |i| [close[i] * volume[i], volume[i]], |i, s| {
+    crate::guard::window_sums_pass(n, period, Order::AddDrop, origin, |i| crate::missing::terms(&[close[i], volume[i]], [close[i] * volume[i], volume[i]]), |i, s| {
         out[i] = vwma_value(s);
     }, states);
     out
@@ -391,7 +398,8 @@ pub fn alma(close: &[f64], period: usize, offset: f64, sigma: f64) -> Vec<f64> {
         }
         out[i] = acc;
     }
-    out
+    drop(w);
+    missing::blank_owned_windows(out, close, period)
 }
 
 /// Hull Moving Average (TradingView `ta.hma`): `WMA(2·WMA(close, n/2) −
@@ -408,9 +416,9 @@ pub fn hma_pass<S: crate::pass::StateSink>(close: &[f64], period: usize, origin:
         return vec![f64::NAN; n];
     }
     // period 1 is degenerate (half = 0 → `wma(close, 0)` is all-NaN); like the rest of
-    // the MA family at period 1, return the source unchanged.
+    // the MA family at period 1, keep finite inputs and publish missing otherwise.
     if period == 1 {
-        return close.to_vec();
+        return close.iter().map(|&v| missing::term(&[v], v)).collect();
     }
     let half = period / 2;
     let sq = (period as f64).sqrt().round() as usize;
@@ -427,14 +435,19 @@ pub fn hma_pass<S: crate::pass::StateSink>(close: &[f64], period: usize, origin:
 /// window, weights `[1/6, 2/6, 2/6, 1/6]` (oldest→newest). Lookback 3.
 pub fn swma(close: &[f64]) -> Vec<f64> {
     let n = close.len();
-    let mut out = vec![f64::NAN; n];
+    let mut out = crate::buf::OutBuf::warmup(n, 0);
+    // This fixed four-bar kernel has at most three warm-up slots. Write them
+    // directly, without a dynamic memset or a prefill of the valid region.
+    if n > 0 { out.set(0, f64::NAN); }
+    if n > 1 { out.set(1, f64::NAN); }
+    if n > 2 { out.set(2, f64::NAN); }
     for i in 3..n {
-        out[i] = close[i - 3] / 6.0
+        out.set(i, close[i - 3] / 6.0
             + close[i - 2] * 2.0 / 6.0
             + close[i - 1] * 2.0 / 6.0
-            + close[i] / 6.0;
+            + close[i] / 6.0);
     }
-    out
+    missing::blank_window_output::<4>(out, close)
 }
 
 /// Bull and Bear Index (`mean of ma:a, ma:b, ma:c, ma:d`); row 0 at absolute position
@@ -494,31 +507,25 @@ pub(crate) fn wma_row(period: usize, row: usize, term: &impl Fn(usize) -> f64, s
     }
     let denom = wma_weight_sum(period);
     let pf = period as f64;
-    let window = || {
-        (row + 1 - period..=row)
-            .enumerate()
-            .fold(0.0, |acc, (j, k)| acc + term(k) * (j + 1) as f64)
-            / denom
-    };
     let value = if seen < period {
         // seed the first full window directly
-        if x.is_finite() {
+        if !crate::missing::is_missing(x) {
             wma_seed(&mut sum, &mut wsum, seen, x);
         } else {
             bad += 1;
         }
         if seen + 1 == period {
             if !(sum.is_exact() && wsum.is_exact()) {
-                (sum, wsum) = wma_sums((row + 1 - period..=row).map(term), f64::is_finite);
+                (sum, wsum) = wma_sums((row + 1 - period..=row).map(term), |v| !crate::missing::is_missing(v));
             }
-            if bad == 0 { wsum.mean(denom) } else { window() }
+            if bad == 0 { wsum.mean(denom) } else { f64::NAN }
         } else {
             f64::NAN
         }
     } else {
         let leaving = term(row - period);
-        let came_in = x.is_finite();
-        let went_out = leaving.is_finite();
+        let came_in = !crate::missing::is_missing(x);
+        let went_out = !crate::missing::is_missing(leaving);
         if !came_in {
             bad += 1;
         }
@@ -527,9 +534,9 @@ pub(crate) fn wma_row(period: usize, row: usize, term: &impl Fn(usize) -> f64, s
         }
         wma_slide(&mut sum, &mut wsum, pf, came_in.then_some(x), went_out.then_some(leaving));
         if !(sum.is_exact() && wsum.is_exact()) {
-            (sum, wsum) = wma_sums((row + 1 - period..=row).map(term), f64::is_finite);
+            (sum, wsum) = wma_sums((row + 1 - period..=row).map(term), |v| !crate::missing::is_missing(v));
         }
-        if bad == 0 { wsum.mean(denom) } else { window() }
+        if bad == 0 { wsum.mean(denom) } else { f64::NAN }
     };
     sum.write_state(&mut next[..2]);
     wsum.write_state(&mut next[2..4]);
@@ -590,9 +597,14 @@ pub fn vwma_step(
     if period == 0 || row >= close.len() || next.len() != Slide::<2>::STATE {
         return None;
     }
-    let term = |i: usize| [close[i] * volume[i], volume[i]];
+    let term = |i: usize| crate::missing::terms(&[close[i], volume[i]], [close[i] * volume[i], volume[i]]);
     let mut slide = Slide::<2>::from_state(state)?;
-    let value = match slide.row(Order::AddDrop, period, row, |j| all_finite(term(j))) {
+    let value = match slide.row(Order::AddDrop, period, row, |j| {
+        // Any missing operand makes at least one numerical term non-finite.
+        // The slide rejects it already; original-input admission is only needed
+        // by the cold IEEE re-sum, which distinguishes generated overflow.
+        all_finite([close[j] * volume[j], volume[j]])
+    }) {
         Window::Partial => f64::NAN,
         Window::Sums(s) => vwma_value(s.map(|c| c.value())),
         Window::Bad => vwma_value(own_sums(row + 1 - period..=row, term)),

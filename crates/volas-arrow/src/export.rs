@@ -6,7 +6,8 @@ use std::sync::Arc;
 use arrow_array::types::{
     Float32Type, Float64Type, Int32Type, Int64Type, TimestampNanosecondType,
 };
-use arrow_array::{ArrayRef, BooleanArray, LargeStringArray, PrimitiveArray};
+use arrow_array::{Array, ArrayRef, BooleanArray, LargeStringArray, PrimitiveArray};
+use arrow_data::ArrayData;
 use arrow_buffer::{BooleanBuffer, NullBuffer, OffsetBuffer, ScalarBuffer};
 use volas_core::{Buffer, Column, Tz};
 
@@ -20,18 +21,8 @@ pub fn column_to_arrow(col: &Column) -> ArrayRef {
         // the NaN positions) so int and float "missing" are consistent at the boundary.
         // The data buffer is still shared zero-copy; only NaN-bearing columns pay the
         // O(n) scan + the small bitmap (dense float stays null-free).
-        Column::F64(v) => {
-            let nulls = v.has_nan().then(|| NullBuffer::new(BooleanBuffer::from_iter(
-                v.iter().map(|x| !x.is_nan()),
-            )));
-            Arc::new(PrimitiveArray::<Float64Type>::new(scalar(v), nulls))
-        }
-        Column::F32(v) => {
-            let nulls = v.has_nan().then(|| NullBuffer::new(BooleanBuffer::from_iter(
-                v.iter().map(|x| !x.is_nan()),
-            )));
-            Arc::new(PrimitiveArray::<Float32Type>::new(scalar(v), nulls))
-        }
+        Column::F64(v) => Arc::new(float64(v)),
+        Column::F32(v) => Arc::new(float32(v)),
         Column::I64(v, val) => {
             Arc::new(PrimitiveArray::<Int64Type>::new(scalar(v), null_buffer_of(val, v.len())))
         }
@@ -65,6 +56,32 @@ pub fn column_to_arrow(col: &Column) -> ArrayRef {
             )
         }
     }
+}
+
+/// C-Data export consumes the float array directly: no temporary `ArrayRef`
+/// allocation or shared-buffer clone just to borrow its `ArrayData` and drop it.
+pub(crate) fn column_to_data(col: &Column) -> ArrayData {
+    match col {
+        Column::F64(v) => float64(v).into_data(),
+        Column::F32(v) => float32(v).into_data(),
+        _ => column_to_arrow(col).to_data(),
+    }
+}
+
+#[inline(always)]
+fn float64(v: &Buffer<f64>) -> PrimitiveArray<Float64Type> {
+    let nulls = v.has_nan().then(|| NullBuffer::new(BooleanBuffer::from_iter(
+        v.iter().map(|x| !x.is_nan()),
+    )));
+    PrimitiveArray::new(scalar(v), nulls)
+}
+
+#[inline(always)]
+fn float32(v: &Buffer<f32>) -> PrimitiveArray<Float32Type> {
+    let nulls = v.has_nan().then(|| NullBuffer::new(BooleanBuffer::from_iter(
+        v.iter().map(|x| !x.is_nan()),
+    )));
+    PrimitiveArray::new(scalar(v), nulls)
 }
 
 /// Build a null buffer from a per-element validity flag in a **single pass**: collect the

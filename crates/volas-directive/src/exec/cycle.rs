@@ -83,7 +83,7 @@ pub(super) fn dispatch(
             let close = ops.f64(1, "close")?;
             f64col(ind::imi(&open, &close, arg_usize(args, 0), ops.origin()))
         }
-        ("psy", _) => f64col(ind::psy(&close(0)?, arg_usize(args, 0), ops.origin())),
+        ("psy", _) => { let c = close(0)?; f64col(ind::psy_with(&c, arg_usize(args, 0), ops.origin(), ops.clean())) },
         ("pvt", _) => {
             let close = ops.f64(0, "close")?;
             let volume = ops.f64(1, "volume")?;
@@ -105,7 +105,7 @@ pub(super) fn dispatch(
             let low = ops.f64(1, "low")?;
             let close = ops.f64(2, "close")?;
             let volume = ops.f64(3, "volume")?;
-            f64col(ind::cmf(&high, &low, &close, &volume, arg_usize(args, 0), ops.origin()))
+            f64col(ind::cmf_pass_with(&high, &low, &close, &volume, arg_usize(args, 0), ops.origin(), ops.clean(), &mut ()))
         }
         ("chop", _) => {
             let high = ops.f64(0, "high")?;
@@ -113,12 +113,12 @@ pub(super) fn dispatch(
             let close = ops.f64(2, "close")?;
             f64col(ind::chop(&high, &low, &close, arg_usize(args, 0), ops.origin()))
         }
-        ("kst", _) => f64col(ind::kst(&close(0)?, ops.origin())),
+        ("kst", _) => { let c = close(0)?; f64col(ind::kst_pass_with(&c, ops.origin(), ops.clean(), &mut ())) },
         ("emv", _) => {
             let high = ops.f64(0, "high")?;
             let low = ops.f64(1, "low")?;
             let volume = ops.f64(2, "volume")?;
-            f64col(ind::emv(&high, &low, &volume, arg_usize(args, 0), ops.origin()))
+            f64col(ind::emv_pass_with(&high, &low, &volume, arg_usize(args, 0), ops.origin(), ops.clean(), &mut ()))
         }
         ("mass_index", _) => {
             let high = ops.f64(0, "high")?;
@@ -147,9 +147,9 @@ pub(super) fn dispatch(
             let low = ops.f64(1, "low")?;
             let period = arg_usize(args, 0);
             let v = if dir == "up" {
-                ind::aroon_up(&high, &low, period)
+                ind::aroon_up_with(&high, &low, period, ops.all_finite())
             } else {
-                ind::aroon_down(&high, &low, period)
+                ind::aroon_down_with(&high, &low, period, ops.all_finite())
             };
             f64col(v)
         }
@@ -160,17 +160,29 @@ pub(super) fn dispatch(
         }
 
         ("sum", _) => f64col(ind::sum(&close(0)?, arg_usize(args, 0), ops.origin())),
-        ("maxindex", _) => f64col(ind::maxindex(&close(0)?, arg_usize(args, 0), ops.origin())),
-        ("minindex", _) => f64col(ind::minindex(&close(0)?, arg_usize(args, 0), ops.origin())),
+        ("maxindex", _) => {
+            let close = close(0)?;
+            f64col(ind::maxindex_with(&close, arg_usize(args, 0), ops.origin(), ops.all_finite()))
+        },
+        ("minindex", _) => {
+            let close = close(0)?;
+            f64col(ind::minindex_with(&close, arg_usize(args, 0), ops.origin(), ops.all_finite()))
+        },
         // minmax / minmaxindex are the (min, max) value / index pair over the window;
         // their outputs are exactly llv/hhv (values) and minindex/maxindex (indices).
         ("minmax", Some("min")) => f64col(ind::llv(&close(0)?, arg_usize(args, 0))),
         ("minmax", Some("max")) => f64col(ind::hhv(&close(0)?, arg_usize(args, 0))),
         ("minmaxindex", Some("min")) => {
-            f64col(ind::minindex(&close(0)?, arg_usize(args, 0), ops.origin()))
+            {
+            let close = close(0)?;
+            f64col(ind::minindex_with(&close, arg_usize(args, 0), ops.origin(), ops.all_finite()))
+        }
         }
         ("minmaxindex", Some("max")) => {
-            f64col(ind::maxindex(&close(0)?, arg_usize(args, 0), ops.origin()))
+            {
+            let close = close(0)?;
+            f64col(ind::maxindex_with(&close, arg_usize(args, 0), ops.origin(), ops.all_finite()))
+        }
         }
         ("natr", _) => {
             let high = ops.f64(0, "high")?;
@@ -268,7 +280,7 @@ pub(super) fn dispatch(
             let low = ops.f64(1, "low")?;
             let close = ops.f64(2, "close")?;
             let volume = ops.f64(3, "volume")?;
-            f64col(ind::iii(&high, &low, &close, &volume))
+            f64col(if ops.clean() { ind::iii_complete(&high, &low, &close, &volume) } else { ind::iii(&high, &low, &close, &volume) })
         }
         ("kcw", _) => {
             let high = ops.f64(0, "high")?;
@@ -283,18 +295,11 @@ pub(super) fn dispatch(
                 arg_f64(args, 2),
             ))
         }
-        ("pivothigh", _) => f64col(ind::pivot(
-            &ops.f64(0, "high")?,
-            arg_usize(args, 0),
-            arg_usize(args, 1),
-            true,
-        )),
-        ("pivotlow", _) => f64col(ind::pivot(
-            &ops.f64(0, "low")?,
-            arg_usize(args, 0),
-            arg_usize(args, 1),
-            false,
-        )),
+        ("pivothigh" | "pivotlow", _) => {
+            let high = name == "pivothigh";
+            let source = ops.f64(0, if high { "high" } else { "low" })?;
+            f64col(ind::pivot_with(&source, arg_usize(args, 0), arg_usize(args, 1), high, ops.all_finite()))
+        }
         ("stddev", _) => f64col(ind::stddev(
             &close(0)?,
             arg_usize(args, 0),
@@ -334,24 +339,24 @@ pub(super) fn dispatch(
             let high = ops.f64(1, "high")?;
             let low = ops.f64(2, "low")?;
             let close = ops.f64(3, "close")?;
-            f64col(ind::avgprice(&open, &high, &low, &close))
+            f64col(ind::avgprice_with(&open, &high, &low, &close, ops.all_finite()))
         }
         ("medprice", _) => {
             let high = ops.f64(0, "high")?;
             let low = ops.f64(1, "low")?;
-            f64col(ind::medprice(&high, &low))
+            f64col(ind::medprice_with(&high, &low, ops.all_finite()))
         }
         ("typprice", _) => {
             let high = ops.f64(0, "high")?;
             let low = ops.f64(1, "low")?;
             let close = ops.f64(2, "close")?;
-            f64col(ind::typprice(&high, &low, &close))
+            f64col(ind::typprice_with(&high, &low, &close, ops.all_finite()))
         }
         ("wclprice", _) => {
             let high = ops.f64(0, "high")?;
             let low = ops.f64(1, "low")?;
             let close = ops.f64(2, "close")?;
-            f64col(ind::wclprice(&high, &low, &close))
+            f64col(ind::wclprice_with(&high, &low, &close, ops.all_finite()))
         }
 
         // Hilbert-transform cycle suite. Each takes a single price series (default
