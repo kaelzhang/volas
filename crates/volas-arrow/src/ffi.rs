@@ -15,7 +15,7 @@ use crate::{column_from_arrow_with_copy, column_to_arrow};
 /// A column as the two owned Arrow C-Data structs (array + schema). The data buffer is
 /// shared (no copy) — the structs carry a release callback that drops the keep-alive.
 pub fn column_to_c_data(col: &Column) -> Result<(FFI_ArrowArray, FFI_ArrowSchema), ArrowError> {
-    to_ffi(&column_to_arrow(col).to_data())
+    to_ffi(&crate::export::column_to_data(col))
 }
 
 /// Just the C-Data schema for a column (the `__arrow_c_schema__` half).
