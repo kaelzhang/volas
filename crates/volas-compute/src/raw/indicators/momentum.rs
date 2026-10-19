@@ -469,7 +469,12 @@ pub fn trix_resume(
 
 /// Aroon Up (TA-Lib AROON, up output): NaN while the `period + 1`-bar window holds a
 /// missing high. Lookback `period`.
-pub fn aroon_up(high: &[f64], _low: &[f64], period: usize) -> Vec<f64> {
+pub fn aroon_up(high: &[f64], low: &[f64], period: usize) -> Vec<f64> {
+    aroon_up_with(high, low, period, false)
+}
+
+/// Aroon over inputs whose missing-value fact is already known.
+pub fn aroon_up_with(high: &[f64], _low: &[f64], period: usize, complete: bool) -> Vec<f64> {
     let n = high.len();
     if period == 0 || period >= n {
         return vec![f64::NAN; n];
@@ -501,13 +506,18 @@ pub fn aroon_up(high: &[f64], _low: &[f64], period: usize) -> Vec<f64> {
         trailing += 1;
         today += 1;
     }
-    missing::blank_windows(&mut out, high, period + 1);
+    if !complete { missing::blank_windows(&mut out, high, period + 1); }
     out
 }
 
 /// Aroon Down (TA-Lib AROON, down output): NaN while the `period + 1`-bar window holds
 /// a missing low. Lookback `period`.
-pub fn aroon_down(_high: &[f64], low: &[f64], period: usize) -> Vec<f64> {
+pub fn aroon_down(high: &[f64], low: &[f64], period: usize) -> Vec<f64> {
+    aroon_down_with(high, low, period, false)
+}
+
+/// Aroon over inputs whose missing-value fact is already known.
+pub fn aroon_down_with(_high: &[f64], low: &[f64], period: usize, complete: bool) -> Vec<f64> {
     let n = low.len();
     if period == 0 || period >= n {
         return vec![f64::NAN; n];
@@ -539,7 +549,7 @@ pub fn aroon_down(_high: &[f64], low: &[f64], period: usize) -> Vec<f64> {
         trailing += 1;
         today += 1;
     }
-    missing::blank_windows(&mut out, low, period + 1);
+    if !complete { missing::blank_windows(&mut out, low, period + 1); }
     out
 }
 

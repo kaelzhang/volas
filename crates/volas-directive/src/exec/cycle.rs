@@ -147,9 +147,9 @@ pub(super) fn dispatch(
             let low = ops.f64(1, "low")?;
             let period = arg_usize(args, 0);
             let v = if dir == "up" {
-                ind::aroon_up(&high, &low, period)
+                ind::aroon_up_with(&high, &low, period, ops.all_finite())
             } else {
-                ind::aroon_down(&high, &low, period)
+                ind::aroon_down_with(&high, &low, period, ops.all_finite())
             };
             f64col(v)
         }
@@ -339,24 +339,24 @@ pub(super) fn dispatch(
             let high = ops.f64(1, "high")?;
             let low = ops.f64(2, "low")?;
             let close = ops.f64(3, "close")?;
-            f64col(ind::avgprice_with(&open, &high, &low, &close, ops.clean()))
+            f64col(ind::avgprice_with(&open, &high, &low, &close, ops.all_finite()))
         }
         ("medprice", _) => {
             let high = ops.f64(0, "high")?;
             let low = ops.f64(1, "low")?;
-            f64col(ind::medprice_with(&high, &low, ops.clean()))
+            f64col(ind::medprice_with(&high, &low, ops.all_finite()))
         }
         ("typprice", _) => {
             let high = ops.f64(0, "high")?;
             let low = ops.f64(1, "low")?;
             let close = ops.f64(2, "close")?;
-            f64col(ind::typprice_with(&high, &low, &close, ops.clean()))
+            f64col(ind::typprice_with(&high, &low, &close, ops.all_finite()))
         }
         ("wclprice", _) => {
             let high = ops.f64(0, "high")?;
             let low = ops.f64(1, "low")?;
             let close = ops.f64(2, "close")?;
-            f64col(ind::wclprice_with(&high, &low, &close, ops.clean()))
+            f64col(ind::wclprice_with(&high, &low, &close, ops.all_finite()))
         }
 
         // Hilbert-transform cycle suite. Each takes a single price series (default

@@ -141,3 +141,34 @@ fn bound_data_operand_borrows_the_column_and_preserves_missing_facts() {
     assert!(matches!(read.values, Cow::Borrowed(_)));
     assert!(read.column.is_none());
 }
+
+/// Repeated batch calls must reuse the input owner's admission fact, rather
+/// than treating a freshly owned column as unknown forever.
+#[test]
+fn price_and_aroon_calls_learn_owned_input_facts() {
+    let mut unknown = Vec::new();
+    for (command, inputs) in [
+        ("avgprice", &["open", "high", "low", "close"][..]),
+        ("medprice", &["high", "low"][..]),
+        ("typprice", &["high", "low", "close"][..]),
+        ("wclprice", &["high", "low", "close"][..]),
+        ("aroon.up:14", &["high", "low"][..]),
+        ("aroon.down:14", &["high", "low"][..]),
+    ] {
+        let names = ["open", "high", "low", "close"];
+        let columns = [0.0, 2.0, -2.0, 0.5].map(|offset| {
+            Column::f64((0..32).map(|i| 20.0 + i as f64 + offset).collect())
+        });
+        let df = DataFrame::new(names.map(str::to_owned).to_vec(), columns.to_vec(), None).unwrap();
+        for input in inputs {
+            assert_eq!(df.column(input).unwrap().known_has_nonfinite(), None);
+        }
+        crate::exec::execute(&df, &parse(command).unwrap()).unwrap();
+        for input in inputs {
+            if df.column(input).unwrap().known_has_nonfinite() != Some(false) {
+                unknown.push(format!("{command}: {input}"));
+            }
+        }
+    }
+    assert!(unknown.is_empty(), "facts still unknown: {}", unknown.join(", "));
+}
