@@ -300,8 +300,24 @@ fn range_at(range: RangeType, o: &[f64], h: &[f64], l: &[f64], c: &[f64], i: usi
 /// non-finite range takes `sma`'s window-local careful path. Row 0 is at absolute
 /// position `origin`. With `p == 0`, the range of the bar itself.
 fn range_mean(range: RangeType, p: usize, o: &[f64], h: &[f64], l: &[f64], c: &[f64], origin: usize) -> Vec<f64> {
+    match range {
+        RangeType::RealBody => range_mean_for::<0>(p, o, h, l, c, origin),
+        RangeType::HighLow => range_mean_for::<1>(p, o, h, l, c, origin),
+        RangeType::Shadows => range_mean_for::<2>(p, o, h, l, c, origin),
+    }
+}
+
+// Keep the geometry in the function's type, including the re-sum iterator.
+// Capturing a local enum by reference lets the iterator call obscure its value
+// from alias analysis, leaving a range dispatch in every sliding-window row.
+#[inline(always)]
+fn range_at_for<const R: u8>(o: &[f64], h: &[f64], l: &[f64], c: &[f64], i: usize) -> f64 {
+    range_at(match R { 0 => RangeType::RealBody, 1 => RangeType::HighLow, _ => RangeType::Shadows }, o, h, l, c, i)
+}
+
+fn range_mean_for<const R: u8>(p: usize, o: &[f64], h: &[f64], l: &[f64], c: &[f64], origin: usize) -> Vec<f64> {
     let n = c.len();
-    let r = |i: usize| range_at(range, o, h, l, c, i);
+    let r = |i: usize| range_at_for::<R>(o, h, l, c, i);
     if p == 0 {
         return (0..n).map(r).collect();
     }
@@ -316,9 +332,9 @@ fn range_mean(range: RangeType, p: usize, o: &[f64], h: &[f64], l: &[f64], c: &[
     // Call the forced-inline range owner directly: the iterator closure can be
     // outlined by LTO, which otherwise adds two calls per sliding-window row.
     for i in 0..n {
-        sum.add(range_at(range, o, h, l, c, i));
+        sum.add(range_at_for::<R>(o, h, l, c, i));
         if i >= p {
-            sum.sub(range_at(range, o, h, l, c, i - p));
+            sum.sub(range_at_for::<R>(o, h, l, c, i - p));
         }
         if !sum.is_exact() && i + 1 >= p {
             clean = sum.value().is_finite();
