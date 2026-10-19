@@ -117,13 +117,24 @@ fn linreg_sums_in<A: Accumulator>(rows: &[f64], admit: &impl Fn(f64) -> bool) ->
 #[inline(always)]
 fn linreg_fit_of(p: f64, sum_x: f64, divisor: f64, k: f64, sum_y: &Csum, sum_xy: &Csum) -> (f64, f64) {
     let total = sum_y.value();
-    if !total.is_finite() {
-        let m = (p * sum_xy.value() - sum_x * total) / divisor;
-        return (m, (total - m * sum_x) / p);
+    let total_xy = sum_xy.value();
+    // Self-subtraction is zero exactly for finite sums; unlike is_finite this
+    // needs no integer infinity threshold materialized on each full window.
+    #[allow(clippy::eq_op)]
+    let finite = total - total == 0.0;
+    if !finite {
+        return linreg_ieee_fit(p, sum_x, divisor, total, total_xy);
     }
     let dy = deviation(sum_y, p, k);
     let m = (p * deviation(sum_xy, sum_x, k) - sum_x * dy) / divisor;
     (m, k + (dy - m * sum_x) / p)
+}
+
+#[cold]
+#[inline(never)]
+fn linreg_ieee_fit(p: f64, sum_x: f64, divisor: f64, total: f64, total_xy: f64) -> (f64, f64) {
+    let m = (p * total_xy - sum_x * total) / divisor;
+    (m, (total - m * sum_x) / p)
 }
 
 /// The fit's closed-form `x` sums over ages `0..period`: `(Σx, Σx·Σx − period·Σx²)`.
