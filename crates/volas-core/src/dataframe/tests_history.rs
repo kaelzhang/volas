@@ -133,3 +133,211 @@ fn computed_scalar_rejects_an_integer_column_without_writing_or_advancing() {
     assert_eq!(df.column("integer").unwrap().get_i64(0), 42);
     assert_eq!(df.computed_columns()[0].1.valid_rows, 0);
 }
+
+#[test]
+fn an_empty_derived_memo_is_lazy_and_shares_later_publication_with_its_copies() {
+    let parent = Anchors::default();
+    let selected = parent.bounded(0, 2000);
+    assert_eq!(selected.len(), 0);
+    assert!(selected.nearest(1000).is_none());
+    // A handle taken before first publication continues to observe this frame's
+    // memo, while its parent owns a different lifetime.
+    let handle = selected.clone();
+    selected.keep(checkpoint(511));
+    assert_eq!(handle.nearest(1000).unwrap().at, 511);
+    assert!(parent.nearest(1000).is_none());
+    let empty = selected.bounded(1000, 1500);
+    assert_eq!(empty.len(), 0);
+    assert_eq!(empty.bounded(1000, 1200).len(), 0);
+    assert_eq!(empty, empty);
+    assert_ne!(empty, selected.bounded(1000, 1500));
+    assert_ne!(empty, handle.bounded(0, 1500));
+}
+
+#[test]
+fn derived_history_shares_checkpoint_and_word_chunks() {
+    let anchors = Anchors::default();
+    anchors.keep_all((0..32).map(|i| checkpoint((i + 1) * 512 - 1)).collect());
+    let original = anchors.nearest(8191).unwrap();
+    let selected = anchors.bounded(8000, 9000);
+    let derived = selected.nearest(8191).unwrap();
+    assert!(std::ptr::eq(&*original, &*derived));
+    assert_eq!(original.state.as_ref().unwrap().as_ptr(), derived.state.as_ref().unwrap().as_ptr());
+}
+
+#[test]
+fn chunk_selections_merge_later_publications_without_pinning_the_parent() {
+    for sparse in [false, true] {
+        let parent = Anchors::default();
+        let row = |i: usize| if sparse { i * 513 + 11 } else { (i + 1) * 512 - 1 };
+        parent.keep_all((0..80).map(|i| checkpoint(row(i))).collect());
+        let selected = parent.bounded(row(8), row(32));
+        let original = parent.nearest(row(9)).unwrap();
+        assert!(std::ptr::eq(&*original, &*selected.nearest(row(9)).unwrap()));
+        selected.keep(checkpoint(row(9))); // a frozen duplicate retains its original
+        selected.keep_all(vec![checkpoint(row(8)), checkpoint(row(9))]);
+        selected.keep(checkpoint(row(9) + 1)); // interleave a sparse publication
+        selected.keep_all(vec![checkpoint(row(10)), checkpoint(row(31) + 1)]);
+        selected.keep(checkpoint(row(7) + 1));
+        assert_eq!(selected.nearest(row(7) + 1).unwrap().at, row(7) + 1);
+        let nested = selected.bounded(row(8), row(32));
+        assert_eq!(nested.nearest(row(31) + 1).unwrap().at, row(31) + 1);
+        assert_eq!(nested.nearest(row(9) + 1).unwrap().at, row(9) + 1);
+        assert!(std::ptr::eq(&*original, &*nested.nearest(row(9)).unwrap()));
+        // Once the parent goes, an append after a clipped bank's logical end must
+        // not make its hidden suffix visible again.
+        let clipped = parent.bounded(row(0), row(3));
+        drop(parent);
+        clipped.keep(checkpoint(row(6) + 1));
+        assert_eq!(clipped.nearest(row(5)).unwrap().at, row(2));
+        assert_eq!(clipped.nearest(row(6) + 1).unwrap().at, row(6) + 1);
+        assert_eq!(clipped.bounded(row(0), row(7)).nearest(row(6) + 1).unwrap().at, row(6) + 1);
+    }
+}
+
+#[test]
+fn an_anchor_handle_keeps_empty_and_short_frame_metadata_compact() {
+    let size = std::mem::size_of::<Anchors>();
+    println!("anchor handle: {size} bytes");
+    assert!(size <= 48, "cold chunk descriptors inflated every cached column's metadata to {size} bytes");
+}
+
+#[test]
+fn selection_keeps_the_boundary_and_only_its_rows_from_one_history_snapshot() {
+    for sparse in [false, true] {
+        let parent = Anchors::default();
+        let row = |i: usize| if sparse { i * 513 + 11 } else { (i + 1) * 512 - 1 };
+        parent.keep_all((0..300).map(|i| checkpoint(row(i))).collect());
+        let selected = parent.bounded(row(8), row(180));
+        selected.keep(checkpoint(row(181)));
+        selected.keep(checkpoint(row(7) + 1));
+        for (first, upto) in [(row(9), row(12)), (row(179), row(183)), (row(182), row(184)), (row(0), row(300))] {
+            let (range, boundary) = selected.selection(first, upto, Some(first - 1));
+            assert_eq!(boundary, selected.nearest(first - 1));
+            assert_eq!(range.len(), selected.bounded(first, upto).len());
+            for at in [first - 1, first, upto - 1, upto] {
+                assert_eq!(range.nearest(at), selected.bounded(first, upto).nearest(at));
+            }
+        }
+        let (empty, boundary) = selected.selection(0, 1, Some(0));
+        assert_eq!(empty.len(), 0);
+        assert!(boundary.is_none());
+    }
+}
+
+#[test]
+fn regular_chunk_lookup_survives_clipping_and_irregular_later_publications() {
+    for sparse in [false, true] {
+        for growing in [false, true] {
+            let parent = Anchors::default();
+            let row = |i: usize| if sparse { i * 513 + 11 } else { (i + 1) * 512 - 1 };
+            let point = |i: usize| {
+                let mut cp = checkpoint(row(i));
+                cp.state = Some(vec![i as f64; if growing && i >= 128 { 4097 } else { 1 }].into());
+                cp
+            };
+            parent.keep_all((0..300).map(point).collect());
+            // Sharing a partial tail forces a new chunk on the next publication;
+            // the row index must still find both old and newly published checkpoints.
+            let clipped = parent.bounded(row(64), row(300));
+            parent.keep(point(300));
+            parent.keep_all((301..310).map(point).collect());
+            let nested = clipped.bounded(row(96), row(290));
+            for i in 0..310 {
+                assert_eq!(parent.nearest(row(i)).unwrap().state.as_ref().unwrap()[0], i as f64);
+                let expected = (i >= 96).then_some(i.min(289));
+                assert_eq!(nested.nearest(row(i)).map(|cp| cp.state.as_ref().unwrap()[0] as usize), expected);
+            }
+        }
+    }
+}
+
+#[test]
+fn a_publication_identity_differs_from_an_unopened_independent_owner() {
+    let owner = Anchors::default();
+    let observer = owner.clone();
+    let independent = Anchors::default();
+    assert_eq!(owner, observer);
+    assert_ne!(owner, independent);
+    assert_ne!(independent, owner);
+}
+
+#[test]
+fn promoting_a_pending_boundary_preserves_its_checkpoint_owner() {
+    let mut df = frame(3).rows(1, 3, &NoReplay);
+    df.set_computed_pending("ema", Some(checkpoint(0)));
+    let before = std::ptr::from_ref(&**df.computed.get("ema").unwrap().pending.as_ref().unwrap());
+    assert!(!df.promote_computed_pending("ema", 1));
+    assert!(df.has_computed_pending("ema", 0));
+    assert!(df.promote_computed_pending("ema", 0));
+    let after = std::ptr::from_ref(df.computed_checkpoint("ema").unwrap());
+    assert_eq!(before, after, "promotion must transfer the same immutable checkpoint owner");
+    assert!(!df.promote_computed_pending("ema", 0));
+}
+
+#[test]
+fn stale_snapshots_vouch_for_the_exact_carried_cursor_without_owning_its_state() {
+    for rows in [0, 5] {
+        let mut df = frame(rows);
+        df.set_computed_states("ema", Some(vec![10.0]), Some(vec![9.0]));
+        let row = DataFrame::new(vec!["close".into()], vec![Column::f64(vec![3.0])], None).unwrap();
+        df.append(&row).unwrap();
+        let snapshot = df.shared_stale_computed_columns(Some("ema")).next().unwrap();
+        assert_eq!(snapshot.state_ready, rows > 0);
+        assert_eq!(snapshot.state_ready, df.computed_resume_state("ema").is_some());
+        assert_eq!(df.stale_computed_columns(Some("ema"))[0].state_ready, snapshot.state_ready);
+        df.computed.get_mut("ema").unwrap().state_at = usize::MAX;
+        assert!(!df.shared_stale_computed_columns(Some("ema")).next().unwrap().state_ready);
+        assert!(df.computed_resume_state("ema").is_none());
+        assert_eq!(snapshot.state_ready, rows > 0, "a snapshot survives subsequent writes");
+        df.set_computed_states("ema", None, None);
+        assert!(!df.shared_stale_computed_columns(Some("ema")).next().unwrap().state_ready);
+        df.invalidate_computed_on_write("close");
+        assert!(!df.shared_stale_computed_columns(Some("ema")).next().unwrap().state_ready);
+    }
+}
+
+#[test]
+fn a_resumed_value_commits_through_its_already_borrowed_cursor() {
+    let mut df = frame(5);
+    df.set_computed_states("ema", Some(vec![10.0]), Some(vec![9.0]));
+    let row = DataFrame::new(vec!["close".into()], vec![Column::f64(vec![3.0])], None).unwrap();
+    df.append(&row).unwrap();
+    super::computed::WRITE_CURSOR_LOOKUPS.with(|lookups| lookups.set(0));
+    let value = df.resume_computed_value("ema", |_, prev, _, next| {
+        next[0] = prev[0] + 1.0;
+        Some(next[0])
+    }).unwrap();
+    assert_eq!(value, Some(11.0));
+    assert_eq!(df.column("ema").unwrap().as_f64().unwrap()[5], 11.0);
+    assert!(!df.has_stale_computed());
+    super::computed::WRITE_CURSOR_LOOKUPS.with(|lookups| assert_eq!(lookups.get(), 0,
+        "committing the stepped row must not look up that same cache cursor again"));
+    df.append(&row).unwrap();
+    assert_eq!(df.resume_computed_value("ema", |_, _, _, _| None).unwrap(), None);
+    assert_eq!(df.computed_resume_state("ema").unwrap().0, &[11.0]);
+    assert!(df.column("ema").unwrap().as_f64().unwrap()[6].is_nan());
+    assert!(df.has_stale_computed());
+    for name in ["missing", "close"] {
+        assert_eq!(df.resume_computed_value(name, |_, _, _, _| panic!("not a cached column")).unwrap(), None);
+    }
+}
+
+#[test]
+fn a_short_live_window_does_not_keep_a_unique_owned_seed_allocation() {
+    let (seed, keep) = (65_536, 16);
+    let mut df = DataFrame::new(vec!["wide".into(), "narrow".into()], vec![
+        Column::f64((0..seed).map(|i| i as f64).collect()),
+        Column::f32((0..seed).map(|i| i as f32).collect()),
+    ], None).unwrap();
+    df.compact_tail(keep, &NoReplay);
+    assert_eq!(df.height(), keep);
+    assert_eq!(df.columns[0].to_f64_vec()[0], (seed - keep) as f64);
+    assert_eq!(df.columns[1].to_f64_vec()[0], (seed - keep) as f64);
+    let Column::F64(wide) = &mut df.columns[0] else { unreachable!() };
+    assert!(!wide.is_borrowed());
+    assert!(wide.make_mut().capacity() <= 2 * keep, "release the unique wide seed capacity");
+    let Column::F32(narrow) = &mut df.columns[1] else { unreachable!() };
+    assert!(!narrow.is_borrowed());
+    assert!(narrow.make_mut().capacity() <= 2 * keep, "release the unique narrow seed capacity");
+}

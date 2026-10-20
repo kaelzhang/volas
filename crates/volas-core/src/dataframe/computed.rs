@@ -18,6 +18,9 @@ use crate::error::{Result, VolasError};
 
 use super::{Anchors, ComputedMeta, DataFrame, Directive, Reach, STALE_BY_APPEND, STALE_BY_WRITE};
 
+#[cfg(test)]
+thread_local! { pub(super) static WRITE_CURSOR_LOOKUPS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) }; }
+
 /// A stale cached column as the refresh reads it: its name, bound directive, reach,
 /// valid-row cursor, and whether its processed history is past the warm-up
 /// ([`ComputedMeta::warm`]).
@@ -37,6 +40,16 @@ pub struct StaleComputed<Name = String> {
     pub since: usize,
     /// More than `lookback` rows of the column's history are processed.
     pub warm: bool,
+    /// Whether the carried state describes this snapshot's last valid row.
+    /// The step checks the live cursor again before using its words.
+    #[doc(hidden)]
+    pub state_ready: bool,
+}
+
+impl ComputedMeta {
+    pub(super) fn resume_ready(&self, origin: usize) -> bool {
+        self.state.is_some() && self.last_valid(origin) == Some(self.state_at)
+    }
 }
 
 fn stale_snapshot<Name>(name: Name, meta: &ComputedMeta, origin: usize) -> StaleComputed<Name> {
@@ -47,6 +60,60 @@ fn stale_snapshot<Name>(name: Name, meta: &ComputedMeta, origin: usize) -> Stale
         valid_rows: meta.valid_rows,
         since: meta.since,
         warm: meta.warm(origin),
+        state_ready: meta.resume_ready(origin),
+    }
+}
+
+fn write_cached_at(
+    name: &str,
+    meta: Option<&mut ComputedMeta>,
+    column: &mut Column,
+    (origin, height): (usize, usize),
+    (from, len): (usize, usize),
+    write: impl FnOnce(&mut Column) -> Result<()>,
+) -> Result<()> {
+    let end = from.checked_add(len).filter(|&end| end <= height).ok_or_else(|| {
+        VolasError::Shape(format!(
+            "cannot write {len} computed rows of \"{name}\" from row {from}: the frame \
+             has {} rows",
+            height
+        ))
+    })?;
+    if let Some(meta) = &meta {
+        if from > meta.valid_rows {
+            return Err(VolasError::Shape(format!(
+                "cannot write computed rows of \"{name}\" from row {from}: rows {} to \
+                 {from} are not valid yet",
+                meta.valid_rows
+            )));
+        }
+    }
+    write(column)?;
+    if let Some(meta) = meta {
+        meta.note_written(column, origin, from, end);
+        meta.valid_rows = meta.valid_rows.max(end);
+        if from == 0 {
+            meta.since = origin;
+        }
+    }
+    Ok(())
+}
+
+fn write_scalar_value(name: &str, col: &mut Column, row: usize, value: f64) -> Result<()> {
+    match col {
+        Column::F64(buf) => {
+            buf.set(row, value);
+            Ok(())
+        }
+        Column::Bool(buf, valid) => {
+            valid.set(row, buf.len(), !value.is_nan());
+            buf.make_mut()[row] = value != 0.0;
+            Ok(())
+        }
+        col => Err(VolasError::DType(format!(
+            "computed scalar dtype F64 does not match column \"{name}\" dtype {}",
+            col.dtype()
+        ))),
     }
 }
 
@@ -126,9 +193,18 @@ impl DataFrame {
         name: &str,
         step: impl FnOnce(&DataFrame, &[f64], usize, &mut [f64]) -> Option<f64>,
     ) -> Option<f64> {
+        self.step_cached_state(name, step, |_, _, _, _, value| value)
+    }
+
+    fn step_cached_state<R>(
+        &mut self,
+        name: &str,
+        step: impl FnOnce(&DataFrame, &[f64], usize, &mut [f64]) -> Option<f64>,
+        finish: impl FnOnce(&mut ComputedMeta, &mut [Column], usize, usize, f64) -> R,
+    ) -> Option<R> {
         let origin = self.origin;
         let meta = self.computed.get_mut(name)?;
-        if meta.last_valid(origin) != Some(meta.state_at) {
+        if !meta.resume_ready(origin) {
             return None;
         }
         let prev = meta.state.take()?;
@@ -143,16 +219,39 @@ impl DataFrame {
             None => step(self, &prev, origin, Arc::make_mut(&mut next)),
         };
         let meta = self.computed.get_mut(name)?;
-        if out.is_some() {
-            meta.scratch = meta.state_before_last.take();
-            meta.state_before_last = Some(prev);
-            meta.state = Some(next);
-            meta.state_at += 1;
-        } else {
-            meta.state = Some(prev);
-            meta.scratch = Some(next);
+        match out {
+            Some(value) => {
+                meta.scratch = meta.state_before_last.take();
+                meta.state_before_last = Some(prev);
+                meta.state = Some(next);
+                meta.state_at += 1;
+                Some(finish(meta, &mut self.columns, origin, self.height, value))
+            }
+            None => {
+                meta.state = Some(prev);
+                meta.scratch = Some(next);
+                None
+            }
         }
-        out
+    }
+
+    /// Resume and commit one cached row under the cache owner's cursor rule.
+    #[doc(hidden)]
+    pub fn resume_computed_value(
+        &mut self,
+        name: &str,
+        step: impl FnOnce(&DataFrame, &[f64], usize, &mut [f64]) -> Option<f64>,
+    ) -> Result<Option<f64>> {
+        let Some(pos) = self.name_to_idx.get(name).copied() else { return Ok(None); };
+        let value = self.step_cached_state(name, step, |meta, columns, origin, height, value| {
+            let row = meta.valid_rows;
+            write_cached_at(name, Some(meta), &mut columns[pos], (origin, height), (row, 1),
+                |column| write_scalar_value(name, column, row, value))?;
+            Ok(value)
+        }).transpose()?;
+        #[cfg(debug_assertions)]
+        self.debug_check();
+        Ok(value)
     }
 
     /// The states after a resume of ONE new row produced `state` (the state as of that
@@ -191,7 +290,7 @@ impl DataFrame {
     /// `None` if `name` is untracked or carries no state of its last valid row.
     pub fn computed_resume_state(&self, name: &str) -> Option<(&[f64], usize)> {
         let meta = self.computed.get(name)?;
-        if meta.last_valid(self.origin) != Some(meta.state_at) {
+        if !meta.resume_ready(self.origin) {
             return None;
         }
         Some((meta.state.as_deref()?, self.origin))
@@ -270,31 +369,10 @@ impl DataFrame {
             .get(name)
             .copied()
             .ok_or_else(|| VolasError::ColumnNotFound(name.to_string()))?;
-        let end = from.checked_add(len).filter(|&end| end <= self.height).ok_or_else(|| {
-            VolasError::Shape(format!(
-                "cannot write {len} computed rows of \"{name}\" from row {from}: the frame \
-                 has {} rows",
-                self.height
-            ))
-        })?;
+        #[cfg(test)]
+        WRITE_CURSOR_LOOKUPS.with(|lookups| lookups.set(lookups.get() + 1));
         let meta = self.computed.get_mut(name);
-        if let Some(meta) = &meta {
-            if from > meta.valid_rows {
-                return Err(VolasError::Shape(format!(
-                    "cannot write computed rows of \"{name}\" from row {from}: rows {} to \
-                     {from} are not valid yet",
-                    meta.valid_rows
-                )));
-            }
-        }
-        write(&mut self.columns[pos])?;
-        if let Some(meta) = meta {
-            meta.note_written(&self.columns[pos], self.origin, from, end);
-            meta.valid_rows = meta.valid_rows.max(end);
-            if from == 0 {
-                meta.since = self.origin;
-            }
-        }
+        write_cached_at(name, meta, &mut self.columns[pos], (self.origin, self.height), (from, len), write)?;
         #[cfg(debug_assertions)]
         self.debug_check();
         Ok(())
@@ -321,21 +399,7 @@ impl DataFrame {
     /// under the same rule as [`update_computed_tail`](Self::update_computed_tail).
     /// This avoids allocating a one-value tail column on the single-bar append path.
     pub fn update_computed_value(&mut self, name: &str, row: usize, value: f64) -> Result<()> {
-        self.write_computed(name, row, 1, |col| match col {
-            Column::F64(buf) => {
-                buf.set(row, value);
-                Ok(())
-            }
-            Column::Bool(buf, valid) => {
-                valid.set(row, buf.len(), !value.is_nan());
-                buf.make_mut()[row] = value != 0.0;
-                Ok(())
-            }
-            col => Err(VolasError::DType(format!(
-                "computed scalar dtype F64 does not match column \"{name}\" dtype {}",
-                col.dtype()
-            ))),
-        })
+        self.write_computed(name, row, 1, |column| write_scalar_value(name, column, row, value))
     }
 
     /// Drop the computed (cached-directive) status of the column at `col`, if any.
@@ -357,7 +421,7 @@ impl DataFrame {
     pub(super) fn invalidate_computed_forming_row(&mut self, last_row: usize) {
         self.stale_by = STALE_BY_APPEND;
         for meta in self.computed.values_mut() {
-            if meta.pending.as_ref().is_some_and(|p| p.at >= self.origin + last_row) {
+            if meta.pending.as_ref().is_some_and(|p| p.position() >= self.origin + last_row) {
                 meta.pending = None; // it covers the replaced row
             }
             if meta.valid_rows > last_row {

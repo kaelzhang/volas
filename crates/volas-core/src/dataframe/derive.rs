@@ -75,6 +75,8 @@ impl Reach {
     pub fn lead(&self) -> usize {
         self.continuation.max(self.resume).max(self.lookback + 1)
     }
+
+
 }
 
 impl DataFrame {
@@ -127,18 +129,25 @@ impl DataFrame {
     /// the whole history alive. What it keeps of the rows before it is bounded by its
     /// cached columns' reach (the lead).
     pub fn rows(&self, start: usize, end: usize, replay: &dyn Replay) -> DataFrame {
+        self.copied_rows(start, end, replay, false)
+    }
+
+    /// Metadata and bounded history follow one derivation rule. Read-mostly row
+    /// copies pool their values; a live retention owns each mutable float column
+    /// directly, so the next append never copies that pool out again.
+    fn copied_rows(&self, start: usize, end: usize, replay: &dyn Replay, live: bool) -> DataFrame {
         let start = start.min(self.height);
         let end = end.max(start).min(self.height);
-        let mut computed = FxHashMap::with_capacity_and_hasher(self.computed.len(), Default::default());
-        for (name, meta) in &self.computed {
-            computed.insert(name.clone(), self.continued(name, meta, start, end, replay));
-        }
+        let computed = self.continued_columns(start, end, replay, live);
         let mut copied_lead = None;
-        let columns: Vec<Column> = if end < self.height && end > start && end - start <= ANCHOR_SPACING
+        let columns: Vec<Column> = if live {
+            self.columns.iter().map(|c| c.slice_with_spare(start, end, end - start)).collect()
+        } else if end > start
             && self.width() > 1 && self.columns.iter().all(|c| matches!(c, Column::F64(_)))
         {
-            // Short interior slices keep no source allocation alive. Pool their
-            // copied values; a write materializes only the affected column's range.
+            // Row selections keep no source allocation alive. One bounded slab
+            // avoids repeating large allocator mappings per column; a write
+            // materializes only the affected column's range.
             let rows = end - start;
             let lead_rows = self.copied_slab_lead_rows(start, &computed);
             let raw = self.width() - computed.len();
@@ -177,11 +186,49 @@ impl DataFrame {
         df
     }
 
+    fn continued_columns(&self, start: usize, end: usize, replay: &dyn Replay, live: bool)
+        -> FxHashMap<Arc<str>, ComputedMeta>
+    {
+        let mut computed = FxHashMap::with_capacity_and_hasher(self.computed.len(), Default::default());
+        for (name, meta) in &self.computed {
+            let mut continued = self.continued(name, meta, start, end, replay);
+            // Compaction replaces its source immediately. Preserve the recycled
+            // buffer, which becomes unique when that source is dropped, rather
+            // than allocate it again at the first resumed row of every cycle.
+            if live { continued.scratch = meta.scratch.clone(); }
+            computed.insert(name.clone(), continued);
+        }
+        computed
+    }
+
     /// The last `rows` rows, as a bounded window keeps them when it drops its older ones:
     /// the contiguous selection ending at the last row (which never replays — every
     /// column's states describe its last valid row, which it keeps).
     pub fn retain_tail(&self, rows: usize, replay: &dyn Replay) -> DataFrame {
-        self.rows(self.height.saturating_sub(rows), self.height, replay)
+        self.copied_rows(self.height.saturating_sub(rows), self.height, replay, true)
+    }
+
+    /// Drop older live rows, reusing uniquely owned column capacity.
+    #[doc(hidden)]
+    pub fn compact_tail(&mut self, rows: usize, replay: &dyn Replay) {
+        let end = self.height;
+        let start = end.saturating_sub(rows);
+        if start == 0 { return; }
+        let kept = end - start;
+        let computed = self.continued_columns(start, end, replay, true);
+        let lead = self.lead_before(start, &computed);
+        let index = self.index.slice(start, end);
+        for column in &mut self.columns { column.compact_range(start, end, kept); }
+        match Arc::get_mut(&mut self.index) {
+            Some(current) => *current = index,
+            None => self.index = Arc::new(index),
+        }
+        self.computed = computed;
+        self.lead = lead;
+        self.height = kept;
+        self.origin += start;
+        #[cfg(debug_assertions)]
+        self.debug_check();
     }
 
     /// Cached column `name` (`meta`) as the selection `[start, end)` of this frame keeps
@@ -191,8 +238,7 @@ impl DataFrame {
         let first = self.origin + start;
         let valid = meta.valid_rows.saturating_sub(start).min(end - start);
         let last = first + valid; // one past the selection's last valid row
-        let own = meta.state.is_some()
-            && meta.last_valid(self.origin) == Some(meta.state_at)
+        let own = meta.resume_ready(self.origin)
             && meta.state_at + 1 == last
             && valid > 0;
         // a checkpoint is replayed from over the rows after it: kept when the selection
@@ -206,12 +252,19 @@ impl DataFrame {
         // `ANCHOR_SPACING` rows; else its checkpoint at the selection's boundary, replayed
         // now (forming the anchors it passes)
         let carried = matches!(meta.reach.history, History::Carried { .. }) && meta.since < first;
+        let boundary_needed = carried && kept.is_none();
+        let (mut anchors, nearest) = meta.anchors.selection(first, last.saturating_sub(1), boundary_needed.then(|| first - 1));
         let lazy = match carried && kept.is_none() {
-            true => self.nearest_history(meta, first),
+            true => self.nearest_history(meta, first, nearest),
             false => None,
         };
-        let boundary = match carried && kept.is_none() && lazy.is_none() {
-            true => replay.boundary(self, name, start).map(CheckpointRef::from),
+        let boundary = match boundary_needed && lazy.is_none() {
+            true => {
+                let boundary = replay.boundary(self, name, start).map(CheckpointRef::from);
+                // A distant replay may publish new anchors on the selected rows.
+                anchors = meta.anchors.bounded(first, last.saturating_sub(1));
+                boundary
+            }
             false => None,
         };
         // the states as of its last valid row: this frame's when it is the same row; else
@@ -234,8 +287,8 @@ impl DataFrame {
             scratch: None,
             checkpoint: kept.or(lazy.flatten()).or(boundary),
             // the anchors of its history before its last row, where it agrees with this frame's
-            anchors: meta.anchors.upto(last.saturating_sub(1)),
-            pending: meta.pending.as_ref().filter(|cp| covers(cp.at)).cloned(),
+            anchors,
+            pending: meta.pending.as_ref().filter(|cp| covers(cp.position())).cloned(),
             lost: meta.lost.clone(),
             first_present: meta.first_present,
         }
@@ -247,11 +300,11 @@ impl DataFrame {
     /// checkpoint or the nearest of its anchors, the later — or `Some(None)`, the
     /// history's start, when it has no checkpoint before `first`. `None` when the
     /// nearest is farther (or not held).
-    fn nearest_history(&self, meta: &ComputedMeta, first: usize) -> Option<Option<CheckpointRef>> {
+    fn nearest_history(&self, meta: &ComputedMeta, first: usize, anchor: Option<CheckpointRef>) -> Option<Option<CheckpointRef>> {
         let held = self.origin - self.lead_rows(); // the first row this frame holds
         let near = |from: usize| from >= held && first - from <= ANCHOR_SPACING;
         let own = meta.checkpoint.clone().filter(|cp| cp.position() < first);
-        let nearest = match (own, meta.anchors.nearest(first - 1)) {
+        let nearest = match (own, anchor) {
             (Some(a), Some(b)) => Some(if a.position() >= b.position() { a } else { b }),
             (a, b) => a.or(b),
         };
@@ -400,7 +453,7 @@ impl DataFrame {
     pub fn drop_columns(&self, names: &[String]) -> Result<DataFrame> {
         let keep: Vec<String> = self.names.iter().filter(|n| !names.contains(n)).cloned().collect();
         let mut df = self.select(&keep)?;
-        df.computed = keep.iter().filter_map(|n| self.computed.get_key_value(n.as_str()).map(|(key, m)| (Arc::clone(key), m.clone()))).collect();
+        df.computed = keep.iter().filter_map(|n| self.computed.get_key_value(n.as_str()).map(|(key, m)| (Arc::clone(key), m.forked(self.origin)))).collect();
         df.note_computed();
         if !df.computed.is_empty() {
             df.lead = self.lead.as_ref().map(|l| l.over(&df));

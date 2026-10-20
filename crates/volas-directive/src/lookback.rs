@@ -65,11 +65,16 @@ pub(crate) fn evaluates_on_a_window_node(node: &BoundNode) -> bool {
 /// The rows a cached directive column reads around its own ([`volas_core::Reach`]),
 /// fixed per directive: computed once when the column is cached, never per refresh.
 pub fn reach(node: &Ast) -> volas_core::Reach {
+    let history = history(node);
+    // The framed state owns the kernel's complete tail. Resolve the raw-frame
+    // requirement here, once per cached directive, rather than at every refresh.
+    let resume = match history {
+        volas_core::History::Carried { operands } => operands,
+        _ => resume_reach(node.node()),
+    };
     volas_core::Reach {
-        lookback: lookback_node(node.node()),
-        resume: resume_reach(node.node()),
-        continuation: continuation_reach(node.node()),
-        history: history(node),
+        lookback: lookback_node(node.node()), resume,
+        continuation: continuation_reach(node.node()), history,
     }
 }
 
@@ -340,5 +345,23 @@ mod reach_tests {
         assert!(!e("ema:5") && !e("maxindex:5") && !e("llv:5@(ema:3)"));
         assert!(e("ma:5") && e("sum:3@(close-open)") && e("-(var:4)") && e("close") && e("llv:5"));
         assert!(!e("ema:3") && !e("ma:5@(rsi:3)") && !e("minindex:4") && !e("obv") && !e("1+ma:3,1"));
+    }
+}
+
+#[cfg(test)]
+mod resume_frame_reach_tests {
+    use super::*;
+    use crate::parser::parse;
+
+    #[test]
+    fn cached_resume_reach_counts_external_rows_not_the_framed_kernel_tail() {
+        for (text, raw_rows) in [("ema:12", 0), ("ema:5@(ma:200)", 0), ("sar", 0),
+            ("ema:12 >< close", 1)] {
+            let reach = reach(&parse(text).unwrap());
+            assert_eq!(reach.resume, raw_rows, "{text}: the state owns the kernel tail");
+            assert!(reach.lead() > reach.lookback, "a recompute still retains its whole reach");
+        }
+        let window = reach(&parse("ma:200").unwrap());
+        assert_eq!(window.resume, 200, "a window resume still reads its outgoing row");
     }
 }

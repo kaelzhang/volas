@@ -12,55 +12,50 @@ use std::borrow::Cow;
 use volas_core::DataFrame;
 use crate::{complete::BoundCommand, operands::Operands};
 
-/// Framed continuation snapshots share one immutable word buffer. The byte layout
+/// Framed continuation snapshots share immutable word chunks. The byte layout
 /// is exactly this module's ordinary node/chain wire format; core stores only slices.
 pub(super) struct FramedPoints {
-    rows: Vec<(usize, std::ops::Range<usize>)>,
-    words: Vec<f64>,
+    rows: Vec<usize>,
+    words: volas_core::dataframe::StateWordArena,
+    width: usize,
 }
 
 impl FramedPoints {
     pub fn with_capacity(count: usize, width: usize) -> Self {
-        Self { rows: Vec::with_capacity(count), words: Vec::with_capacity(count * width) }
+        Self { rows: Vec::with_capacity(count), words: Default::default(), width }
     }
     pub fn capture(&mut self, encoder: &FrameEncoder, end: usize, kernel: &[f64]) {
-        let start = self.words.len();
-        if encoder.write(end, kernel, &mut self.words).is_some() {
-            self.rows.push((end, start..self.words.len()));
+        if self.words.write(encoder.size, |words| encoder.write(end, kernel, words).is_some()) {
+            self.rows.push(end);
         }
     }
     /// Append a chain already formed through this owner's chain framing helpers.
     pub fn push(&mut self, end: usize, state: &[f64]) {
-        let start = self.words.len();
-        self.words.extend_from_slice(state);
-        self.rows.push((end, start..self.words.len()));
+        self.words.write(state.len(), |words| { words.extend_from_slice(state); true });
+        self.rows.push(end);
     }
-    /// Compose a chain into one buffer while preserving this owner's wire layout.
+    /// Compose a chain while preserving this owner's wire layout.
     pub fn transform(&mut self, mut write: impl FnMut(usize, &[f64], &mut Vec<f64>) -> bool) {
         let previous = std::mem::replace(self, Self::with_capacity(0, 0));
-        let mut next = Self::with_capacity(previous.rows.len(), 0);
-        let count = previous.rows.len();
-        for (end, range) in previous.rows {
-            let start = next.words.len();
-            if write(end, &previous.words[range], &mut next.words) {
-                // The first successful frame reveals the common chain width.
-                // Reserve once; a later wider warm frame grows normally.
-                if next.rows.is_empty() {
-                    let width = next.words.len() - start;
-                    next.words.reserve(width.saturating_mul(count).saturating_sub(next.words.len()));
-                }
-                next.rows.push((end, start..next.words.len()));
+        let mut next = Self::with_capacity(previous.rows.len(), previous.width);
+        for (end, state) in previous.rows.into_iter().zip(previous.words.iter()) {
+            let mut width = 0;
+            if next.words.write(next.width, |words| {
+                let start = words.len();
+                let ok = write(end, state, words);
+                width = words.len() - start;
+                ok
+            }) {
+                next.rows.push(end);
+                // Width is stable once the chain has seeded; warm states may vary.
+                next.width = width;
             }
-            else { next.words.truncate(start); }
         }
         *self = next;
     }
     pub fn finish(self) -> Vec<(usize, volas_core::StateWords)> {
         if self.rows.is_empty() { return Vec::new(); }
-        let words = std::sync::Arc::new(self.words);
-        self.rows.into_iter().map(|(end, range)| {
-            (end, volas_core::StateWords::from_shared(std::sync::Arc::clone(&words), range).expect("owner-framed range"))
-        }).collect()
+        self.rows.into_iter().zip(self.words.finish()).collect()
     }
 }
 

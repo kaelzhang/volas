@@ -318,9 +318,8 @@ impl PyDataFrame {
             // the last row before the kept rows whose operands the kept rows recompute
             let end = head + operands - origin; // frame rows the checkpoint covers
             let at = origin + end - 1;
-            if let Some(cp) = self.inner.take_computed_pending(&name, at) {
-                self.inner.set_computed_checkpoint(&name, Ok(cp)); // the refresh passed it
-                continue;
+            if self.inner.promote_computed_pending(&name, at) {
+                continue; // the refresh already captured this immutable boundary
             }
             let directive = std::sync::Arc::clone(
                 self.inner
@@ -330,25 +329,12 @@ impl PyDataFrame {
             let node = bound_directive(&directive);
             let frame = &self.inner;
             let checkpoint = match self.inner.computed_checkpoint(&name) {
-                // a checkpoint at or past the new head (formed from a carried state) stays
+                // A carried terminal state may already cover the new boundary.
                 Some(cp) if cp.at >= at => Some(cp.clone()),
-                Some(cp) => volas_directive::exec::replay(frame, node, cp, end).map(|(_, cp)| cp),
-                // its history starts inside the frame: capture it from there
-                None if since >= origin => {
-                    let start = since - origin;
-                    match start {
-                        0 => volas_directive::exec::capture(frame, node, end),
-                        _ => volas_directive::exec::capture(
-                            &frame.slice_data(start, h),
-                            node,
-                            end - start,
-                        ),
-                    }
-                }
-                // replayed from its checkpoint, or the nearest point of it before row 0 the
-                // frame keeps (with the rows after it in its lead); none when the rows its
-                // history started on are gone with no checkpoint
-                _ => volas_directive::checkpoint_at(&self.inner, &name, at),
+                // The history owner selects the nearest anchor, checkpoint or
+                // retained start. Re-capturing the whole seed here discards its
+                // same-pass publications and makes window construction O(seed).
+                _ => volas_directive::checkpoint_at(frame, &name, at),
             };
             // none formed: an input the computation cannot read is why, if one is (a reason
             // found at an earlier drop stays — its row may be gone now)
@@ -360,7 +346,7 @@ impl PyDataFrame {
             });
             self.inner.set_computed_checkpoint(&name, checkpoint);
         }
-        self.inner = self.inner.retain_tail(keep, &Replayer);
+        self.inner.compact_tail(keep, &Replayer);
     }
 
     /// A recursion the frame carries in a state whose history started before the frame's
