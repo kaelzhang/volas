@@ -26,14 +26,15 @@ TESTS=(test/test_harness_machines.py test/test_harness_schedules.py test/test_ha
 
 case "$MODE" in
     release)
-        unset RUSTFLAGS
+        "$PYTHON" -c 'from scripts.build_release import check_environment; import os; check_environment(os.environ)'
         ;;
     checked)
         export RUSTFLAGS="-C debug-assertions -C overflow-checks"
         export CARGO_TARGET_DIR="${HARNESS_CHECKED_TARGET:-target/harness-checked}"
         restore() {
-            echo ">> restoring the normal extension (maturin develop --release)..."
-            env -u RUSTFLAGS -u CARGO_TARGET_DIR "$PYTHON" -m maturin develop --release >/dev/null 2>&1 || true
+            echo ">> restoring a normal release through the build owner..."
+            env -u RUSTFLAGS -u CARGO_TARGET_DIR "$PYTHON" scripts/build_release.py --mode normal \
+                --artifacts "$PWD/target/harness-restore-$(date +%Y%m%d-%H%M%S)" --install
         }
         trap restore EXIT
         ;;
@@ -46,6 +47,10 @@ esac
 echo ">> [$MODE] Rust resume-vs-full matrix..."
 cargo test -p volas-directive --test resume_matrix --release
 echo ">> [$MODE] building the extension..."
-"$PYTHON" -m maturin develop --release --quiet
+if [ "$MODE" = release ]; then
+    "$PYTHON" scripts/build_release.py --mode normal --artifacts "$PWD/target/harness-release-$(date +%Y%m%d-%H%M%S)" --install
+else
+    "$PYTHON" -m maturin develop --release --quiet
+fi
 echo ">> [$MODE] Python harness (profile ${VOLAS_HARNESS_PROFILE:-short})..."
 "$PYTHON" -m pytest "${TESTS[@]}" --benchmark-skip -q -p no:cacheprovider

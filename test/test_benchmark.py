@@ -44,6 +44,7 @@ from math import ceil
 from pathlib import Path
 
 import numpy as np
+from test.bench_workloads import generated_ohlcv as _generated_ohlcv
 import pandas as pd
 import pytest
 
@@ -130,21 +131,6 @@ HAVE = {
 }
 
 
-def _generated_ohlcv(n, seed=20260606):
-    rng = np.random.default_rng(seed)
-    close = 100.0 + np.cumsum(rng.normal(0.0, 1.0, n))
-    open_ = close + rng.normal(0.0, 0.2, n)
-    high = np.maximum(open_, close) + rng.random(n) * 1.5
-    low = np.minimum(open_, close) - rng.random(n) * 1.5
-    volume = np.abs(rng.normal(1.0e6, 2.0e5, n)) + 1.0
-    return {
-        'open': open_,
-        'high': high,
-        'low': low,
-        'close': close,
-        'volume': volume,
-        'periods': (np.arange(n, dtype=float) % 29.0) + 2.0,
-    }
 
 # Every append candidate is measured through `pedantic` with this fixed round count
 # (volas / stock_pandas need fresh per-round state, so they cannot use the
@@ -666,29 +652,8 @@ def test_windowed_stream(benchmark, indicator, candidate):
 # --- section 1: append one new bar -> updated indicator --------------------
 
 def _volas_append(indicator):
-    """volas: refresh the cached directive's tail incrementally (O(lookback)).
-
-    The setup appends one warm-up bar so the measured append is the STEADY-STATE
-    per-bar cost a live session pays. A freshly constructed frame's column
-    buffers have no spare capacity, so the very first append triggers the
-    one-time amortized Vec doubling (a full-column memcpy, ~3us at n=2000);
-    rebuilding the frame every round would charge that one-time event to every
-    measured round, which is not what "a new bar arrives" costs in a live system.
-    """
-    warm_bar = VolasDataFrame({c: ARR[c][-2:-1] for c in COLUMNS})
-    bar = VolasDataFrame({c: ARR[c][-1:] for c in COLUMNS})
-
-    def setup():
-        d = VolasDataFrame({c: ARR[c][:-2] for c in COLUMNS})
-        _ = d[indicator]                       # cache over the first n-2 bars
-        d.append(warm_bar)                     # one-time capacity growth +
-        d.fulfill()                            # resume-state warm-up
-        return (d,), {}
-
-    def run(d):
-        d.append(bar)
-        d.fulfill()
-    return run, setup
+    from test.bench_workloads import append
+    return append({c: ARR[c] for c in COLUMNS}, indicator)
 
 
 def _stock_pandas_append(indicator):
@@ -825,30 +790,8 @@ def test_coverage_extended(benchmark, length_states, indicator, directive, lengt
 
 
 def _volas_coverage_after_append(indicator):
-    """Cache one indicator over n-2 rows, warm one append (see `_volas_append`:
-    steady-state, not the one-time capacity-doubling event), then measure the
-    append+refresh of the final bar."""
-    history = {c: ARR[c][:-2] for c in COLUMNS}
-    history['periods'] = PERIODS[:-2]
-    warm = {c: ARR[c][-2:-1] for c in COLUMNS}
-    warm['periods'] = PERIODS[-2:-1]
-    warm_df = VolasDataFrame(warm)
-    bar = {c: ARR[c][-1:] for c in COLUMNS}
-    bar['periods'] = PERIODS[-1:]
-    bar_df = VolasDataFrame(bar)
-
-    def setup():
-        d = VolasDataFrame(history)
-        _ = d[indicator]
-        d.append(warm_df)
-        d.fulfill()
-        return (d,), {}
-
-    def run(d):
-        d.append(bar_df)
-        d.fulfill()
-
-    return run, setup
+    from test.bench_workloads import append
+    return append({**{c: ARR[c] for c in COLUMNS}, 'periods': PERIODS}, indicator)
 
 
 def _talib_coverage_after_append(indicator):

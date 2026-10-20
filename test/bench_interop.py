@@ -3,7 +3,7 @@ import numpy as np
 import pandas as pd
 import pyarrow as pa
 
-from volas import DataFrame, Series
+from test.bench_workloads import interop as volas_interop
 
 OPS = ('frame_from_arrow', 'frame_to_arrow', 'series_from_arrow', 'series_to_arrow',
        'dlpack_import', 'dlpack_export')
@@ -15,21 +15,10 @@ def build(length, polars):
     columns = {name: values.copy() for name in ('open', 'high', 'low', 'close', 'volume')}
     table = pa.table(columns)
     array = table['close'].chunk(0)
-    frame = DataFrame(columns)
-    series = frame['close']
     pdf = table.to_pandas()
     ps = pd.Series(values)
     reg = {
-        'volas': {
-            'frame_from_arrow': lambda: DataFrame.from_arrow(table),
-            'frame_to_arrow': frame.to_arrow,
-            'series_from_arrow': lambda: Series.from_arrow(array),
-            'series_to_arrow': series.to_arrow,
-            # No native DLPack importer: the supported NumPy bridge copies at
-            # the DataFrame constructor, just like any direct NumPy import.
-            'dlpack_import': lambda: DataFrame({'close': np.from_dlpack(values)}),
-            'dlpack_export': lambda: np.from_dlpack(series),
-        },
+        'volas': volas_interop(length),
         'pandas': {
             'frame_from_arrow': table.to_pandas,
             'frame_to_arrow': lambda: pa.Table.from_pandas(pdf, preserve_index=False),

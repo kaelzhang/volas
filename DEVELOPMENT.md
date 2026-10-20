@@ -102,8 +102,8 @@ make perf-ab BASE=HEAD~1 [INDICATOR=bop]
                                 # pairs on this machine; full suite ->
                                 # perf_gate verdict, single indicator -> compact
                                 # HEAD/base report. The CI gate's exact method.
-# THE RULE: performance questions are answered through these three commands —
-# never ad-hoc timing scripts, whose methodology drifts run to run.
+# Use the tracked benchmark entrypoints and the paired CPU follow-up below;
+# keep one measurement protocol instead of ad-hoc timing scripts.
 # Every full run is also compared against the all-time best run (the
 # "performance leader", .benchmarks/LEADER.json) and a leader-report.md is
 # written into the run's archive dir. Scoring uses WITHIN-RUN normalized
@@ -134,13 +134,13 @@ gates** answer the finer *"did a hot function's generated code get heavier?"* �
 the regression a 5µs-floored benchmark cannot see. They make a by-hand
 instruction-level review a permanent, reproducible gate.
 
-Two complementary gates, both arm64-specific (each self-skips on another arch,
-and runs in CI on an Apple-silicon runner):
+Two complementary gates use arm64 baselines (other architectures report unsupported,
+and CI runs them on an Apple-silicon runner):
 
 - **`make asm-diff`** — the tiny, stable numeric/string kernels (`ma`, `ema`, the
   string compare scan). Each is wrapped by a `#[no_mangle] #[inline(never)]` probe
   in `crates/*/examples/asm_probe_*.rs` so it inlines into a standalone symbol;
-  `scripts/asm_diff.sh` disassembles and holds the count **byte-exact** (`ma`/`ema`)
+  `scripts/asm_diff.sh` disassembles and holds the count **exact** (`ma`/`ema`)
   or non-increasing (string) against `scripts/asm_baseline.txt`.
 - **`make hot-asm-check`** — the **broad hot-path functions** that are too large to
   inline into a wrapper. `scripts/hot_path_asm.sh` reads each function's *own* symbol
@@ -172,3 +172,65 @@ hypothesize → implement → **`make perf-ab`** (prove wall-clock) +
 elsewhere) → `*-update` the baseline once the win is reviewed. A periodic broad
 sweep across every hot path (an adversarially-verified, assembly-level review)
 seeds new inventory entries and optimization candidates.
+
+### Opt-in profile-guided release builds
+
+`make build`, `make release`, `make build-pkg` and both sides of `make perf-ab`
+use `scripts/build_release.py`. The default remains `BUILD_OPT=normal`.
+The complete local PGO loop is validated on macOS arm64; other release targets
+still need independent validation and CI integration.
+The initial validated tool versions are Rust 1.96.0, its sysroot LLVM tools,
+and maturin 1.13.3. Install `llvm-tools-preview` for that compiler and the
+frozen training dependencies in `scripts/pgo-requirements.txt` beforehand.
+
+```sh
+make build BUILD_OPT=pgo BUILD_ARTIFACTS=/absolute/fresh/artifacts
+python scripts/build_release.py --mode generate --artifacts /absolute/fresh/generate
+python scripts/build_release.py --mode use --profile /absolute/profile.profdata \
+    --artifacts /absolute/fresh/use
+```
+
+`pgo` builds an instrumented wheel, installs it in an isolated site, runs the
+fixed-operation training workload, merges raw profiles, then builds and smoke-tests
+the final use wheel. It retains logs, hashes, stage timings, raw profiles and
+provenance. `use` requires the matching JSON sidecar. Source, ABI, target,
+toolchain, configuration, training code and dependency mismatches fail closed.
+Every invocation needs fresh stage directories. No profile is shared across sources.
+A completed instrumented stage can be supplied with `--generated <generate-stage>`
+to `--mode pgo`: its native hash, actual compiler arguments and compilation identity
+are verified, while training uses a new empty raw directory and the current frozen
+training identity. This allows an explicit training-budget revision without treating
+an old training run as current evidence.
+Ambient Rust flags and release-profile overrides are rejected. Cargo resolves ISA
+flags; the owner forwards those resolved flags to maturin so macOS link arguments
+cannot mask FMA or PGO instrumentation. Fat LTO and the release profile stay in Cargo.
+
+Training covers the public indicator inventory and the existing live, first-cache,
+range and interop factories. Its versioned operation budget is independent of
+elapsed time. Hold-out inputs are declared in `scripts/pgo_train.py` and implemented in
+`test/bench_holdout.py` (batch, 5m-to-1h folding/resends, and sliced/chunked/null
+Arrow plus strided NumPy inputs); they never contribute to training. Training has a ten-minute hard cap. A successful build is
+not a performance adoption verdict.
+
+`make test` first runs the functional suite against an installed owner-built wheel,
+then measures coverage with separate instrumentation and restores that exact wheel.
+Keep coverage and performance builds sequential.
+
+For code regressions, `make perf-ab BASE=<ref> BUILD_OPT=normal` compares normal
+builds, and `BUILD_OPT=pgo` trains each source separately. The current driver also
+builds historical archives. `PERF_COMPARE=optimization` requires identical source
+hashes and compares normal against PGO. A reused `BASE_SITE` must have a valid
+`volas-build.json` and matching native-library hash. Both the wall driver and
+`scripts/perf_cpu.py <base-site> <head-site> <output.json> <manifest.json>` reject
+mismatched modes or provenance before measurement. The CPU driver retains 200
+AB/BA process-CPU pairs per item; launch it twice with fresh workers for two runs.
+With `PERF_AB_JSON_DIR`, perf-ab also retains each side's build manifests, logs,
+raw/indexed profiles, wheels and installed sites. Cargo target caches are excluded.
+
+Normal assembly baselines remain unchanged. Missing symbols fail gates and other
+architectures report unsupported. To inspect a final wheel separately, run
+`python scripts/pgo_asm.py --site <use/site> --output <report-dir>` (optionally
+`--base-report <normal-report-dir>`), or set `PGO_SITE` and `PGO_ASM_OUT` when
+running either assembly gate. Reports contain final addresses, normalized
+instructions, branch edges, calls, stack accesses and NOP counts. PGO differences
+require review and performance validation; they never update normal baselines.

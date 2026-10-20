@@ -12,7 +12,7 @@ MATURIN ?= $(PYTHON) -m maturin
 PY_PREFIX = $(shell $(PYTHON) -c "import sys; print(sys.prefix)")
 MATURIN_DEVELOP_ENV = VIRTUAL_ENV="$(PY_PREFIX)" CONDA_PREFIX="$(PY_PREFIX)"
 
-.PHONY: help install install-rust build build-pkg build-ext clean test test-quick count-indicators coverage coverage-html audit-harness audit-harness-release audit-harness-checked docs benchmark perf-ab asm-diff asm-diff-update hot-asm hot-asm-check hot-asm-update anime-fonts anime lint fix fmt check cargo-test upload publish bump dev ci
+.PHONY: release help install install-rust build build-pkg build-ext clean test test-quick count-indicators coverage coverage-html audit-harness audit-harness-release audit-harness-checked docs benchmark perf-ab asm-diff asm-diff-update hot-asm hot-asm-check hot-asm-update anime-fonts anime lint fix fmt check cargo-test upload publish bump dev ci
 
 # Install all dependencies (Python + Rust)
 install:
@@ -33,16 +33,20 @@ install-rust:
 	@rustup update stable
 
 # Build the Rust extension and install the package in-place (development)
-build: clean
-	@echo "\033[1m>> Building Rust extension... <<\033[0m"
-	@$(MATURIN_DEVELOP_ENV) $(MATURIN) develop --release
-	@echo "\033[1m>> Build complete! <<\033[0m"
+BUILD_OPT ?= normal
+ifndef BUILD_ARTIFACTS
+BUILD_ARTIFACTS := $(CURDIR)/target/release-build-$(shell date +%Y%m%d-%H%M%S)
+endif
 
-# Build the release package (wheel and sdist) into dist/
-build-pkg: clean
-	@echo "\033[1m>> Building release package... <<\033[0m"
-	@$(MATURIN) build --release --sdist -o dist
-	@echo "\033[1m>> Package built in dist/ <<\033[0m"
+build:
+	@$(PYTHON) scripts/build_release.py --mode $(BUILD_OPT) --artifacts "$(BUILD_ARTIFACTS)" --install
+
+release: build
+
+build-pkg:
+	@$(PYTHON) scripts/build_release.py --mode $(BUILD_OPT) --artifacts "$(BUILD_ARTIFACTS)" --sdist
+	@mkdir -p dist
+	@$(PYTHON) -c 'import json,shutil,pathlib; a=pathlib.Path("$(BUILD_ARTIFACTS)"); shutil.copy2(json.loads((a/"final.json").read_text())["wheel"], "dist"); [shutil.copy2(p,"dist") for p in (a/"sdist").glob("*.tar.gz")]'
 
 # Build the Rust extension only (development mode)
 build-ext:
@@ -193,12 +197,12 @@ endif
 # PERF_AB_KSELECT overrides the default full-suite selector for focused probes.
 BASE ?= HEAD~1
 perf-ab:
-	@VOLAS_PYTHON=$(PYTHON) bash scripts/perf_ab.sh "$(BASE)" "$(INDICATOR)" "$(SECTION)"
+	@BUILD_OPT=$(BUILD_OPT) VOLAS_PYTHON=$(PYTHON) bash scripts/perf_ab.sh "$(BASE)" "$(INDICATOR)" "$(SECTION)"
 
 # Instruction-level regression gate: disassemble the hot-kernel probes and compare
 # each instruction count to scripts/asm_baseline.txt (numeric kernels must stay
-# byte-identical, the string kernel must not grow its per-element count). Arch-specific;
-# no-ops on a host whose arch differs from the baseline's.
+# unchanged in instruction count, the string kernel must not grow its per-element count). Arch-specific;
+# reports unsupported on a host whose arch differs from the baseline's.
 #
 #   make asm-diff           # check against the committed baseline
 #   make asm-diff-update     # refresh the baseline after a reviewed, justified change
@@ -212,7 +216,7 @@ asm-diff-update:
 # are too large to inline into an asm-diff wrapper probe. `hot-asm` DUMPS each function's
 # disassembly + instruction count for review; `hot-asm-check` GATES the counts (a `max`
 # gate: a hot path must not grow silently); `hot-asm-update` refreshes the baseline.
-# Counted directly from `rustc --emit asm`. Complements the byte-exact `asm-diff` kernels.
+# Counted directly from `rustc --emit asm`. Complements the exact instruction count `asm-diff` kernels.
 #
 #   make hot-asm               # dump the inventory (FN=combine_at for one function)
 #   make hot-asm-check          # gate the gated functions against scripts/hot_asm_baseline.txt

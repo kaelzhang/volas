@@ -55,11 +55,45 @@ if [ ! -x "$PROFDATA" ] || [ ! -x "$COV" ]; then
     exit 1
 fi
 
+# A release wheel is tested directly before the separate coverage build replaces it.
+# Preserve the exact wheel across coverage; coverage is never proof of PGO behavior.
+RELEASE_WHEEL="$("$PYTHON" - <<'PYCODE'
+import json, pathlib, sysconfig
+p = pathlib.Path(sysconfig.get_path('purelib')) / 'volas-build.json'
+if p.exists():
+    from scripts.build_release import digest
+    m = json.loads(p.read_text())
+    if digest(m['wheel']) != m['wheel_sha256']:
+        raise ValueError('release wheel hash mismatch')
+    import importlib
+    native = importlib.import_module('volas_rs.volas_rs')
+    if digest(native.__file__) != m['native_sha256']:
+        raise ValueError('installed native library hash mismatch')
+    print(m['wheel'])
+PYCODE
+)"
+if [ -n "$RELEASE_WHEEL" ]; then
+    echo ">> testing the installed release wheel before coverage: $RELEASE_WHEEL"
+    "$PYTHON" -m pytest test/ --benchmark-skip -q --basetemp="$PWD/$PROF_DIR/release-pytest"
+fi
+
 restore() {
-    find . -name '*.profraw' -not -path './target/*' -delete 2>/dev/null || true
-    echo ">> restoring the normal extension (maturin develop --release)..."
-    env -u RUSTFLAGS -u LLVM_PROFILE_FILE \
-        "$PYTHON" -m maturin develop --release >/dev/null 2>&1 || true
+    if [ -n "$RELEASE_WHEEL" ]; then
+        echo ">> restoring the exact release wheel..."
+        "$PYTHON" -m pip install --no-deps --force-reinstall "$RELEASE_WHEEL"
+        "$PYTHON" - <<'PYCODE'
+import importlib, json, pathlib, sysconfig
+from scripts.build_release import digest
+m = json.loads((pathlib.Path(sysconfig.get_path('purelib')) / 'volas-build.json').read_text())
+native = importlib.import_module('volas_rs.volas_rs')
+assert digest(native.__file__) == m['native_sha256'], 'release restore hash mismatch'
+print('restored release native SHA-256:', m['native_sha256'])
+PYCODE
+    else
+        echo ">> restoring a normal release through the build owner..."
+        env -u RUSTFLAGS -u LLVM_PROFILE_FILE \
+            "$PYTHON" scripts/build_release.py --mode normal --artifacts "$PWD/target/coverage-restore-$(date +%Y%m%d-%H%M%S)" --install
+    fi
 }
 trap restore EXIT
 
@@ -76,7 +110,7 @@ cargo llvm-cov --workspace --exclude volas-python --quiet \
 # maturin's build), run the suite, then export LCOV for the exact .so that ran.
 echo ">> building instrumented extension..."
 export RUSTFLAGS="${RUSTFLAGS:-} -Cinstrument-coverage"
-"$PYTHON" -m maturin develop --quiet
+LLVM_PROFILE_FILE="$PWD/$PROF_DIR/build-%m-%p.profraw" "$PYTHON" -m maturin develop --quiet
 # maturin may install volas_rs as a package shim (`from .volas_rs import *`), so
 # the native object lives inside the package dir, not at `.origin`.
 SO="$("$PYTHON" - <<'PY'
@@ -98,8 +132,8 @@ if [ -z "$SO" ] || [ ! -f "$SO" ]; then
 fi
 
 echo ">> running Python suite against the instrumented extension..."
-LLVM_PROFILE_FILE="$PROF_DIR/pytest-%p-%m.profraw" \
-    "$PYTHON" -m pytest test/ --benchmark-skip -q
+LLVM_PROFILE_FILE="$PWD/$PROF_DIR/pytest-%p-%m.profraw" \
+    "$PYTHON" -m pytest test/ --benchmark-skip -q --basetemp="$PWD/$PROF_DIR/coverage-pytest"
 
 "$PROFDATA" merge -sparse "$PROF_DIR"/pytest-*.profraw -o "$PROF_DIR/pytest.profdata"
 "$COV" export --format=lcov --instr-profile="$PROF_DIR/pytest.profdata" "$SO" \
