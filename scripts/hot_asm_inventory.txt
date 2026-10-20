@@ -1,0 +1,8 @@
+volas-core|fold_forming_row|max|per-bar: tf-fold combines the forming row in place
+volas-core|combine_at|max|per-bar: the fold cell-combine (per column, per bar)
+volas-compute|rolling_max|max|kernel: van-Herk rolling max (window extrema)
+volas-compute|rolling_min|max|kernel: van-Herk rolling min
+volas-core|any_missing|loop32|input: f64 SIMD non-finite scan (instructions per 32 rows)
+volas-core|any_missing_f32|loop32|input: f32 SIMD non-finite scan (instructions per 32 rows)
+volas-directive|execute|-|per-eval: directive AST evaluation
+volas-directive|dispatch|-|per-eval: indicator command switch (grows with the command set)

@@ -13,9 +13,9 @@
 #             FAIL if it grew (a `max` gate: a hot path must not get heavier silently).
 #   update  — rewrite the baseline (after a reviewed, justified change).
 #
-# This is the broad-function GATE; `make asm-diff` stays the byte-exact gate for the
+# This is the broad-function GATE; `make asm-diff` stays the gate for exact instruction counts for the
 # tiny ma/ema/string kernels. Counts are arch- and compiler-specific (the baseline
-# records the arch and the gate no-ops on a different host).
+# records the arch and the gate reports unsupported on a different host).
 #
 #   make hot-asm                 # dump the whole inventory (FN=combine_at for one)
 #   make hot-asm-check            # gate the GATED functions against the baseline
@@ -28,22 +28,19 @@
 set -euo pipefail
 ROOT="$(git rev-parse --show-toplevel)"
 cd "$ROOT"
+"${VOLAS_PYTHON:-python3}" -c 'import sys; sys.path.insert(0,"scripts"); from build_release import check_environment; import os; check_environment(os.environ)'
+[ "$(rustc --version | awk '{print $2}')" = 1.96.0 ] || { echo "asm: requires rustc 1.96.0" >&2; exit 2; }
+if [ -n "${PGO_SITE:-}" ]; then
+  "${VOLAS_PYTHON:-python3}" scripts/pgo_asm.py --site "$PGO_SITE" --output "${PGO_ASM_OUT:?set PGO_ASM_OUT for the separate final-library report}"
+fi
 ARCH="$(uname -m)"
 MODE="${1:-dump}"
-OUT="target/hot-asm"
+TARGET="${CARGO_TARGET_DIR:-$ROOT/target}"
+OUT="$TARGET/hot-asm"
 BASELINE="scripts/hot_asm_baseline.txt"
 FN_FILTER="${FN:-}"
 
-INVENTORY='
-volas-core|fold_forming_row|max|per-bar: tf-fold combines the forming row in place
-volas-core|combine_at|max|per-bar: the fold cell-combine (per column, per bar)
-volas-compute|rolling_max|max|kernel: van-Herk rolling max (window extrema)
-volas-compute|rolling_min|max|kernel: van-Herk rolling min
-volas-core|any_missing|loop32|input: f64 SIMD non-finite scan (instructions per 32 rows)
-volas-core|any_missing_f32|loop32|input: f32 SIMD non-finite scan (instructions per 32 rows)
-volas-directive|execute|-|per-eval: directive AST evaluation
-volas-directive|dispatch|-|per-eval: indicator command switch (grows with the command set)
-'
+INVENTORY="$(cat scripts/hot_asm_inventory.txt)"
 
 # --- emit release asm once per distinct crate (bash-3.2 portable; no assoc arrays) ---
 emit_asm() {
@@ -55,19 +52,20 @@ emit_asm() {
       --emit asm -C "llvm-args=-x86-asm-syntax=intel"
   done
 }
-asm_of() { ls -t "target/release/deps/${1//-/_}"-*.s 2>/dev/null | head -1; }
+asm_of() { ls -t "$TARGET/release/deps/${1//-/_}"-*.s 2>/dev/null | head -1; }
 
 # Instruction count of `fn`'s first symbol in `crate`'s asm; also writes its body to
 # target/hot-asm/<fn>.s when $1 == keep.
 count_fn() { # $1 keep|nokeep  $2 crate  $3 fn  $4 max|loop32|-
   local asm body
   asm="$(asm_of "$2")"
-  [ -z "$asm" ] && { if [ "${4:-max}" = loop32 ]; then echo 999999; else echo 0; fi; return; }
+  [ -n "$asm" ] || { echo "hot-asm: missing assembly for $2" >&2; return 2; }
   body="$(awk -v pat="$3" '
     $0 ~ ("[_A-Za-z].*" pat "1[0-9]h[0-9a-f]+E:$") && !f { f = 1 }
     f { print }
     f && /\.cfi_endproc/ { exit }
   ' "$asm")"
+  [ -n "$body" ] || { echo "hot-asm: missing symbol $3" >&2; return 2; }
   if [ "$1" = keep ]; then mkdir -p "$OUT"; printf '%s\n' "$body" > "$OUT/$3.s"; fi
   if [ "${4:-max}" = loop32 ]; then
     # Count the whole back-edge loop, including its length test. Fail closed if
@@ -109,8 +107,8 @@ if [ "$MODE" = check ]; then
   [ -f "$BASELINE" ] || { echo "hot-asm: no baseline; run 'make hot-asm-update'"; exit 2; }
   base_arch="$(sed -n 's/.*arch: \([^)]*\)).*/\1/p' "$BASELINE" | head -1)"
   if [ -n "$base_arch" ] && [ "$base_arch" != "$ARCH" ]; then
-    echo "hot-asm: baseline is for '$base_arch', host is '$ARCH' — skipping (arch-specific)."
-    exit 0
+    echo "hot-asm: baseline is for '$base_arch', host is '$ARCH' — unsupported (arch-specific)."
+    exit 2
   fi
   emit_asm
   mkdir -p "$OUT"; rm -f "$OUT/.hot_fail"   # the per-regression flag is written here under set -e

@@ -3,12 +3,12 @@
 #
 # Builds the `#[no_mangle]` probe wrappers (numeric ma/ema, the string compare scan),
 # disassembles each, counts its instructions, and compares to scripts/asm_baseline.txt:
-#   exact  — a numeric kernel must stay instruction-identical (any change fails);
+#   exact  — a numeric kernel must stay unchanged in instruction count (any count change fails);
 #   max    — the string kernel must not increase its per-element instruction count.
 #
 # This makes the by-hand instruction-level review a permanent, reproducible gate so a
 # refactor cannot silently grow a hot loop. The counts are CPU-arch-specific; the
-# baseline records its arch and the gate no-ops on a different host.
+# baseline records its arch and the gate reports unsupported on a different host.
 #
 #   bash scripts/asm_diff.sh           # check against the committed baseline
 #   ASM_UPDATE=1 bash scripts/asm_diff.sh   # refresh the baseline (reviewed change)
@@ -16,6 +16,11 @@ set -euo pipefail
 
 ROOT="$(git rev-parse --show-toplevel)"
 cd "$ROOT"
+"${VOLAS_PYTHON:-python3}" -c 'import sys; sys.path.insert(0,"scripts"); from build_release import check_environment; import os; check_environment(os.environ)'
+[ "$(rustc --version | awk '{print $2}')" = 1.96.0 ] || { echo "asm: requires rustc 1.96.0" >&2; exit 2; }
+if [ -n "${PGO_SITE:-}" ]; then
+  "${VOLAS_PYTHON:-python3}" scripts/pgo_asm.py --site "$PGO_SITE" --output "${PGO_ASM_OUT:?set PGO_ASM_OUT for the separate final-library report}"
+fi
 BASELINE="scripts/asm_baseline.txt"
 ARCH="$(uname -m)"
 OBJDUMP="${OBJDUMP:-objdump}"
@@ -26,17 +31,14 @@ echo ">> building kernel probes (release)..."
 cargo build --release -q --example asm_probe_numeric -p volas-compute
 cargo build --release -q --example asm_probe_string -p volas-core
 
-NUM=target/release/examples/asm_probe_numeric
-STR=target/release/examples/asm_probe_string
+TARGET="${CARGO_TARGET_DIR:-$ROOT/target}"
+NUM="$TARGET/release/examples/asm_probe_numeric"
+STR="$TARGET/release/examples/asm_probe_string"
 
 # Count the instruction lines of one disassembled function (symbol header to the
 # trailing blank line). macOS prefixes a `#[no_mangle]` symbol with one underscore.
 count_fn() { # $1 binary  $2 symbol (no leading underscore)
-  "$OBJDUMP" -d "$1" 2>/dev/null | awk -v s="<_$2>:" '
-    index($0, s) { f = 1; next }
-    f && /^$/    { f = 0 }
-    f && /^[0-9a-f]+:/ { c++ }
-    END { print c + 0 }'
+  OBJDUMP="$OBJDUMP" "${VOLAS_PYTHON:-python3}" scripts/asm_symbols.py "$1" "$2"
 }
 # Current instruction count of a probe (kept bash-3.2 portable — no assoc arrays).
 cur_count() { # $1 probe
@@ -50,7 +52,7 @@ if [[ "${ASM_UPDATE:-0}" == "1" ]]; then
   ma=$(cur_count probe_ma); ema=$(cur_count probe_ema); str=$(cur_count probe_str_eq_scan)
   {
     echo "# Instruction-level baseline for \`make asm-diff\` (arch: $ARCH)."
-    echo "# <probe> <kind> <count>: exact = numeric kernel (must stay byte-identical),"
+    echo "# <probe> <kind> <count>: exact = numeric kernel (must keep the same instruction count),"
     echo "# max = string kernel (must not increase). Refresh only after a reviewed change."
     echo "probe_ma exact $ma"
     echo "probe_ema exact $ema"
@@ -64,8 +66,8 @@ fi
 
 base_arch="$(sed -n 's/.*arch: \([^)]*\)).*/\1/p' "$BASELINE" | head -1)"
 if [[ -n "$base_arch" && "$base_arch" != "$ARCH" ]]; then
-  echo "asm-diff: baseline is for '$base_arch', host is '$ARCH' — skipping (counts are arch-specific)."
-  exit 0
+  echo "asm-diff: baseline is for '$base_arch', host is '$ARCH' — unsupported (counts are arch-specific)."
+  exit 2
 fi
 
 fail=0
@@ -84,4 +86,4 @@ if [[ "$fail" == 1 ]]; then
   echo "          intended and justified, refresh with 'make asm-diff-update'."
   exit 1
 fi
-echo "asm-diff: PASS — numeric kernels instruction-identical, string kernel not regressed."
+echo "asm-diff: PASS — numeric instruction counts unchanged, string kernel not regressed."
