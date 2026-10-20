@@ -15,7 +15,8 @@ pub struct Reach {
     /// The directive's lookback (warm-up rows).
     pub lookback: usize,
     /// The valid rows before a new one that resuming the column's carried state reads
-    /// (0 for a state that is all it needs): a frame holding fewer recomputes instead.
+    /// (0 when its framed state owns every kernel tail): a frame holding fewer
+    /// recomputes instead. This counts raw frame rows, never rows saved in the state.
     pub resume: usize,
     /// The rows a contiguous slice must keep for the column to stay cached (at least
     /// `lookback`): fewer cannot continue it exactly.
@@ -37,7 +38,8 @@ pub type Directive = Arc<dyn std::any::Any + Send + Sync>;
 /// produced it, its lookback, and how many leading rows currently hold valid
 /// values. After an `append`, the new rows are stale (NaN) and `valid_rows` lags
 /// `height` until `fulfill` recomputes the tail.
-#[derive(Clone, Debug)]
+#[derive(Debug)]
+#[repr(align(16))]
 pub struct ComputedMeta {
     /// The bound directive the column computes (its canonical name is the column's).
     pub directive: Directive,
@@ -80,7 +82,8 @@ pub struct ComputedMeta {
     /// The checkpoint the next drop of the head will keep, captured as the refresh passed
     /// its row (so the drop need not replay to it); dropped by any change to the rows it
     /// covers.
-    pending: Option<Checkpoint>,
+    /// Kept outside hot metadata: most columns have no pending boundary.
+    pending: Option<CheckpointRef>,
     /// Checkpoints of the history at regular rows ([`Anchors`]), formed by replays.
     anchors: Anchors,
     /// Why no checkpoint of the history could be formed when the frame dropped the rows
@@ -140,7 +143,7 @@ impl ComputedMeta {
 
 /// A 2-D, column-oriented, time-indexed table. All columns share one index and
 /// have equal length (`height`).
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 pub struct DataFrame {
     // Schema (names + lookup) is `Arc`-shared so a frame clone / same-schema
     // derivation (slice / take / mask / astype) is an O(1) refcount bump, not a
@@ -178,6 +181,21 @@ pub struct DataFrame {
     /// first rows (see [`lead_rows`](Self::lead_rows)): a contiguous selection that drops
     /// the rows its columns' windows reach into keeps them here. `None` with none.
     lead: Option<lead::Lead>,
+}
+
+impl Clone for DataFrame {
+    fn clone(&self) -> Self {
+        // Copies share their immutable prefix, never future publications.
+        let computed = self.computed.iter().map(|(name, meta)| {
+            (Arc::clone(name), meta.forked(self.origin))
+        }).collect();
+        Self {
+            names: Arc::clone(&self.names), columns: self.columns.clone(),
+            name_to_idx: Arc::clone(&self.name_to_idx), index: Arc::clone(&self.index),
+            height: self.height, computed, first_computed: self.first_computed,
+            origin: self.origin, stale_by: self.stale_by, lead: self.lead.clone(),
+        }
+    }
 }
 
 /// The cause an append (new rows, a replaced last row, a folded forming bar) leaves.
@@ -491,8 +509,12 @@ mod computed;
 pub use computed::StaleComputed;
 mod state_words;
 pub use state_words::StateWords;
+#[doc(hidden)]
+pub use state_words::StateWordArena;
 mod history;
 pub use history::{Anchors, Checkpoint, CheckpointRef, History, ANCHOR_SPACING};
+#[doc(hidden)]
+pub use history::ANCHOR_CHUNK_POINTS;
 
 #[cfg(test)]
 mod tests;

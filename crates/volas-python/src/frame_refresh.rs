@@ -75,6 +75,7 @@ impl PyDataFrame {
                 valid_rows: vr,
                 since,
                 warm,
+                state_ready,
             } = stale;
             self.refresh_column(
                 &name,
@@ -86,6 +87,7 @@ impl PyDataFrame {
                     warm,
                 },
                 height,
+                state_ready,
             )?;
         }
         Ok(())
@@ -104,27 +106,23 @@ impl PyDataFrame {
             warm,
         }: Stale,
         height: usize,
+        mut has_state: bool,
     ) -> PyResult<()> {
-        let lb = reach.lookback;
         let origin = self.inner.origin();
-        // Query the carried cursor once: ordinary appends and lazy selections share
-        // the same resume gate, without repeating a cached-metadata lookup.
+        // The snapshot already checked this cursor while borrowing its metadata.
+        // Only a replay or step needs to borrow the state words again.
         let can_resume = warm && vr >= reach.resume;
-        let mut has_resume = can_resume && self.inner.computed_resume_state(name).is_some();
+        let mut has_resume = can_resume && has_state;
         // A selection ending before its source's last row carries a recursion's states
         // lazily: those as of its last valid row are replayed here, the first time the
         // column continues, from the nearest point of its history it keeps.
-        if can_resume
+        if !has_resume
+            && can_resume
             && vr > 0
             && matches!(reach.history, volas_core::History::Carried { .. })
-            && !has_resume
         {
-            if let Some((state, before)) = volas_core::Replay::continuation(
-                &volas_directive::Replayer, &self.inner, name, vr,
-            ) {
-                self.inner.set_computed_states(name, Some(state), before);
-                has_resume = true;
-            }
+            has_resume = self.restore_carried_state(name, vr);
+            has_state |= has_resume;
         }
         // The rows before row `vr` that a resume or a recompute of it reads, when the frame
         // does not hold them: its lead keeps them (a contiguous selection keeps the data
@@ -132,11 +130,11 @@ impl PyDataFrame {
         // when a recursive continuation has not yet formed a state.
         let lead = self.inner.lead_rows();
         if since < origin && lead > 0 {
-            let stateless =
-                reach.history.recursive() && self.inner.computed_resume_state(name).is_none();
+            let stateless = reach.history.recursive() && !has_state;
+            let needed = if has_resume && reach.history.recursive() { reach.resume } else { reach.lead() };
             let rows = match stateless {
                 true if since + lead >= origin => Some(origin - since),
-                _ if vr < reach.lead() => Some(reach.lead() - vr),
+                _ if vr < needed => Some(needed - vr),
                 _ => None,
             };
             if let Some(rows) = rows {
@@ -172,16 +170,13 @@ impl PyDataFrame {
             // One row at a time through the allocation-free step: each row's value and
             // the state as of it; the last two states are kept. Passing the row the next
             // drop of a bounded frame's head keeps, it leaves the checkpoint there.
-            let pending = self.pending_row(name, reach.history);
+            let pending = self.pending_row(name, reach.history, vr);
             let mut row = vr;
             while row < height {
-                let value = self.inner.step_computed_state(name, |live, prev, _, next| {
+                let value = self.inner.resume_computed_value(name, |live, prev, _, next| {
                     volas_directive::exec::execute_resume_step(live, node, prev, (row, since), next)
-                });
-                let Some(value) = value else { break };
-                self.inner
-                    .update_computed_value(name, row, value)
-                    .map_err(pyerr)?;
+                }).map_err(pyerr)?;
+                let Some(_) = value else { break };
                 if pending == Some(self.inner.origin() + row) {
                     self.keep_pending(name, node, row + 1, held);
                 }
@@ -195,6 +190,36 @@ impl PyDataFrame {
                 return Ok(());
             }
         }
+        self.recompute_stale(name, node, Stale { reach, vr, since, warm }, height)
+    }
+
+    // A lazy selection recovers its state once. Its replay buffers must not
+    // enlarge the stack of every later scalar refresh.
+    #[cold]
+    #[inline(never)]
+    fn restore_carried_state(&mut self, name: &str, end: usize) -> bool {
+        let Some((state, before)) = volas_core::Replay::continuation(
+            &volas_directive::Replayer, &self.inner, name, end,
+        ) else { return false; };
+        self.inner.set_computed_states(name, Some(state), before);
+        true
+    }
+
+    // The vector recompute owns its large temporary frame and state buffers.
+    // Keeping that fallback out of refresh leaves scalar appends no stack slot
+    // or register spills for buffers that only a declined resume can use.
+    #[cold]
+    #[inline(never)]
+    fn recompute_stale(
+        &mut self,
+        name: &str,
+        node: &Ast,
+        Stale { reach, vr, since, warm }: Stale,
+        height: usize,
+    ) -> PyResult<()> {
+        let origin = self.inner.origin();
+        let held = since >= origin;
+        let lb = reach.lookback;
         let df = &self.inner;
         // A directive with no recursion and no position output anywhere (SMA, ROC,
         // `close > ma:20`, price transforms, CDL, …) depends only on a fixed trailing
@@ -218,7 +243,8 @@ impl PyDataFrame {
         }
         if reach.history.recursive() && !held {
             // The rows the recursion started on are gone: replay its checkpoint.
-            let pending = self.pending_row(name, reach.history);
+            // Replay may pass rows before the stale tail.
+            let pending = self.pending_row(name, reach.history, 0);
             return self.replay_column(name, node, (vr, height), pending);
         }
         // Cold / warm-up / no resume: recompute the column and capture both states.
@@ -248,6 +274,7 @@ impl PyDataFrame {
     /// needs before); otherwise a column that depends on a trailing window, or whose history
     /// the lead holds from its start, is recomputed over it — its rows' values are those of
     /// the whole history — and any other recursion replays its checkpoint (or raises).
+    #[inline(never)]
     fn refresh_led(
         &mut self,
         name: &str,
@@ -265,7 +292,7 @@ impl PyDataFrame {
         let mut row = vr;
         if warm && vr + off >= reach.resume && self.inner.computed_resume_state(name).is_some() {
             while row < height {
-                let value = self.inner.step_computed_state(name, |_, prev, _, next| {
+                let value = self.inner.resume_computed_value(name, |_, prev, _, next| {
                     volas_directive::exec::execute_resume_step(
                         led,
                         node,
@@ -273,11 +300,8 @@ impl PyDataFrame {
                         (row + off, since),
                         next,
                     )
-                });
-                let Some(value) = value else { break };
-                self.inner
-                    .update_computed_value(name, row, value)
-                    .map_err(pyerr)?;
+                }).map_err(pyerr)?;
+                let Some(_) = value else { break };
                 row += 1;
             }
             if row == height {
@@ -345,17 +369,24 @@ impl PyDataFrame {
     /// The absolute row whose checkpoint the next drop of a bounded frame's head keeps for
     /// cached recursion `name` (`history`), when it is not kept yet: the drop keeps the
     /// frame's last `capacity` rows of twice that, so its head is `capacity` rows on.
-    fn pending_row(&self, name: &str, history: volas_core::History) -> Option<usize> {
+    fn pending_row(&self, name: &str, history: volas_core::History, from: usize) -> Option<usize> {
         let (Some(w), volas_core::History::Carried { operands }) = (&self.window, history) else {
             return None;
         };
-        let at = self.inner.origin() + w.capacity - 1 + operands;
+        // Compare frame-relative rows first: an ordinary append is already past
+        // this boundary and needs neither absolute-coordinate sums nor an owner read.
+        let row = w.capacity - 1 + operands;
+        if row < from || row >= self.inner.height() {
+            return None;
+        }
+        let at = self.inner.origin() + row;
         (!self.inner.has_computed_pending(name, at)).then_some(at)
     }
 
     /// Keep the checkpoint of cached recursion `name` as of row `end - 1`, which its
     /// carried state now describes, for the next drop of the head (`whole`: the frame
     /// holds the history's start).
+    #[inline(never)]
     fn keep_pending(&mut self, name: &str, node: &Ast, end: usize, whole: bool) {
         let state = self
             .inner
@@ -373,6 +404,7 @@ impl PyDataFrame {
     /// row the next drop of a bounded frame's head keeps), up to it first, keeping its
     /// checkpoint (`whole`: the frame holds the history's start). `false` (nothing
     /// written) when the column carries no state of row `from - 1` or a resume declines.
+    #[inline(never)]
     fn resume_rows(
         &mut self,
         name: &str,
@@ -460,6 +492,7 @@ impl PyDataFrame {
     /// such a checkpoint (a slice carries none; a bounded window keeps one for each
     /// declared recursion) the frame does not hold the history the values depend on, and
     /// the recompute raises.
+    #[inline(never)]
     fn replay_column(
         &mut self,
         name: &str,

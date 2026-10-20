@@ -51,6 +51,7 @@ from stock_pandas import StockDataFrame
 from volas import DataFrame as VolasDataFrame
 
 from . import bench_long
+from .bench_history import test_api_history_derive, test_api_history_continue  # noqa: F401
 from .bench_interop import OPS as INTEROP_OPS
 from .bench_first_cache import FIRST_CACHE_IDS, FIRST_CACHE_ROUNDS, build as build_first_cache
 from .bench_pandas import PANDAS_CALC

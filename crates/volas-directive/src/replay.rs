@@ -110,7 +110,7 @@ fn replayed<R>(frame: &DataFrame, name: &str, f: impl FnOnce(&Replayed<'_>) -> O
     let node = frame.computed_directive(name)?.downcast_ref::<Ast>()?;
     let df = frame;
     let since = frame.computed_since(name)?;
-    let anchors = frame.computed_anchors(name)?;
+    let anchors = frame.computed_anchors_ref(name)?;
     f(&History { df, node, name, frame, since, anchors }.over_lead()?)
 }
 
@@ -124,7 +124,7 @@ struct History<'a> {
     frame: &'a DataFrame,
     /// The absolute row the history starts at.
     since: usize,
-    anchors: volas_core::Anchors,
+    anchors: &'a volas_core::Anchors,
 }
 
 /// The history as [`History::over_lead`] gives it: the rows a replay from a checkpoint
@@ -134,14 +134,14 @@ struct Replayed<'a> {
     history: History<'a>,
     rows: std::borrow::Cow<'a, DataFrame>,
     /// The checkpoint the frame keeps of a history that started before its row 0.
-    kept: Option<volas_core::Checkpoint>,
+    kept: Option<&'a volas_core::CheckpointRef>,
 }
 
 impl<'a> History<'a> {
     /// This history ready to replay; `None` when the frame holds neither its start (in
     /// its rows or its lead's) nor a checkpoint of it.
     fn over_lead(self) -> Option<Replayed<'a>> {
-        let kept = self.frame.computed_checkpoint(self.name).cloned();
+        let kept = self.frame.computed_checkpoint_ref(self.name);
         let rows = match self.frame.lead_rows() {
             0 => std::borrow::Cow::Borrowed(self.df),
             lead => std::borrow::Cow::Owned(self.frame.led(self.df, lead)),
@@ -193,9 +193,9 @@ impl Replayed<'_> {
     /// start.
     fn nearest(&self, at: usize) -> Option<volas_core::CheckpointRef> {
         let usable = |cp: &volas_core::Checkpoint| cp.at <= at && cp.at + 1 >= self.rows.origin();
-        let kept = self.kept.clone().map(volas_core::CheckpointRef::from);
+        let kept = self.kept.filter(|cp| usable(cp)).cloned();
         let anchor = self.history.anchors.nearest(at).filter(|cp| usable(cp));
-        match (anchor, kept.filter(|cp| usable(cp))) {
+        match (anchor, kept) {
             (Some(anchor), Some(kept)) => Some(if anchor.at >= kept.at { anchor } else { kept }),
             (anchor, kept) => anchor.or(kept),
         }
@@ -282,4 +282,25 @@ mod cache_policy_tests {
         }
     }
 
+}
+
+#[cfg(test)]
+mod checkpoint_sharing_tests {
+    use super::*;
+
+    #[test]
+    fn nearest_replay_checkpoint_shares_its_existing_owner() {
+        let mut frame = DataFrame::new(vec!["close".into(), "ema:5".into()],
+            vec![volas_core::Column::f64(vec![1.0; 1200]); 2], None).unwrap();
+        let node = crate::parse("ema:5").unwrap();
+        frame.set_computed("ema:5", std::sync::Arc::new((*node).clone()), crate::lookback::reach(&node));
+        frame.set_computed_checkpoint("ema:5", Ok(volas_core::Checkpoint {
+            at: 511, state: Some(vec![123.0].into()), raw: vec![],
+        }));
+        replayed(&frame, "ema:5", |history| {
+            let nearest = history.nearest(600).unwrap();
+            assert!(std::ptr::eq(&*nearest, frame.computed_checkpoint("ema:5").unwrap()));
+            Some(())
+        }).unwrap();
+    }
 }

@@ -20,6 +20,26 @@ impl Column {
         }
     }
 
+    /// Live retention keeps float columns independently writable, with room for
+    /// the next append cycle. Other dtypes already have ordinary owned slices.
+    pub(crate) fn slice_with_spare(&self, start: usize, end: usize, spare: usize) -> Column {
+        match self {
+            Column::F64(v) => Column::F64(v.slice_with_spare(start, end, spare)),
+            Column::F32(v) => Column::F32(v.slice_with_spare(start, end, spare)),
+            _ => self.slice(start, end),
+        }
+    }
+
+    /// Live compaction reuses unique bounded float allocations; other dtypes
+    /// retain their ordinary independent slicing semantics.
+    pub(crate) fn compact_range(&mut self, start: usize, end: usize, spare: usize) {
+        match self {
+            Column::F64(v) => v.compact_range(start, end, spare),
+            Column::F32(v) => v.compact_range(start, end, spare),
+            _ => *self = self.slice(start, end),
+        }
+    }
+
     /// Gather the given positions into a new column (fancy indexing).
     pub fn take(&self, idx: &[usize]) -> Column {
         self.take_with_spare(idx, 0, 0)

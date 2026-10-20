@@ -53,18 +53,23 @@ fn lead(df: &DataFrame) -> Vec<f64> {
 
 #[test]
 fn a_multi_column_float_lead_keeps_copied_history_after_writes_and_drops() {
-    let mut df = frame(100);
-    df.set_column("open", Column::f64((0..100).map(|i| 1000.0 + i as f64).collect())).unwrap();
-    df.set_computed_checkpoint("ema", Ok(Checkpoint { at: 89, state: Some(vec![89.0].into()), raw: vec![] }));
-    let mut tail = df.rows(90, 95, &NoReplay);
-    assert_eq!(tail.lead_rows(), 3);
-    assert_eq!(lead(&tail), vec![87.0, 88.0, 89.0]);
-    assert_eq!(lead_of(&tail, "open"), vec![1087.0, 1088.0, 1089.0]);
-    df.set_column("open", Column::f64(vec![0.0; 100])).unwrap();
-    tail.set_column("open", Column::f64(vec![7.0; 5])).unwrap();
-    let dropped = tail.drop_columns(&["close".into()]).unwrap();
-    assert_eq!(lead_of(&dropped, "open"), vec![1087.0, 1088.0, 1089.0]);
-    assert_eq!(dropped.column("open").unwrap().to_f64_vec(), vec![7.0; 5]);
+    // An empty selection still needs its raw lead for a future continuation.
+    for rows in [0, 5] {
+        let mut df = frame(100);
+        df.set_column("open", Column::f64((0..100).map(|i| 1000.0 + i as f64).collect())).unwrap();
+        df.set_computed_checkpoint("ema", Ok(Checkpoint { at: 89, state: Some(vec![89.0].into()), raw: vec![] }));
+        let mut tail = df.rows(90, 90 + rows, &NoReplay);
+        assert_eq!(tail.height(), rows);
+        assert_eq!(tail.lead_rows(), 3);
+        assert_eq!(lead(&tail), vec![87.0, 88.0, 89.0]);
+        assert_eq!(lead_of(&tail, "open"), vec![1087.0, 1088.0, 1089.0]);
+        df.set_column("open", Column::f64(vec![0.0; 100])).unwrap();
+        drop(df);
+        tail.set_column("open", Column::f64(vec![7.0; rows])).unwrap();
+        let dropped = tail.drop_columns(&["close".into()]).unwrap();
+        assert_eq!(lead_of(&dropped, "open"), vec![1087.0, 1088.0, 1089.0]);
+        assert_eq!(dropped.column("open").unwrap().to_f64_vec(), vec![7.0; rows]);
+    }
 }
 
 #[test]
@@ -255,9 +260,8 @@ fn a_lead_shrinks_with_the_columns_that_read_it() {
     added.set_column("x", Column::str(vec!["a".into(); 5])).unwrap();
 }
 
-/// Anchors are a memo of a recursion's history: shared by copies, shared by a selection
-/// for the rows before its last (where its history agrees with its source's), dropped by
-/// a write to the inputs.
+/// Copies and selections share only their reachable immutable chunks and
+/// publish independently, including future rows after append. Input writes drop it.
 #[test]
 fn anchors_follow_the_rows_and_a_write_drops_them() {
     let mut df = frame(10);
@@ -268,17 +272,19 @@ fn anchors_follow_the_rows_and_a_write_drops_them() {
     assert_eq!(anchors.len(), 3);
     assert_eq!(anchors.nearest(6).map(|cp| cp.at), Some(5));
     assert_eq!(anchors.nearest(1), None);
-    assert_eq!(df.clone().computed_anchors("ema").unwrap(), anchors);
+    let copied = df.clone().computed_anchors("ema").unwrap();
+    assert_ne!(copied, anchors);
+    assert!(std::ptr::eq(&*copied.nearest(5).unwrap(), &*anchors.nearest(5).unwrap()));
     let sub = df.rows(4, 9, &NoReplay);
     let shared = sub.computed_anchors("ema").unwrap();
-    assert_eq!((shared.len(), shared.nearest(9).map(|cp| cp.at)), (2, Some(5)));
+    assert_eq!((shared.len(), shared.nearest(9).map(|cp| cp.at)), (1, Some(5)));
     assert_ne!(shared, anchors);
-    // one the selection forms before its last row is its source's too; one past it, on
-    // rows that may come to differ, is not kept
+    // A selection owns its reachable anchors independently; a publication cannot
+    // make the other frame retain new history, including future publications.
     for at in [6, 8] {
         shared.keep(Checkpoint { at, state: None, raw: vec![] });
     }
-    assert_eq!((anchors.len(), shared.len()), (4, 3));
+    assert_eq!((anchors.len(), shared.len()), (3, 3));
     df.invalidate_computed_on_write("close");
     assert_eq!(df.computed_anchors("ema").unwrap().len(), 0);
     assert!(df.computed_anchors("close").is_none());
@@ -784,9 +790,9 @@ fn dense_anchor_bounds_survive_duplicates_batches_and_selection_limits() {
     assert!(anchors.nearest(1022).is_none());
     assert_eq!(anchors.nearest(usize::MAX).unwrap().at, 2559);
     assert_eq!(anchors.nearest(1535).unwrap().state, Some(vec![2.0].into()));
-    assert!(anchors.upto(0).nearest(usize::MAX).is_none());
-    assert!(anchors.upto(1023).nearest(usize::MAX).is_none());
-    assert_eq!(anchors.upto(1535).nearest(usize::MAX).unwrap().at, 1023);
+    assert!(anchors.bounded(0, 0).nearest(usize::MAX).is_none());
+    assert!(anchors.bounded(0, 1023).nearest(usize::MAX).is_none());
+    assert_eq!(anchors.bounded(0, 1535).nearest(usize::MAX).unwrap().at, 1023);
     anchors.keep(cp(1200, 5.0)); // invalidate the grid; ordered fallback finds it
     assert_eq!(anchors.nearest(1400).unwrap().at, 1200);
     anchors.keep(cp(511, 6.0)); // a point before the initial bulk remains ordered
@@ -794,7 +800,7 @@ fn dense_anchor_bounds_survive_duplicates_batches_and_selection_limits() {
     let high = Anchors::default();
     high.keep_all(vec![cp(usize::MAX - 1024, 1.0), cp(usize::MAX - 512, 2.0)]);
     assert_eq!(high.nearest(usize::MAX).unwrap().at, usize::MAX - 512);
-    assert_eq!(high.upto(usize::MAX - 512).nearest(usize::MAX).unwrap().at, usize::MAX - 1024);
+    assert_eq!(high.bounded(0, usize::MAX - 512).nearest(usize::MAX).unwrap().at, usize::MAX - 1024);
 }
 
 #[test]
@@ -857,7 +863,7 @@ fn irregular_anchor_batches_append_and_overlapping_grid_batches_keep_existing_va
     irregular.keep_all(vec![point(30, 3.0), point(40, 4.0)]);
     assert_eq!(irregular.len(), 4);
     assert_eq!(irregular.nearest(35).unwrap().state, Some(vec![3.0].into()));
-    assert_eq!(irregular.upto(30).nearest(usize::MAX).unwrap().at, 20);
+    assert_eq!(irregular.bounded(0, 30).nearest(usize::MAX).unwrap().at, 20);
     let grid = Anchors::default();
     grid.keep_all(vec![point(511, 1.0), point(1023, 2.0)]);
     grid.keep_all(vec![point(511, 9.0), point(1023, 10.0)]);
@@ -911,14 +917,14 @@ fn batch_anchors_keep_sorted_sparse_and_duplicate_points_with_the_same_owner() {
     assert_eq!(anchors.len(), 6);
     assert_eq!(anchors.nearest(700).unwrap().state, Some(vec![6.0].into()));
     assert_eq!(anchors.nearest(1535).unwrap().state, Some(vec![3.0].into()));
-    let selected = anchors.upto(1000);
+    let selected = anchors.bounded(0, 1000);
     selected.keep_all(vec![cp(800, 9.0), cp(1100, 10.0)]);
-    assert_eq!(selected.nearest(2000).unwrap().at, 800);
+    assert_eq!(selected.nearest(2000).unwrap().at, 1100);
     assert_eq!(anchors.nearest(1100).unwrap().at, 1023);
-    // An empty or wholly excluded batch does not disturb any point.
+    // Empty and future publications never expand the parent's owner.
     selected.keep_all(vec![]);
     selected.keep_all(vec![cp(1200, 11.0)]);
-    assert_eq!(anchors.len(), 7);
+    assert_eq!(anchors.len(), 6);
 }
 
 #[test]

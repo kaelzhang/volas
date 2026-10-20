@@ -258,17 +258,47 @@ impl<T: Element + Clone> Buffer<T> {
     /// The rows `[start, end)` as a fresh owned buffer. A slice of a buffer known to
     /// hold no NaN holds none either.
     pub fn slice(&self, start: usize, end: usize) -> Buffer<T> {
+        self.slice_with_spare(start, end, 0)
+    }
+
+    /// Copy a range into its own mutable owner with room for the next appends.
+    pub(crate) fn slice_with_spare(&self, start: usize, end: usize, spare: usize) -> Buffer<T> {
+        let source = &self.as_slice()[start..end];
+        let mut values = Vec::with_capacity(source.len().saturating_add(spare));
+        values.extend_from_slice(source);
         let nan = if self.nan_state() == NO_NAN {
             NO_NAN
         } else {
             UNKNOWN
         };
         let out = Buffer::with(
-            Data::Owned(Arc::new(self.as_slice()[start..end].to_vec())),
+            Data::Owned(Arc::new(values)),
             nan,
         );
         if self.missing.get() == NO_NAN { out.missing.set(NO_NAN); }
         out
+    }
+
+    /// Compact a bounded live owner without reallocating its next append cycle.
+    pub(crate) fn compact_range(&mut self, start: usize, end: usize, spare: usize)
+    where T: Copy {
+        let nan = self.nan_state();
+        let missing = self.missing.get();
+        if let Data::Owned(values) = &mut self.data {
+            // A unique seed may still be enormous. Keep only bounded capacity,
+            // just as for borrowed or shared sources, rather than pin that seed.
+            if values.capacity() <= (end - start).saturating_add(spare) {
+                if let Some(values) = Arc::get_mut(values) {
+                    values.copy_within(start..end, 0);
+                    values.truncate(end - start);
+                    values.reserve_exact(spare);
+                    self.nan.set(if nan == NO_NAN { NO_NAN } else { UNKNOWN });
+                    self.missing.set(if missing == NO_NAN { NO_NAN } else { UNKNOWN });
+                    return;
+                }
+            }
+        }
+        *self = self.slice_with_spare(start, end, spare);
     }
 }
 
