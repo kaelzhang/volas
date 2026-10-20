@@ -90,7 +90,9 @@ def summarize(base: list[dict], head: list[dict]) -> tuple[dict, dict]:
             output['benchmarks'][index] = copy.deepcopy(runs[0][name])
             output['benchmarks'][index]['stats'] = stats
     outputs[1]['paired'] = {'rounds': len(base), 'items': noise,
-                            'estimator': 'median of paired HEAD/BASE ratios'}
+                            'estimator': 'median of paired HEAD/BASE ratios',
+                            'consistent_slower': [item for item in noise if item['median_ratio'] > 1.03
+                                                  and min(item['head_seconds']) > max(item['base_seconds'])]}
     return outputs
 
 

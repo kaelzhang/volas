@@ -145,7 +145,7 @@ def test_timing_budget_keeps_default_and_total_samples(monkeypatch, pairs, expec
     assert all(value * int(pairs or '1') >= count for value, count in zip(actual, [3, 5, 20]))
 
 
-def _shell_arguments(tmp_path, script):
+def _shell_arguments(tmp_path, script, build_opt='normal', comparison='regression', archive=False):
     import os
     import subprocess
     import sys
@@ -154,10 +154,19 @@ def _shell_arguments(tmp_path, script):
     fake.write_text(f'#!{sys.executable}\n' + '''
 import json, os, pathlib, sys
 args = sys.argv[1:]
-if args[:2] == ['-m', 'maturin']:
-    output = pathlib.Path(args[args.index('--out') + 1])
-    output.mkdir(parents=True)
-    (output / 'fake.whl').touch()
+calls = pathlib.Path(os.environ['CALLS_CAPTURE'])
+with calls.open('a') as f:
+    f.write(json.dumps(args) + '\\n')
+if args and args[0].endswith('build_release.py'):
+    mode = args[args.index('--mode') + 1]
+    output = pathlib.Path(args[args.index('--artifacts') + 1])
+    stage = output / ('use' if mode == 'pgo' else mode)
+    (stage / 'site').mkdir(parents=True)
+    (stage / 'target').mkdir()
+    (stage / 'target' / 'cache.rlib').write_text('not an artifact')
+    (output / 'profile.profdata').write_text('profile')
+    (output / 'training-raw').mkdir()
+    (output / 'training-raw' / 'phase.profraw').write_text('raw')
 elif args and args[0].endswith('perf_pairs.py'):
     pathlib.Path(os.environ['PAIRS_CAPTURE']).write_text(json.dumps(args))
 ''')
@@ -166,10 +175,19 @@ elif args and args[0].endswith('perf_pairs.py'):
     site.mkdir()
     capture = tmp_path / 'arguments.json'
     environment = dict(os.environ, VOLAS_PYTHON=str(fake), BASE_SITE=str(site),
-                       PAIRS_CAPTURE=str(capture), PERF_AB_JSON_DIR='', PERF_AB_KSELECT='')
+                       PAIRS_CAPTURE=str(capture), CALLS_CAPTURE=str(tmp_path / 'calls.jsonl'),
+                       BUILD_OPT=build_opt, PERF_COMPARE=comparison,
+                       PERF_AB_JSON_DIR=str(tmp_path / 'archive') if archive else '', PERF_AB_KSELECT='')
     result = subprocess.run(['bash', str(script), 'HEAD'], env=environment,
                             capture_output=True, text=True)
     assert result.returncode == 0, result.stderr
+    calls = [json.loads(line) for line in (tmp_path / 'calls.jsonl').read_text().splitlines()]
+    build_index = next(i for i, args in enumerate(calls) if args and args[0].endswith('build_release.py'))
+    check_index = next(i for i, args in enumerate(calls) if args and args[0].endswith('build_pair.py'))
+    pairs_index = next(i for i, args in enumerate(calls) if args and args[0].endswith('perf_pairs.py'))
+    assert build_index < check_index < pairs_index
+    assert calls[build_index][calls[build_index].index('--mode') + 1] == ('pgo' if comparison == 'optimization' else build_opt)
+    assert calls[check_index][calls[check_index].index('--comparison') + 1] == comparison
     return json.loads(capture.read_text())
 
 
@@ -181,3 +199,20 @@ def test_full_shell_protocol_selects_every_section_and_release_costs(tmp_path):
     assert selector == 'volas or test_tf_live or test_first_cache or test_range'
     assert '--volas-cost-checks' in arguments
     assert '--benchmark-group-by=func' in arguments
+
+
+@pytest.mark.parametrize('build_opt,comparison,stage', [
+    ('normal', 'regression', 'normal'),
+    ('pgo', 'regression', 'use'),
+    ('normal', 'optimization', 'use'),
+])
+def test_shell_archives_profiles_and_sites_without_cargo_cache(tmp_path, build_opt, comparison, stage):
+    from pathlib import Path
+    _shell_arguments(tmp_path, Path(perf_pairs.__file__).with_name('perf_ab.sh'),
+                     build_opt=build_opt, comparison=comparison, archive=True)
+    output = tmp_path / 'archive' / 'head-build'
+    assert (output / 'profile.profdata').read_text() == 'profile'
+    assert (output / 'training-raw' / 'phase.profraw').read_text() == 'raw'
+    assert (output / stage / 'site').is_dir()
+    assert not (output / stage / 'target').exists()
+    assert (tmp_path / 'base').is_dir()

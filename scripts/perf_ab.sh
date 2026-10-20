@@ -18,6 +18,14 @@ cleanup() {
   if [ -n "${PERF_AB_JSON_DIR:-}" ]; then
     mkdir -p "$PERF_AB_JSON_DIR"
     cp "$TMP/"*.json "$TMP/"*.log "$PERF_AB_JSON_DIR/" 2>/dev/null || true
+    # PGO inputs and installed sites must survive the temporary measurement tree.
+    # Cargo caches are reproducible build intermediates, not release evidence.
+    for side in base head; do
+      if [ -d "$TMP/$side-build" ]; then
+        (cd "$TMP" && tar --exclude='*/target' -cf - "$side-build") | \
+          (cd "$PERF_AB_JSON_DIR" && tar -xf -)
+      fi
+    done
   fi
   rm -rf "$TMP"
 }
@@ -42,12 +50,18 @@ fi
 [ -n "$KSELECT" ] && FILTER+=(-k "$KSELECT")
 
 build_site() {
-  local tree="$1" side="$2" target="$3"
+  local tree="$1" side="$2"
   echo ">> building $side into an isolated site..."
-  ( cd "$tree" && CARGO_TARGET_DIR="$target" "$PYTHON" -m maturin build --release -q \
-      --interpreter "$PYTHON" --out "$TMP/$side-wheels" ) || return 1
-  "$PYTHON" -m pip install --no-index --no-deps --no-compile --target "$TMP/$side-site" \
-      "$TMP/$side-wheels/"*.whl >/dev/null
+  local mode="${BUILD_OPT:-normal}"
+  if [ "${PERF_COMPARE:-regression}" = optimization ]; then
+    if [ "$side" = base ]; then mode=normal; else mode=pgo; fi
+  fi
+  "$PYTHON" "$ROOT/scripts/build_release.py" --source "$tree" --mode "$mode" \
+      --artifacts "$TMP/$side-build" || return 1
+  local stage=normal
+  [ "$mode" = pgo ] && stage=use
+  cp -R "$TMP/$side-build/$stage/site" "$TMP/$side-site"
+
 }
 
 if [ -n "${BASE_SITE:-}" ]; then
@@ -57,10 +71,13 @@ else
   mkdir "$TMP/base"
   git -C "$ROOT" archive "$BASE_REF" | tar -x -C "$TMP/base" || exit 2
   # Independent target dirs prevent stale cross-checkout rlibs.
-  build_site "$TMP/base" base "$TMP/base/target" || exit 2
+  build_site "$TMP/base" base || exit 2
   BASE_IMPORT="$TMP/base-site"
 fi
-build_site "$ROOT" head "${CARGO_TARGET_DIR:-$ROOT/target}"
+build_site "$ROOT" head
+
+"$PYTHON" "$ROOT/scripts/build_pair.py" "$BASE_IMPORT" "$TMP/head-site" \
+    --comparison "${PERF_COMPARE:-regression}" --output "$TMP/build-pair.json"
 
 "$PYTHON" "$ROOT/scripts/perf_pairs.py" --base-site "$BASE_IMPORT" \
     --head-site "$TMP/head-site" --root "$ROOT" --output "$TMP" --rounds "$ROUNDS" \
