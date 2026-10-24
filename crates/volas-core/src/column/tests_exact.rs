@@ -85,3 +85,40 @@ fn float_select_converts_only_the_picked_cells() {
     let holes = Column::i64_masked(vec![B, 0], Validity::from_valid_iter(2, [true, false]));
     assert!(holes.fillna(0.5).is_err());
 }
+
+#[test]
+fn change_detection_compares_present_bits_and_ignores_missing_payloads() {
+    let pairs = [
+        (Column::f64(vec![-0.0]), Column::f64(vec![0.0])),
+        (Column::f32(vec![-0.0]), Column::f32(vec![0.0])),
+    ];
+    for (a, b) in pairs {
+        assert!(a.equals(&b)); // public value semantics stay unchanged
+        assert!(!a.equals_exact(&b) && !b.equals_exact(&a));
+        assert!(a.equals_exact(&a));
+    }
+    let pairs = [
+        (Column::f64(vec![f64::NAN, f64::INFINITY, -0.0]),
+         Column::f64(vec![f64::from_bits(0x7ff8000000000042), f64::INFINITY, -0.0])),
+        (Column::f32(vec![f32::NAN, f32::NEG_INFINITY, 0.0]),
+         Column::f32(vec![f32::from_bits(0x7fc00042), f32::NEG_INFINITY, 0.0])),
+        (Column::i64_masked(vec![1 << 54, 9], Validity::from_valid_iter(2, [true, false])),
+         Column::i64_masked(vec![1 << 54, 0], Validity::from_valid_iter(2, [true, false]))),
+    ];
+    for (a, b) in pairs {
+        assert!(a.equals_exact(&b) && b.equals_exact(&a));
+        assert!(!a.equals_exact(&b.slice(0, 1)));
+    }
+    for (a, b) in [
+        (Column::f64(vec![f64::NAN]), Column::f64(vec![0.0])),
+        (Column::f32(vec![0.0]), Column::f32(vec![f32::NAN])),
+        (Column::f64(vec![1.0]), Column::f64(vec![2.0])),
+        (Column::f32(vec![1.0]), Column::f32(vec![2.0])),
+        (Column::f64(vec![f64::INFINITY]), Column::f64(vec![f64::NEG_INFINITY])),
+        (Column::f32(vec![f32::INFINITY]), Column::f32(vec![f32::NEG_INFINITY])),
+        (Column::f64(vec![0.0]), Column::f32(vec![0.0])),
+        (Column::i64(vec![(1 << 54) + 1]), Column::i64(vec![1 << 54])),
+    ] {
+        assert!(!a.equals_exact(&b) && !b.equals_exact(&a));
+    }
+}

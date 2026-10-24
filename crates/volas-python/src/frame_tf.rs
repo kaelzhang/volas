@@ -351,7 +351,7 @@ impl TfState {
             };
             let kept = bars.convert_lossless(dtype).ok().filter(|_| {
                 let was = before.column(name);
-                was.ok().and_then(|w| w.convert_lossless(dtype).ok()).is_some_and(|w| w.equals(cell))
+                was.ok().and_then(|w| w.convert_lossless(dtype).ok()).is_some_and(|w| w.equals_exact(cell))
             });
             columns.push(match kept {
                 Some(bars) => bars,
