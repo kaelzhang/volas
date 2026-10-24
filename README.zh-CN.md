@@ -702,8 +702,7 @@ frame 会把**未收口周期**的各根 bar 单独保存在一个小 DataFrame 
 - **构造时的最后一行就是正在形成的 bar。** `DataFrame(data, time_frame=...)` 把它作为未收口周期的第一根 bar，所以落在它所在周期内的更细 bar 会折叠进这一行，而不会再开一行同标签的新行。
 - **df.iloc[-1]** 是当前（仍未收口的）周期——live bar。
 - **df[directive]** / **df.exec(directive)** 在包含形成中那一行的累积 frame 上计算指标——惰性、读时计算：一次 `append` 只把它们标记为过期，下一次读取只重算尾部。
-- **df.cumulate(target)** 必须是源 frame 的整数倍（例如 `5m→15m`，而非
-  `5m→7m`；一周或 3 天的 bar 不会嵌套进月 / 年）；同一个 frame 是一次 `copy()`。
+- **df.cumulate(target)** 必须是源 frame 的整数倍（例如 `5m→15m`，而非 `5m→7m`；一周或 3 天的 bar 不会嵌套进月 / 年）；相同周期按现有数据列比较有效聚合规则：相同则复制并保留未收口周期的细 bar，不同则在变更前报错；缓存指标列被丢弃。
 
 ```py
 df = history.cumulate('5m')   # 带 tf 的 5m frame（history 更细，例如 1m）

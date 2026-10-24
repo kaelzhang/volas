@@ -1,5 +1,7 @@
 """Regression contracts for cumulation contract."""
 
+from pathlib import Path
+
 import numpy as np
 import pandas as pd
 import pytest
@@ -116,3 +118,15 @@ def test_same_time_frame_compares_effective_spec_after_renaming():
     result.append(correction)
     assert result['amount'].to_list() == [1.0]
     assert source['amount'].to_list() == [2.0]
+
+
+def test_api_guide_documents_same_time_frame_spec_equality():
+    text = (Path(__file__).parents[1] / 'docs/dataframe-api.md').read_text()
+    rule = text.split('- **df.cumulate(target)**', 1)[1].split('\n- **', 1)[0].lower()
+    assert 'effective' in rule and 'same' in rule and 'copy' in rule
+    assert 'open fine bars' in rule and 'different' in rule and 'error' in rule
+    assert 'cached' in rule and 'dropped' in rule
+    chinese = (Path(__file__).parents[1] / 'README.zh-CN.md').read_text()
+    rule = chinese.split('- **df.cumulate(target)**', 1)[1].split('\n\n', 1)[0]
+    assert '有效聚合规则' in rule and '不同' in rule and '报错' in rule
+    assert '细 bar' in rule and '缓存' in rule
