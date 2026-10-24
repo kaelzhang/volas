@@ -115,3 +115,18 @@ def test_unreduced_finite_seed_keeps_sum_overflow(dtype, entry, copy):
         raw = frame([maximum, maximum, -maximum][:minute + 1], dtype=dtype)
         assert_exact(live['value'].to_numpy(), raw.cumulate('5m', cumulators=spec)['value'].to_numpy())
         assert np.isposinf(live['value'].to_numpy()[0])
+
+
+@pytest.mark.parametrize('dtype', ['float64', 'float32'])
+@pytest.mark.parametrize('agg', ['first', 'last', 'max', 'min', 'sum'])
+def test_missing_accumulator_fold_keeps_the_shared_dlpack_buffer(dtype, agg):
+    stamps = pd.date_range('2024-01-01', periods=4, freq='D')
+    live = volas.DataFrame({'v': np.array([1., 2., 3., np.nan], dtype=dtype)},
+                           index=stamps).cumulate('1d', cumulators={'v': agg})
+    snapshot = np.from_dlpack(live['v'])
+    pointer = snapshot.ctypes.data
+    live.append(volas.DataFrame({'v': np.array([4.], dtype=dtype)},
+                                index=[stamps[-1] + pd.Timedelta(minutes=1)]))
+    current = np.from_dlpack(live['v'])
+    assert current.ctypes.data == pointer
+    np.testing.assert_array_equal(current, snapshot)

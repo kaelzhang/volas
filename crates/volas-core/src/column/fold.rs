@@ -598,29 +598,35 @@ fn write_missing_float<T: FloatInput>(buf: &mut Buffer<T>, row: usize, x: T) {
     if !buf[row].is_missing() { buf.set(row, missing_float(x)); }
 }
 
-/// Read and write the destination through one checked mutable cell. `Keep`
-/// avoids copy-on-write entirely; non-finite inputs stay on the cold write path.
+/// Decide whether a write is needed before borrowing the destination mutably.
+/// Missing accumulators and `Keep` retain shared buffers and their learned facts;
+/// non-finite inputs stay on the cold write path.
 #[inline]
 fn float_fold<T: FloatInput + std::ops::Add<Output = T>>(buf: &mut Buffer<T>, row: usize, op: CombineOp, x: T) {
     if x.is_missing_value() {
         write_missing_float(buf, row, x);
-    } else if op == CombineOp::Keep {
-        let _ = buf[row]; // validate the destination even when no write is needed
-    } else {
-        let cell = &mut buf.make_mut()[row];
-        if let Some(v) = float_step(op, *cell, x) { *cell = v; }
+    } else if let Some(v) = float_step(op, *fold_cell(buf.get(row)), x) {
+        *fold_cell(buf.make_mut().get_mut(row)) = v;
     }
+}
+
+/// One bounds failure for either borrow of a fold destination. The mutable
+/// access follows a checked read; copy-on-write preserves the buffer length.
+#[inline]
+fn fold_cell<T>(cell: Option<T>) -> T {
+    cell.unwrap()
 }
 
 /// One float fold step for a finite input. A NaN aggregate stays missing;
 /// `Keep` leaves its buffer untouched.
 #[inline]
 fn float_step<T: FloatInput + std::ops::Add<Output = T>>(op: CombineOp, acc: T, x: T) -> Option<T> {
-    if acc.is_missing() { return None; }
-    match op {
-        CombineOp::Keep => None,
-        CombineOp::Replace => Some(x),
-        _ => float_combine(op, acc, x),
+    if op == CombineOp::Keep || acc.is_missing() {
+        None
+    } else if op == CombineOp::Replace {
+        Some(x)
+    } else {
+        float_combine(op, acc, x)
     }
 }
 

@@ -346,3 +346,24 @@ fn check_fold_agrees_with_the_fold() {
     let two = Column::str(vec!["a".into(), "b".into()]);
     assert!(two.check_fold(0, Replace, false, [(&sources[6], 0)]).is_err());
 }
+
+#[test]
+fn unchanged_missing_float_folds_keep_shared_buffers_and_facts() {
+    for op in [CombineOp::Keep, CombineOp::Replace, CombineOp::Max, CombineOp::Min, CombineOp::Sum] {
+        for mut col in [Column::f64(vec![1., 2., 3., f64::NAN]), Column::f32(vec![1., 2., 3., f32::NAN])] {
+            let input = Column::i64(vec![4]).convert_lossless(col.dtype()).unwrap();
+            assert!(col.has_nan());
+            assert!(col.has_nonfinite());
+            let snapshot = col.clone();
+            col.combine_at(3, op, &input, 0).unwrap();
+            assert_eq!(col.known_has_nonfinite(), Some(true), "{op:?}");
+            assert_eq!(col.known_has_nan(), Some(true), "{op:?}");
+            if let (Column::F64(a), Column::F64(b)) = (&col, &snapshot) {
+                assert_eq!(a.as_ptr(), b.as_ptr(), "{op:?}");
+            }
+            if let (Column::F32(a), Column::F32(b)) = (&col, &snapshot) {
+                assert_eq!(a.as_ptr(), b.as_ptr(), "{op:?}");
+            }
+        }
+    }
+}
