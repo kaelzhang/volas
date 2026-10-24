@@ -35,7 +35,12 @@ impl PyDataFrame {
         // pandas DataFrame is deliberately NOT accepted here — use `DataFrame.from_pandas`, which keeps
         // volas pandas-free at import. To build a DatetimeIndex from a column, parse it with
         // `to_datetime` then `set_index` (or use `read_csv`).
-        let (df, tf) = if let Ok(mut other) = data.extract::<PyRefMut<PyDataFrame>>() {
+        // Projection may cache directives, but later index / dtype / time-frame /
+        // window validation can still fail. Stage the entire construction, and
+        // publish the source's cache writes only once the final frame exists.
+        let mut source = data.extract::<PyRefMut<PyDataFrame>>().ok();
+        let mut staged = source.as_ref().map(|other| other.copy());
+        let (df, tf) = if let Some(other) = staged.as_mut() {
             if columns.is_none()
                 && index.is_none()
                 && dtype.is_none()
@@ -137,26 +142,31 @@ impl PyDataFrame {
         // frame (not re-aggregated), each labelled with its period start; the last one is
         // the forming bar — the first entry of the open period — so a later finer bar in
         // its period folds into it. Requires a DatetimeIndex (build one with `set_index`).
-        if let Some(tf_obj) = time_frame {
+        let result = if let Some(tf_obj) = time_frame {
             let frame = resolve_time_frame(tf_obj)?;
             let spec = build_agg_spec_for(cumulators, Some(df.names()))?;
             let tf = TfState::seeded(frame, spec, &df)?;
-            return PyDataFrame {
+            PyDataFrame {
                 inner: df,
                 tf: Some(tf),
                 window: None,
             }
-            .bounded(bounds);
+            .bounded(bounds)
+        } else {
+            if cumulators.is_some() {
+                return Err(PyValueError::new_err("cumulators requires time_frame"));
+            }
+            PyDataFrame {
+                inner: df,
+                tf,
+                window: None,
+            }
+            .bounded(bounds)
+        }?;
+        if let (Some(source), Some(staged)) = (source.as_mut(), staged) {
+            source.inner = staged.inner;
         }
-        if cumulators.is_some() {
-            return Err(PyValueError::new_err("cumulators requires time_frame"));
-        }
-        PyDataFrame {
-            inner: df,
-            tf,
-            window: None,
-        }
-        .bounded(bounds)
+        Ok(result)
     }
 
     /// The DatetimeIndex timezone name (`"UTC"` / `"+08:00"` /

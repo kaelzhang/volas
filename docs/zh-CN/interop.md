@@ -2,7 +2,7 @@
 
 本指南说明 DataFrame / Series 的构造和导出，以及 Row 的边界表示。选择和写入时会校验布尔 Series 键的索引；MaskedArray 的未知布尔信号会抛错。相等检查包含索引，并拒绝混合无时区与有时区的 datetime 索引。返回[中文 README](../../README.zh-CN.md)。
 
-显式指定 NumPy dtype 时，`na_value` 在目标表示中填充。例如 `DataFrame({'qty': [1, None]})['qty'].to_numpy(dtype='float64', na_value=0.5)` 返回 `[1.0, 0.5]`。原生整数直接转换，`dtype='int64', na_value=0` 保留超过 2⁵³ 的整数精度；NumPy 调用失败会把原异常传播给调用方。
+显式指定 NumPy dtype 时，`na_value` 在目标表示中填充。例如 `DataFrame({'qty': [1, None]})['qty'].to_numpy(dtype='float64', na_value=0.5)` 返回 `[1.0, 0.5]`。原生整数直接转换，`dtype='int64', na_value=0` 保留超过 2⁵³ 的整数精度；NumPy 调用失败会把原异常传播给调用方。Frame、Series 和 `exec` 的未定宽文本 dtype（`U` / `str` / `S`）由有效值与填充值共同推断宽度；`U2` 等显式宽度保留用户指定宽度，遵循 NumPy 的截断行为。
 
 ### DataFrame.from_pandas(pdf) -> DataFrame
 
@@ -136,14 +136,14 @@ s.name                 # 'close'
 df['ma:5 > ma:20']     # directive 也返回 Series（这里是 bool）
 ```
 
-除 pandas 兼容 API 外，`Series` 还把 TA-Lib 的 15 个 **Math Transform** 函数暴露为方法——`acos` `asin` `atan` `ceil` `cos` `cosh` `exp` `floor` `ln` `log10` `sin``sinh` `sqrt` `tan` `tanh`：
+除 pandas 兼容 API 外，`Series` 还把 TA-Lib 的 15 个 **Math Transform** 函数暴露为方法——`acos` `asin` `atan` `ceil` `cos` `cosh` `exp` `floor` `ln` `log10` `sin` `sinh` `sqrt` `tan` `tanh`：
 
 ```py
 df['close'].ln()
 df['high'].sqrt()
 ```
 
-`datetime64[ns]` Series 暴露 pandas 风格的 `.dt` 访问器：日历分量（`year``month` `day` `hour` `minute` `second` `microsecond` `nanosecond` `quarter``dayofweek` `dayofyear` `days_in_month`）、日历谓词（`is_month_start` …`is_year_end`、`is_leap_year`）、名称（`day_name()` / `month_name()`）、格式化（`strftime(fmt)`）、bar 对齐（`floor(freq)` / `ceil(freq)` / `round(freq)` /`normalize()`）以及 `isocalendar()`。某个元素缺失时，各分量都返回 `NA`：
+`datetime64[ns]` Series 暴露 pandas 风格的 `.dt` 访问器：日历分量（`year` `month` `day` `hour` `minute` `second` `microsecond` `nanosecond` `quarter` `dayofweek` `dayofyear` `days_in_month`）、日历谓词（`is_month_start` …`is_year_end`、`is_leap_year`）、名称（`day_name()` / `month_name()`）、格式化（`strftime(fmt)`）、bar 对齐（`floor(freq)` / `ceil(freq)` / `round(freq)` /`normalize()`）以及 `isocalendar()`。某个元素缺失时，各分量都返回 `NA`：
 
 ```py
 t = volas.to_datetime(df['time'])
@@ -300,4 +300,3 @@ pa.array(df['qty'])                              # 无损：保留 int64 + 空�
 ```
 
 **时区。** Arrow 表没有*索引*，因此帧的索引（及其时区）不会被携带，`from_arrow` 返回全新 `RangeIndex`。datetime 列导出为 `timestamp[ns, tz=UTC]`（见 [datetime 列是 UTC 瞬时](#datetime-列是-utc-瞬时)）；导入的任意时区（或无时区）timestamp 列都变成其精确瞬时，时区本身不保留。导入后用 `set_index` + `tz_localize('UTC')` + `tz_convert` 重新标注时区。
-

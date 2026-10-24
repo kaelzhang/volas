@@ -362,7 +362,8 @@ pub(crate) fn column_to_numpy_with<'py>(
             let sanitize = matches!(col, Column::Str(..))
                 || (col.dtype().is_float()
                     && matches!(target, Some(ExportTarget::Integer | ExportTarget::Temporal)));
-            astype_filled(column_values_native(py, col)?, dt, Some(&mask), Some(nv), sanitize)
+            astype_filled(column_values_native(py, col)?, dt, Some(&mask), Some(nv), sanitize,
+                target == Some(ExportTarget::UnsizedText))
         },
         // The NA-model array keeps its default dtype; only the holes change.
         None => {
@@ -382,12 +383,22 @@ pub(crate) fn astype_filled<'py>(
     mask: Option<&Bound<'py, PyAny>>,
     na_value: Option<&Bound<'py, PyAny>>,
     sanitize_payloads: bool,
+    infer_text_width: bool,
 ) -> PyResult<Bound<'py, PyAny>> {
     if let (Some(mask), Some(nv)) = (mask, na_value) {
         // Integer/native temporal holes and float -> float/bool casts already
         // have convertible payloads: keep their one-pass fill path.
         if sanitize_payloads {
             native.set_item(mask, 0)?;
+        }
+        if infer_text_width {
+            // NumPy sizes a native numeric -> text cast from its dtype, and an
+            // object -> text cast from its current cells. Neither sees the fill.
+            // Format native values first, then infer the final width from valid
+            // strings and the fill together. Replaced payloads cannot widen it.
+            let cells = native.call_method1("astype", (dtype,))?.call_method1("astype", ("object",))?;
+            cells.set_item(mask, nv)?;
+            return cells.call_method1("astype", (dtype,));
         }
         let target = native.call_method1("astype", (dtype,))?;
         target.set_item(mask, nv)?;
@@ -467,23 +478,23 @@ pub(crate) enum ExportTarget {
     Temporal,
     /// `kind` `O`.
     Object,
-    /// Any other kind (`U` / `S` text, `V` void).
+    /// `kind` `U` / `S` with zero itemsize: text sized from the exported cells.
+    UnsizedText,
+    /// Any other kind (fixed-width text, `V` void).
     Other,
 }
 
 impl ExportTarget {
     pub(crate) fn of(py: Python<'_>, dtype: &str) -> PyResult<ExportTarget> {
-        let kind = py
-            .import("numpy")?
-            .call_method1("dtype", (dtype,))?
-            .getattr("kind")?
-            .extract::<String>()?;
+        let dt = py.import("numpy")?.call_method1("dtype", (dtype,))?;
+        let kind = dt.getattr("kind")?.extract::<String>()?;
         Ok(match kind.as_str() {
             "f" | "c" => ExportTarget::Float,
             "i" | "u" => ExportTarget::Integer,
             "b" => ExportTarget::Bool,
             "M" | "m" => ExportTarget::Temporal,
             "O" => ExportTarget::Object,
+            "U" | "S" if dt.getattr("itemsize")?.extract::<usize>()? == 0 => ExportTarget::UnsizedText,
             _ => ExportTarget::Other,
         })
     }

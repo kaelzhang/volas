@@ -16,11 +16,10 @@ def select(df, mask, entry, write=False):
         else:
             return df[mask]
     elif entry == 'series':
-        s = df['x']
         if write:
-            s[mask] = 0
+            df[mask] = 0
         else:
-            return s[mask]
+            return df[mask]
     else:
         ix = getattr(df, entry)
         if write:
@@ -36,10 +35,13 @@ def test_boolean_series_key_requires_visible_label_alignment(entry, write, windo
     df = DataFrame({'x': [1, 2, 3]}, index=[10, 11, 12],
                    window=window, max_lookback=0 if window else None)
     mask = DataFrame({'m': [True] * len(df)}, index=list(range(len(df))))['m']
-    before = df.copy()
+    target = df['x'] if entry == 'series' else df
+    before = target.copy()
     with pytest.raises(ValueError, match='different indexes'):
-        select(df, mask, entry, write)
-    assert df.equals(before)
+        select(target, mask, entry, write)
+    assert target.equals(before)
+    np.testing.assert_array_equal(target.index, before.index)
+    np.testing.assert_array_equal(target.to_numpy(), before.to_numpy())
 
 
 @pytest.mark.parametrize('entry', ['frame', 'series', 'iloc', 'loc'])
@@ -47,10 +49,13 @@ def test_boolean_series_key_requires_visible_label_alignment(entry, write, windo
 def test_masked_array_key_rejects_unknown_signal(entry, write):
     df = DataFrame({'x': [1, 2, 3]})
     mask = np.ma.array([True, False, True], mask=[False, True, False])
-    before = df.copy()
+    target = df['x'] if entry == 'series' else df
+    before = target.copy()
     with pytest.raises(ValueError, match='unknown signal'):
-        select(df, mask, entry, write)
-    assert df.equals(before)
+        select(target, mask, entry, write)
+    assert target.equals(before)
+    np.testing.assert_array_equal(target.index, before.index)
+    np.testing.assert_array_equal(target.to_numpy(), before.to_numpy())
 
 
 @pytest.mark.parametrize('series', [False, True])
@@ -148,7 +153,7 @@ def test_column_axis_masks_keep_labels_and_missingness(entry, write, kind):
 def test_known_masked_keys_keep_numpy_stride_order(entry, stride):
     bits = np.ma.array([True, False, True, False, True, False], mask=False)[::stride]
     df = DataFrame({'x': list(range(len(bits)))})
-    got = select(df, bits, entry)
+    got = select(df['x'] if entry == 'series' else df, bits, entry)
     got = got if entry == 'series' else got['x']
     assert got.to_list() == np.arange(len(bits))[np.asarray(bits)].tolist()
 

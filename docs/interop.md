@@ -162,6 +162,9 @@ With an explicit NumPy dtype, `na_value` is filled in that target representation
 returns `[1.0, 0.5]`. Integer exports cast directly from native integer values;
 `dtype='int64', na_value=0` preserves values beyond 2⁵³ exactly. Python errors
 from NumPy conversion or scalar boxing propagate to the caller.
+For Frame, Series and `exec`, unsized text dtypes (`'U'`, `'str'`, `'S'`) infer
+their width from valid values and the fill together; explicit widths such as
+`'U2'` keep the requested width, including NumPy's truncation behavior.
 
 
 **Timezone.** Arrow tables have no *index*, so the frame's index — and its timezone — is

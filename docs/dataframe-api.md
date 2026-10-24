@@ -82,7 +82,7 @@ Which gets the 2-period simple moving average on column `"close"`.
   the same projection as `df[[...]]` (see [Derived frames](#derived-frames)): the same
   rows, each listed cached directive column as a data column of its values (a stale one
   is refreshed first), never continued; a bounded-window source gives its visible rows.
-  On a DataFrame source, valid directives are computed on first request; an invalid entry raises the same error as `df[[...]]`, with no partial source changes.
+  On a DataFrame source, valid directives are computed on first request; an invalid entry raises the same error as `df[[...]]`, with no partial source changes. Source cache writes are committed only after every constructor argument, including window declarations, succeeds.
   Dict sources require existing keys (`KeyError` for a missing key). Duplicate identities raise, an empty list keeps no column, and absent columns are never silently filled.
   With `index=`, `dtype=`
   or `window=`, a source `DataFrame` is read like any bulk read: it raises while one

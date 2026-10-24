@@ -364,8 +364,9 @@ impl PyDataFrame {
             // text / other target formats those same typed cells.
             match target {
                 ExportTarget::Object => return fill_na_2d(object_array(py, df)?, mask, nv),
-                ExportTarget::Other => {
-                    return astype_filled(object_array(py, df)?, dt, mask, nv, true)
+                ExportTarget::UnsizedText | ExportTarget::Other => {
+                    return astype_filled(object_array(py, df)?, dt, mask, nv, true,
+                        target == ExportTarget::UnsizedText)
                 }
                 _ => {}
             }
@@ -410,7 +411,7 @@ impl PyDataFrame {
                     .into_pyarray(py)
                     .into_any()
             };
-            return astype_filled(arr, dt, mask, nv, false);
+            return astype_filled(arr, dt, mask, nv, false, false);
         }
 
         // Default (no dtype) — the honest representation chosen by the dtypes.
