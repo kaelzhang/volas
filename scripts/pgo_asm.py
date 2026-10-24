@@ -10,7 +10,7 @@ from build_pair import manifest
 from build_release import output
 
 
-from asm_symbols import parse
+from asm_symbols import parse, target_operand
 
 
 def main():
@@ -61,7 +61,7 @@ def main():
             normalized, edges, calls, spills = [], [], [], []
             for n, i in enumerate(ins):
                 body = i["text"]
-                target = re.search(r"0x([0-9a-f]+)", body)
+                target = target_operand(body)
                 if target and int(target[1], 16) in addresses:
                     dest = addresses[int(target[1], 16)]
                     if re.match(

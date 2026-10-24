@@ -16,7 +16,7 @@ set -euo pipefail
 
 ROOT="$(git rev-parse --show-toplevel)"
 cd "$ROOT"
-"${VOLAS_PYTHON:-python3}" -c 'import sys; sys.path.insert(0,"scripts"); from build_release import check_environment; import os; check_environment(os.environ)'
+"${VOLAS_PYTHON:-python3}" -c 'import sys; sys.path.insert(0,"scripts"); from build_release import check_environment; from build_config import check_cargo_config; import os; from pathlib import Path; check_environment(os.environ); check_cargo_config(Path.cwd())'
 [ "$(rustc --version | awk '{print $2}')" = 1.96.0 ] || { echo "asm: requires rustc 1.96.0" >&2; exit 2; }
 if [ -n "${PGO_SITE:-}" ]; then
   "${VOLAS_PYTHON:-python3}" scripts/pgo_asm.py --site "$PGO_SITE" --output "${PGO_ASM_OUT:?set PGO_ASM_OUT for the separate final-library report}"

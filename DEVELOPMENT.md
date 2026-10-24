@@ -181,7 +181,11 @@ The complete local PGO loop is validated on macOS arm64; other release targets
 still need independent validation and CI integration.
 The initial validated tool versions are Rust 1.96.0, its sysroot LLVM tools,
 and maturin 1.13.3. Install `llvm-tools-preview` for that compiler and the
-frozen training dependencies in `scripts/pgo-requirements.txt` beforehand.
+hash-locked wheels in `scripts/pgo-requirements.txt` available beforehand. The
+current training lock covers CPython 3.12 on macOS arm64. The owner installs these
+wheels into a fresh isolated training directory with `pip --require-hashes`, records
+the selected wheel SHA-256 and verifies the installed payload before each stage.
+For offline training, pass `--dependency-wheels <wheelhouse>` to the build owner.
 
 ```sh
 make build BUILD_OPT=pgo BUILD_ARTIFACTS=/absolute/fresh/artifacts
@@ -198,16 +202,29 @@ toolchain, configuration, training code and dependency mismatches fail closed.
 Every invocation needs fresh stage directories. No profile is shared across sources.
 A completed instrumented stage can be supplied with `--generated <generate-stage>`
 to `--mode pgo`: its native hash, actual compiler arguments and compilation identity
-are verified, while training uses a new empty raw directory and the current frozen
-training identity. This allows an explicit training-budget revision without treating
-an old training run as current evidence.
-Ambient Rust flags and release-profile overrides are rejected. Cargo resolves ISA
+are verified against the complete current identity, including training inputs.
+Training always uses a new empty raw directory. A changed training identity requires
+a fresh generate build.
+Schema 2 manifests have one effective configuration identity: ordered Cargo-resolved
+flags (including duplicates), the release profile, resolved features, actual compiler
+and Cargo executables, linker/SDK identities and the deployment target. Profile and
+pair checks compare that identity independently of the source hash. Unbound tool,
+flags, linker, SDK and release-profile overrides are rejected. The Cargo resolver
+records the complete target-info query and refuses an unfamiliar query grammar.
+Both resolved flags and real rustc argv must match the requested mode and absolute
+profile path; host crates cannot receive feedback flags. Cargo resolves ISA
 flags; the owner forwards those resolved flags to maturin so macOS link arguments
 cannot mask FMA or PGO instrumentation. Fat LTO and the release profile stay in Cargo.
 
 Training covers the public indicator inventory and the existing live, first-cache,
 range and interop factories. Its versioned operation budget is independent of
-elapsed time. Hold-out inputs are declared in `scripts/pgo_train.py` and implemented in
+elapsed time (four fixed passes). Every stage checks state changes, lengths,
+missing masks and values against operation expectations, and feeds verified results
+into its digest. The merged profile retains function counters. A missing-profile
+diagnostic for an executed training function fails the use build; untrained cold
+misses are listed individually with counter evidence and reasons in
+`profile-warnings.json`. Unrecognized diagnostic formats and CFG/hash mismatches
+also fail. Hold-out inputs are declared in `scripts/pgo_train.py` and implemented in
 `test/bench_holdout.py` (batch, 5m-to-1h folding/resends, and sliced/chunked/null
 Arrow plus strided NumPy inputs); they never contribute to training. Training has a ten-minute hard cap. A successful build is
 not a performance adoption verdict.
@@ -234,3 +251,15 @@ architectures report unsupported. To inspect a final wheel separately, run
 running either assembly gate. Reports contain final addresses, normalized
 instructions, branch edges, calls, stack accesses and NOP counts. PGO differences
 require review and performance validation; they never update normal baselines.
+
+`make build-pkg` writes `delivery.json` inside its isolated `BUILD_ARTIFACTS`
+directory. `make publish` uploads only that manifest's hash-verified wheel and source
+distribution. To upload a previously built package, run
+`make upload BUILD_ARTIFACTS=<that-build-directory>`. Other files in `dist/` are
+untouched and never selected implicitly.
+
+Normal assembly gates reject target redirection in the environment or Cargo config.
+The hot-path gate emits each crate to its own invocation's explicit assembly file,
+and rejects a symbol body without instructions. Final-library branch normalization
+uses opcode-specific address operands, preserving bit-test immediates and separating
+indirect calls and address references from CFG edges.

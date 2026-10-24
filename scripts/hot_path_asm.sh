@@ -28,7 +28,7 @@
 set -euo pipefail
 ROOT="$(git rev-parse --show-toplevel)"
 cd "$ROOT"
-"${VOLAS_PYTHON:-python3}" -c 'import sys; sys.path.insert(0,"scripts"); from build_release import check_environment; import os; check_environment(os.environ)'
+"${VOLAS_PYTHON:-python3}" -c 'import sys; sys.path.insert(0,"scripts"); from build_release import check_environment; from build_config import check_cargo_config; import os; from pathlib import Path; check_environment(os.environ); check_cargo_config(Path.cwd())'
 [ "$(rustc --version | awk '{print $2}')" = 1.96.0 ] || { echo "asm: requires rustc 1.96.0" >&2; exit 2; }
 if [ -n "${PGO_SITE:-}" ]; then
   "${VOLAS_PYTHON:-python3}" scripts/pgo_asm.py --site "$PGO_SITE" --output "${PGO_ASM_OUT:?set PGO_ASM_OUT for the separate final-library report}"
@@ -37,6 +37,9 @@ ARCH="$(uname -m)"
 MODE="${1:-dump}"
 TARGET="${CARGO_TARGET_DIR:-$ROOT/target}"
 OUT="$TARGET/hot-asm"
+mkdir -p "$TARGET"
+ASM_DIR="$(mktemp -d "$TARGET/hot-asm-build.XXXXXX")"
+trap 'rm -rf "$ASM_DIR"' EXIT
 BASELINE="scripts/hot_asm_baseline.txt"
 FN_FILTER="${FN:-}"
 
@@ -49,10 +52,10 @@ emit_asm() {
   for crate in $crates; do
     echo ">> emitting release asm for $crate ..." >&2
     cargo rustc --release -q -p "$crate" -- \
-      --emit asm -C "llvm-args=-x86-asm-syntax=intel"
+      --emit "asm=$ASM_DIR/$crate.s" -C "llvm-args=-x86-asm-syntax=intel"
   done
 }
-asm_of() { ls -t "$TARGET/release/deps/${1//-/_}"-*.s 2>/dev/null | head -1; }
+asm_of() { [ -s "$ASM_DIR/$1.s" ] && printf '%s\n' "$ASM_DIR/$1.s"; }
 
 # Instruction count of `fn`'s first symbol in `crate`'s asm; also writes its body to
 # target/hot-asm/<fn>.s when $1 == keep.
@@ -68,19 +71,10 @@ count_fn() { # $1 keep|nokeep  $2 crate  $3 fn  $4 max|loop32|-
   [ -n "$body" ] || { echo "hot-asm: missing symbol $3" >&2; return 2; }
   if [ "$1" = keep ]; then mkdir -p "$OUT"; printf '%s\n' "$body" > "$OUT/$3.s"; fi
   if [ "${4:-max}" = loop32 ]; then
-    # Count the whole back-edge loop, including its length test. Fail closed if
-    # code generation no longer has the reviewed aarch64 absolute-compare loop.
-    printf '%s\n' "$body" | awk -v comparisons="$([ "$3" = any_missing_f32 ] && echo 8 || echo 16)" '
-      /^[[:alnum:]_]+:$/ { label=$1; sub(/:$/, "", label); n=0; simd=0 }
-      /^[[:space:]]+[a-z]/ {
-        n++
-        if ($1 ~ /^facgt/) simd++
-        if ($1 == "cbnz" && $NF == label && simd == comparisons) { print n; found=1; exit }
-      }
-      END { if (!found) print 999999 }
-    '
+    printf '%s\n' "$body" | "${VOLAS_PYTHON:-python3}" scripts/asm_symbols.py --source-count \
+      --comparisons "$([ "$3" = any_missing_f32 ] && echo 8 || echo 16)"
   else
-    printf '%s\n' "$body" | grep -cE '^[[:space:]]+[a-z]' || true
+    printf '%s\n' "$body" | "${VOLAS_PYTHON:-python3}" scripts/asm_symbols.py --source-count
   fi
 }
 
@@ -95,7 +89,7 @@ if [ "$MODE" = update ]; then
     echo "# increase. Counted from rustc --emit asm. Refresh only after a reviewed change."
     printf '%s\n' "$INVENTORY" | awk -F'|' 'NF>=4 && ($3=="max" || $3=="loop32")' | while IFS='|' read -r crate fn gate why; do
       n="$(count_fn nokeep "$crate" "$fn" "$gate")"
-      echo "$fn $gate ${n:-0}"
+      echo "$fn $gate $n"
     done
   } > "$BASELINE"
   echo "hot-asm: baseline written ($ARCH)"
@@ -115,8 +109,8 @@ if [ "$MODE" = check ]; then
   fail=0
   printf '%-20s %8s %8s %8s  %s\n' FUNCTION CURRENT BASELINE DELTA VERDICT
   printf '%s\n' "$INVENTORY" | awk -F'|' 'NF>=4 && ($3=="max" || $3=="loop32")' | while IFS='|' read -r crate fn gate why; do
-    cur="$(count_fn nokeep "$crate" "$fn" "$gate")"; cur="${cur:-0}"
-    base="$(baseline_count "$fn" "$gate")"; base="${base:-0}"
+    cur="$(count_fn nokeep "$crate" "$fn" "$gate")"; [ -n "$cur" ] || exit 2
+    base="$(baseline_count "$fn" "$gate")"; [ -n "$base" ] || { echo "hot-asm: missing baseline $fn" >&2; exit 2; }
     verdict=ok
     [ "$cur" -gt "$base" ] && { verdict=REGRESSED; echo REGRESSED > "$OUT/.hot_fail"; }
     printf '%-20s %8s %8s %+8d  %s\n' "$fn" "$cur" "$base" "$((cur - base))" "$verdict"
@@ -137,7 +131,7 @@ rm -rf "$OUT"; mkdir -p "$OUT"
 printf '%-20s %-15s %8s %9s  %s\n' FUNCTION CRATE INSTRS VS-BASE HOT-PATH
 printf '%s\n' "$INVENTORY" | awk -F'|' 'NF>=4' | while IFS='|' read -r crate fn gate why; do
   [ -n "$FN_FILTER" ] && [[ "$fn" != *"$FN_FILTER"* ]] && continue
-  n="$(count_fn keep "$crate" "$fn" "$gate")"; n="${n:-0}"
+  n="$(count_fn keep "$crate" "$fn" "$gate")"; n="$n"
   delta="-"
   if [ "$gate" != - ]; then
     base="$(baseline_count "$fn" "$gate")"
