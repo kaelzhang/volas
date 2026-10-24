@@ -186,3 +186,53 @@ def test_real_bare_generate_is_rejected_without_explicit_path(tmp_path, kind):
     trace = real_trace(tmp_path, spell(kind, "profile_generate"))
     with pytest.raises(ValueError, match="feedback"):
         C.validate_argv(None, "generate", HOST, str(tmp_path / "raw"), trace=trace)
+
+
+@pytest.mark.parametrize("entry", ["config", "resolved", "trace"])
+@pytest.mark.parametrize("kind", SPELLINGS)
+def test_real_response_file_rejected_by_every_entry(
+    tmp_path, entry, kind, real_profile
+):
+    response = tmp_path / "rustc response args"
+    # rustc reads one argument per line, including split codegen spellings.
+    response.write_text(
+        "\n".join(
+            spell(kind, "profile-use=" + str(real_profile)) + spell(kind, "opt-level=0")
+        )
+        + "\n"
+    )
+    flags = ["@" + str(response)]
+    trace = real_trace(tmp_path, flags)
+    if entry == "trace":
+        with pytest.raises(ValueError, match="response.file"):
+            C.validate_argv(None, "normal", HOST, trace=trace)
+    elif entry == "resolved":
+        with pytest.raises(ValueError, match="response.file"):
+            C.resolved_flags(tmp_path, HOST, flags, tmp_path / "resolve.log")
+    else:
+        (tmp_path / ".cargo").mkdir()
+        (tmp_path / ".cargo/config.toml").write_text(
+            "[build]\nrustflags=" + json.dumps(flags) + "\n"
+        )
+        with pytest.raises(ValueError, match="response.file"):
+            C.check_cargo_config(tmp_path)
+
+
+def test_real_response_file_cannot_hide_an_invocation_from_trace_filter(tmp_path):
+    trace = real_trace(tmp_path, [])  # A separate legitimate cdylib invocation.
+    response = tmp_path / "hidden args"
+    response.write_text("--crate-name\nhidden\n--print\ncfg\n--codegen=opt-level=0\n")
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(ROOT / "scripts/rustc_record.py"),
+            str(SYSROOT / "bin/rustc"),
+            "@" + str(response),
+        ],
+        env=clean_env(VOLAS_RUSTC_TRACE=str(trace)),
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, result.stderr
+    with pytest.raises(ValueError, match="response.file"):
+        C.validate_argv(None, "normal", HOST, trace=trace)

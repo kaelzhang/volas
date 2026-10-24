@@ -181,6 +181,7 @@ def resolved_flags(root, target, flags, log):
     arguments. A concrete-target array merges before cfg arrays. No marker cuts
     off an existing concrete-target prefix.
     """
+    validate_flags(flags, "normal")
     check_cargo_config(root)
     with tempfile.TemporaryDirectory(prefix="volas-flags-") as tmp:
         probe = Path(tmp)
@@ -232,7 +233,9 @@ def resolved_flags(root, target, flags, log):
         Path(log).with_suffix(".argv.json").write_text(
             json.dumps(queries, indent=2) + "\n"
         )
-        return [*resolved, *flags]
+        resolved = [*resolved, *flags]
+        validate_flags(resolved, "normal")
+        return resolved
 
 
 CODEGEN_OVERRIDES = {
@@ -267,7 +270,13 @@ def codegen_flags(argv):
     return result
 
 
+def reject_response_files(flags):
+    if any(value.startswith("@") for value in flags):
+        raise ValueError("rustc response-file arguments are not supported")
+
+
 def validate_flags(flags, mode, feedback=None, owned_codegen=()):
+    reject_response_files(flags)
     parsed = codegen_flags(flags)
     actual = [
         f for f in parsed if f.split("=", 1)[0] in ("profile-generate", "profile-use")
@@ -361,6 +370,8 @@ def validate_argv(log, mode, target, feedback=None, config=None, trace=None):
             if line.strip().startswith("Running `") and "--crate-name" in line
         ]
     )
+    for command in commands:
+        reject_response_files(command)
     commands = [
         a for a in commands if "--crate-name" in a and "--print=file-names" not in a
     ]
