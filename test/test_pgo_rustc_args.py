@@ -8,7 +8,19 @@ import sys
 import pytest
 
 from scripts import build_config as C
-from test.pgo_toolchain import ROOT, HOST, SYSROOT, LLVM, clean_env
+from test.pgo_toolchain import (
+    ROOT,
+    HOST,
+    SYSROOT,
+    LLVM,
+    clean_env,
+    extension_link_flags,
+)
+
+
+@pytest.fixture(params=list(dict.fromkeys([HOST, "x86_64-unknown-linux-gnu"])))
+def target(request):
+    return request.param
 
 
 SPELLINGS = ("short_joined", "short_split", "long_joined", "long_split")
@@ -57,7 +69,7 @@ def real_profile(tmp_path_factory):
     return profile
 
 
-def real_trace(tmp_path, flags, mixed=False, host=False):
+def real_trace(tmp_path, flags, target, mixed=False, host=False):
     trace = tmp_path / "rustc.jsonl"
     # rustc itself validates these spellings; the real wrapper records the argv.
     result = subprocess.run(
@@ -69,11 +81,10 @@ def real_trace(tmp_path, flags, mixed=False, host=False):
             "volas_rs",
             "--crate-type",
             "cdylib",
-            *([] if host else ["--target", HOST]),
+            *([] if host else ["--target", target]),
             "--print",
             "cfg",
-            "-Clink-arg=-undefined",
-            "-Clink-arg=dynamic_lookup",
+            *extension_link_flags(target),
             *flags,
         ],
         env=clean_env(VOLAS_RUSTC_TRACE=str(trace)),
@@ -114,7 +125,7 @@ def real_trace(tmp_path, flags, mixed=False, host=False):
 )
 @pytest.mark.parametrize("entry", ["config", "trace"])
 def test_rustc_accepted_spelling_cannot_bypass_policy(
-    tmp_path, kind, option, entry, real_profile
+    tmp_path, kind, option, entry, real_profile, target
 ):
     name = option.replace("_", "-")
     value = (
@@ -131,7 +142,7 @@ def test_rustc_accepted_spelling_cannot_bypass_policy(
     if name == "profile-use":
         Path(value).write_bytes(real_profile.read_bytes())
     flags = spell(kind, option + "=" + value)
-    trace = real_trace(tmp_path, flags)
+    trace = real_trace(tmp_path, flags, target)
     if entry == "config":
         (tmp_path / ".cargo").mkdir()
         (tmp_path / ".cargo/config.toml").write_text(
@@ -141,7 +152,7 @@ def test_rustc_accepted_spelling_cannot_bypass_policy(
             C.check_cargo_config(tmp_path)
     else:
         with pytest.raises(ValueError, match="feedback|codegen override"):
-            C.validate_argv(None, "normal", HOST, trace=trace)
+            C.validate_argv(None, "normal", target, trace=trace)
 
 
 @pytest.mark.parametrize("kind", SPELLINGS)
@@ -150,7 +161,7 @@ def test_rustc_accepted_spelling_cannot_bypass_policy(
     "damage", ["valid", "wrong-path", "duplicate", "relative", "mixed", "host"]
 )
 def test_real_feedback_trace_mode_count_and_path(
-    tmp_path, kind, mode, damage, real_profile
+    tmp_path, kind, mode, damage, real_profile, target
 ):
     path = (
         "relative" if damage == "relative" else str(tmp_path / "feedback with spaces")
@@ -164,34 +175,34 @@ def test_real_feedback_trace_mode_count_and_path(
             kind,
             "profile_" + ("use" if mode == "generate" else "generate") + "=" + path,
         )
-    trace = real_trace(tmp_path, flags, mixed=damage == "mixed")
+    trace = real_trace(tmp_path, flags, target, mixed=damage == "mixed")
     if damage == "host":
-        real_trace(tmp_path, flags, host=True)
+        real_trace(tmp_path, flags, target, host=True)
     expected = str(tmp_path / "other") if damage == "wrong-path" else path
     if damage == "valid":
-        C.validate_argv(None, mode, HOST, expected, trace=trace)
+        C.validate_argv(None, mode, target, expected, trace=trace)
     else:
         with pytest.raises(ValueError, match="feedback"):
             C.validate_argv(
                 None,
                 mode,
-                HOST,
+                target,
                 expected,
                 trace=trace,
             )
 
 
 @pytest.mark.parametrize("kind", SPELLINGS)
-def test_real_bare_generate_is_rejected_without_explicit_path(tmp_path, kind):
-    trace = real_trace(tmp_path, spell(kind, "profile_generate"))
+def test_real_bare_generate_is_rejected_without_explicit_path(tmp_path, kind, target):
+    trace = real_trace(tmp_path, spell(kind, "profile_generate"), target)
     with pytest.raises(ValueError, match="feedback"):
-        C.validate_argv(None, "generate", HOST, str(tmp_path / "raw"), trace=trace)
+        C.validate_argv(None, "generate", target, str(tmp_path / "raw"), trace=trace)
 
 
 @pytest.mark.parametrize("entry", ["config", "resolved", "trace"])
 @pytest.mark.parametrize("kind", SPELLINGS)
 def test_real_response_file_rejected_by_every_entry(
-    tmp_path, entry, kind, real_profile
+    tmp_path, entry, kind, real_profile, target
 ):
     response = tmp_path / "rustc response args"
     # rustc reads one argument per line, including split codegen spellings.
@@ -202,13 +213,13 @@ def test_real_response_file_rejected_by_every_entry(
         + "\n"
     )
     flags = ["@" + str(response)]
-    trace = real_trace(tmp_path, flags)
+    trace = real_trace(tmp_path, flags, target)
     if entry == "trace":
         with pytest.raises(ValueError, match="response.file"):
-            C.validate_argv(None, "normal", HOST, trace=trace)
+            C.validate_argv(None, "normal", target, trace=trace)
     elif entry == "resolved":
         with pytest.raises(ValueError, match="response.file"):
-            C.resolved_flags(tmp_path, HOST, flags, tmp_path / "resolve.log")
+            C.resolved_flags(tmp_path, target, flags, tmp_path / "resolve.log")
     else:
         (tmp_path / ".cargo").mkdir()
         (tmp_path / ".cargo/config.toml").write_text(
@@ -218,8 +229,10 @@ def test_real_response_file_rejected_by_every_entry(
             C.check_cargo_config(tmp_path)
 
 
-def test_real_response_file_cannot_hide_an_invocation_from_trace_filter(tmp_path):
-    trace = real_trace(tmp_path, [])  # A separate legitimate cdylib invocation.
+def test_real_response_file_cannot_hide_an_invocation_from_trace_filter(
+    tmp_path, target
+):
+    trace = real_trace(tmp_path, [], target)  # A separate legitimate cdylib invocation.
     response = tmp_path / "hidden args"
     response.write_text("--crate-name\nhidden\n--print\ncfg\n--codegen=opt-level=0\n")
     result = subprocess.run(
@@ -235,4 +248,4 @@ def test_real_response_file_cannot_hide_an_invocation_from_trace_filter(tmp_path
     )
     assert result.returncode == 0, result.stderr
     with pytest.raises(ValueError, match="response.file"):
-        C.validate_argv(None, "normal", HOST, trace=trace)
+        C.validate_argv(None, "normal", target, trace=trace)

@@ -21,3 +21,12 @@ def clean_env(**extra):
     for key in ("LDFLAGS", "RUSTFLAGS", "CARGO_ENCODED_RUSTFLAGS"):
         env.pop(key, None)
     return dict(env, **extra)
+
+
+def extension_link_flags(target):
+    """Mirror the extension ABI required by the actual compilation target."""
+    return (
+        ["-Clink-arg=-undefined", "-Clink-arg=dynamic_lookup"]
+        if target.endswith("apple-darwin")
+        else []
+    )

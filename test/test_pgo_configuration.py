@@ -9,12 +9,7 @@ import pytest
 
 from scripts import build_release as B
 
-ROOT = Path(__file__).resolve().parents[1]
-HOST = (
-    subprocess.check_output(["rustc", "-vV"], text=True)
-    .split("host: ")[1]
-    .splitlines()[0]
-)
+from test.pgo_toolchain import ROOT, HOST, extension_link_flags
 
 
 @pytest.mark.parametrize(
@@ -60,7 +55,10 @@ def test_real_resolver_preserves_concrete_target_prefix_and_order(
         ("generate", ["-Cprofile-generate=/tmp/a", "-Cprofile-generate=/tmp/b"]),
     ],
 )
-def test_real_argv_rejects_wrong_feedback_mode(tmp_path, mode, flags):
+@pytest.mark.parametrize(
+    "target", list(dict.fromkeys([HOST, "x86_64-unknown-linux-gnu"]))
+)
+def test_real_argv_rejects_wrong_feedback_mode(tmp_path, mode, flags, target):
     log = tmp_path / "argv.log"
     args = [
         subprocess.check_output(["rustc", "--print", "sysroot"], text=True).strip()
@@ -68,18 +66,15 @@ def test_real_argv_rejects_wrong_feedback_mode(tmp_path, mode, flags):
         "--crate-name",
         "volas_rs",
         "--target",
-        HOST,
+        target,
         *flags,
-        "-C",
-        "link-arg=-undefined",
-        "-C",
-        "link-arg=dynamic_lookup",
+        *extension_link_flags(target),
     ]
     import shlex
 
     log.write_text("     Running `" + shlex.join(args) + "`\n")
     with pytest.raises(ValueError, match="feedback"):
-        B.validate_argv(log, mode, HOST)
+        B.validate_argv(log, mode, target)
 
 
 def test_real_profile_rejects_ordered_configuration_mismatch(tmp_path):
@@ -129,7 +124,12 @@ def test_publish_uses_this_build_manifest_only(tmp_path):
     assert "--manifest" in result and "delivery.json" in result
 
 
-def test_build_blocks_missing_trained_function_diagnostic(tmp_path, monkeypatch):
+@pytest.mark.parametrize(
+    "target", list(dict.fromkeys([HOST, "x86_64-unknown-linux-gnu"]))
+)
+def test_build_blocks_missing_trained_function_diagnostic(
+    tmp_path, monkeypatch, target
+):
     import shlex
     import zipfile
 
@@ -154,13 +154,10 @@ def test_build_blocks_missing_trained_function_diagnostic(tmp_path, monkeypatch)
             "--crate-name",
             "volas_rs",
             "--target",
-            HOST,
+            target,
             *flags,
             "-Clinker=/bin/cc",
-            "-C",
-            "link-arg=-undefined",
-            "-C",
-            "link-arg=dynamic_lookup",
+            *extension_link_flags(target),
         ]
         Path(log).write_text(
             "Running `"
@@ -170,7 +167,11 @@ def test_build_blocks_missing_trained_function_diagnostic(tmp_path, monkeypatch)
             + " Hash = 123 up to 0 count discarded\n"
         )
         if env and "VOLAS_RUSTC_TRACE" in env:
-            Path(env["VOLAS_RUSTC_TRACE"]).write_text(json.dumps(a) + "\n")
+            trace = Path(env["VOLAS_RUSTC_TRACE"])
+            trace.write_text(json.dumps(a) + "\n")
+            # Prove the platform's argv precondition independently of the
+            # missing-trained-function diagnostic this test is about.
+            B.validate_argv(log, "use", target, profile, config, trace)
         wheels = tmp_path / "use/wheels"
         wheels.mkdir(exist_ok=True)
         with zipfile.ZipFile(wheels / "test.whl", "w") as z:
@@ -186,7 +187,7 @@ def test_build_blocks_missing_trained_function_diagnostic(tmp_path, monkeypatch)
     monkeypatch.setattr(B, "install", install)
     monkeypatch.setattr(B, "resolved_flags", lambda *a: [])
     with pytest.raises(ValueError, match="trained.*profile|profile.*trained"):
-        B.build(ROOT, tmp_path, "use", HOST, {"configuration": config}, profile)
+        B.build(ROOT, tmp_path, "use", target, {"configuration": config}, profile)
 
 
 def test_training_requirements_have_distribution_hashes():
@@ -277,7 +278,12 @@ def test_real_profile_coverage_cannot_be_replaced_by_sidecar(tmp_path):
         capture_output=True,
     )
     import os
-    subprocess.run([str(binary)], check=True, env=dict(os.environ, LLVM_PROFILE_FILE=str(raw / "%m-%p.profraw")))
+
+    subprocess.run(
+        [str(binary)],
+        check=True,
+        env=dict(os.environ, LLVM_PROFILE_FILE=str(raw / "%m-%p.profraw")),
+    )
     info = B.output(["rustc", "-Vv"])
     host = info.split("host: ")[1].splitlines()[0]
     llvm = (
