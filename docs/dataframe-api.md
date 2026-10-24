@@ -834,8 +834,8 @@ its last row is their cumulation. On a tf-aware frame:
   marks them stale, and the next read recomputes just the tail.
 - **df.cumulate(target)** must be a whole multiple of the source frame (e.g.
   `5m→15m`, not `5m→7m`; a week or 3-day bar does not nest into a month/year);
-  at the same time frame the same effective cumulators return a copy keeping the open
-  fine bars, different ones raise before any change; cached columns are dropped (see [Cumulation](cumulation.md)).
+  at the same time frame the same effective cumulators return a copy with its open fine bars,
+  different ones raise an error before any change; cached columns are dropped (see [Cumulation](cumulation.md)).
 - **A derived frame of the same bars stays tf-aware.** A selection ending at the forming
   row (`df.iloc[a:]`, `df.tail(n)`, `df.loc[t:]`) keeps the open period, so the next finer
   bar still folds into it; a projection and `rename` (each column keeps its aggregator)
