@@ -11,12 +11,13 @@
 //!   keeps its column's dtype;
 //! - missing values (contract #23): an aggregate is missing as soon as any of the
 //!   period's values is — `first` / `last` / `max` / `min` / `sum` alike, never a
-//!   skipped value, never `±inf`, whatever payload a missing cell holds;
+//!   skipped value, non-finite inputs included, whatever payload a missing cell holds;
 //! - an integer `sum` is checked (contract #25): an overflow raises;
 //! - a source of another dtype converts to the cell's dtype losslessly first
 //!   (contract #20) — never truncated or saturated.
 
 use super::*;
+use crate::buffer::Float;
 
 /// An aggregation as an in-place single-cell fold ([`Column::combine_at`]): fold one
 /// incoming value into a forming aggregate without re-reducing the period or
@@ -71,15 +72,28 @@ impl CombineOp {
 }
 
 impl Column {
+    /// Whether this cell is a missing aggregation input. Raw storage validity is
+    /// unchanged; floating inputs use the shared non-finite computation rule.
+    #[inline]
+    pub fn is_missing_input(&self, row: usize) -> bool {
+        match self {
+            Column::F64(s) => s[row].is_missing_value(),
+            Column::F32(s) => s[row].is_missing_value(),
+            _ => !self.is_valid(row),
+        }
+    }
+
     /// Reduce ordered, nonempty groups into one typed output buffer. Each group is
     /// a slice of source row positions (duplicates can already have been removed).
     /// The caller owns grouping; the fold and its exact arithmetic stay here. An
     /// error carries its group number so column-wise callers can preserve the
     /// period-then-column error priority without materializing period frames.
+    /// The repeatable group iterator also supplies a density estimate, so a shared
+    /// finite-input fact is learned once without scanning a sparse source.
     pub fn reduce_groups<'a>(
         &self,
         op: CombineOp,
-        groups: impl ExactSizeIterator<Item = &'a [usize]>,
+        groups: impl ExactSizeIterator<Item = &'a [usize]> + Clone,
     ) -> std::result::Result<Column, (usize, VolasError)> {
         self.reduce_groups_with_spare(op, groups, 0, 0)
     }
@@ -89,19 +103,24 @@ impl Column {
     pub fn reduce_groups_with_spare<'a>(
         &self,
         op: CombineOp,
-        groups: impl ExactSizeIterator<Item = &'a [usize]>,
+        groups: impl ExactSizeIterator<Item = &'a [usize]> + Clone,
         spare_rows: usize,
         spare_bytes: usize,
     ) -> std::result::Result<Column, (usize, VolasError)> {
         if !op.supports(self.dtype()) {
             return Err((0, op.unsupported(self.dtype())));
         }
+        let finite = match self {
+            Column::F64(s) => finite_group_inputs(s, &groups),
+            Column::F32(s) => finite_group_inputs(s, &groups),
+            _ => false,
+        };
         if op.is_endpoint() {
-            return Ok(self.endpoint_columns(op, groups, spare_rows, spare_bytes));
+            return Ok(self.endpoint_columns(op, groups, spare_rows, spare_bytes, finite));
         }
         Ok(match self {
-            Column::F64(s) => Column::f64(collect_with_spare(groups.map(|r| float_reduce(op, s, r[0], r[1..].iter().copied())), spare_rows)),
-            Column::F32(s) => Column::f32(collect_with_spare(groups.map(|r| float_reduce(op, s, r[0], r[1..].iter().copied())), spare_rows)),
+            Column::F64(s) => Column::f64(collect_with_spare(groups.map(|r| float_reduce(op, s, r[0], r[1..].iter().copied(), finite)), spare_rows)),
+            Column::F32(s) => Column::f32(collect_with_spare(groups.map(|r| float_reduce(op, s, r[0], r[1..].iter().copied(), finite)), spare_rows)),
             Column::I64(s, sv) => {
                 let (values, valid) = int_groups(op, s, sv, groups, DType::I64, spare_rows)?;
                 Column::i64_masked(values, valid)
@@ -119,18 +138,18 @@ impl Column {
     /// position pass to learn the exact UTF-8 byte capacity before gathering.
     fn endpoint_columns<'a>(
         &self, op: CombineOp, groups: impl ExactSizeIterator<Item = &'a [usize]>,
-        spare: usize, bytes: usize,
+        spare: usize, bytes: usize, finite: bool,
     ) -> Column {
         match self {
             Column::F64(s) => {
-                let (values, _, missing) = endpoint_values(op, groups, s, |r| !s[r].is_nan(), |_| f64::NAN, spare);
+                let (values, _, missing) = float_endpoint_values(op, groups, s, spare, finite);
                 let mut out = Column::f64(values);
                 // Match the original builder's learned NaN fact as well as its bits.
                 if let (Some(row), Column::F64(v)) = (missing, &mut out) { v.set(row, f64::NAN); }
                 out
             }
             Column::F32(s) => {
-                let (values, _, missing) = endpoint_values(op, groups, s, |r| !s[r].is_nan(), |_| f32::NAN, spare);
+                let (values, _, missing) = float_endpoint_values(op, groups, s, spare, finite);
                 let mut out = Column::f32(values);
                 if let (Some(row), Column::F32(v)) = (missing, &mut out) { v.set(row, f32::NAN); }
                 out
@@ -169,7 +188,7 @@ impl Column {
         if src.dtype() != self.dtype() || !op.supports(self.dtype()) {
             return self.fold_converted(row, op, src, src_row, true);
         }
-        if !src.is_valid(src_row) {
+        if src.is_missing_input(src_row) {
             return self.set_missing_at(row);
         }
         self.write_present(row, src, src_row)
@@ -194,16 +213,8 @@ impl Column {
         match (&mut *self, src) {
             // `make_mut` forgets the column's NaN fact; a resume then checks its few
             // rows directly (tracking it here would grow this per-bar hot path).
-            (Column::F64(buf), Column::F64(s)) => {
-                if let Some(v) = float_step(op, buf[row], s[r]) {
-                    buf.make_mut()[row] = v;
-                }
-            }
-            (Column::F32(buf), Column::F32(s)) => {
-                if let Some(v) = float_step(op, buf[row], s[r]) {
-                    buf.make_mut()[row] = v;
-                }
-            }
+            (Column::F64(buf), Column::F64(s)) => float_fold(buf, row, op, s[r]),
+            (Column::F32(buf), Column::F32(s)) => float_fold(buf, row, op, s[r]),
             (Column::I64(buf, val), Column::I64(s, sv)) => {
                 int_step(buf, val, row, op, s[r], sv.is_valid(r), DType::I64)?
             }
@@ -232,22 +243,22 @@ impl Column {
     }
 
     /// Continue a batch reduction from its prefix aggregate. `had_missing`
-    /// distinguishes a float reduction stopped by an input NaN from an arithmetic
-    /// NaN (e.g. inf + -inf), which must still visit later inputs. Endpoints use
+    /// distinguishes a reduction stopped by a non-finite input from an IEEE
+    /// intermediate produced by finite inputs, which must still visit later inputs. Endpoints use
     /// the same canonical missing value as `reduce_into`. This preserves even NaN
     /// payloads and signed zeros when a cached prefix replaces a full re-reduction.
     pub fn combine_reduced_at(&mut self, row: usize, op: CombineOp, src: &Column, r: usize, had_missing: bool) -> Result<()> {
-        if op.is_endpoint() && (!self.is_valid(row) || !src.is_valid(r)) {
+        if op.is_endpoint() && (!self.is_valid(row) || src.is_missing_input(r)) {
             return self.set_missing_at(row);
         }
         if !op.is_endpoint() {
             match (&mut *self, src) {
                 (Column::F64(a), Column::F64(b)) => {
-                    if !had_missing { a.set(row, if b[r].is_nan() { b[r] } else { float_combine(op, a[row], b[r]) }); }
+                    if !had_missing { a.set(row, if b[r].is_missing_value() { missing_float(b[r]) } else { float_combine(op, a[row], b[r]).unwrap_or(a[row]) }); }
                     return Ok(());
                 }
                 (Column::F32(a), Column::F32(b)) => {
-                    if !had_missing { a.set(row, if b[r].is_nan() { b[r] } else { float_combine(op, a[row], b[r]) }); }
+                    if !had_missing { a.set(row, if b[r].is_missing_value() { missing_float(b[r]) } else { float_combine(op, a[row], b[r]).unwrap_or(a[row]) }); }
                     return Ok(());
                 }
                 _ => {}
@@ -348,8 +359,8 @@ impl Column {
             // first / last: the endpoint cell, missing unless every row is present
             // (presence read once per dtype, not dispatched per row)
             let (present, last) = match src {
-                Column::F64(s) => endpoint_scan(first, rows, |r| !s[r].is_nan()),
-                Column::F32(s) => endpoint_scan(first, rows, |r| !s[r].is_nan()),
+                Column::F64(s) => float_endpoint_scan(s, first, rows),
+                Column::F32(s) => float_endpoint_scan(s, first, rows),
                 Column::Datetime(s) => endpoint_scan(first, rows, |r| s[r] != i64::MIN),
                 Column::I64(_, v) | Column::I32(_, v) | Column::Bool(_, v) | Column::Str(_, v)
                     if !v.has_nulls() =>
@@ -363,11 +374,17 @@ impl Column {
             if !present {
                 return self.set_missing_at(row);
             }
-            return self.write_present(row, src, if op == CombineOp::Keep { first } else { last });
+            return self.write_present(row, src, endpoint_position(op, first, last, true));
         }
         match (&mut *self, src) {
-            (Column::F64(buf), Column::F64(s)) => buf.set(row, float_reduce(op, s, first, rows)),
-            (Column::F32(buf), Column::F32(s)) => buf.set(row, float_reduce(op, s, first, rows)),
+            (Column::F64(buf), Column::F64(s)) => {
+                let finite = finite_inputs(s, rows.size_hint().0.saturating_add(1));
+                buf.set(row, float_reduce(op, s, first, rows, finite));
+            },
+            (Column::F32(buf), Column::F32(s)) => {
+                let finite = finite_inputs(s, rows.size_hint().0.saturating_add(1));
+                buf.set(row, float_reduce(op, s, first, rows, finite));
+            },
             (Column::I64(buf, val), Column::I64(s, sv)) => {
                 let v = int_reduce(op, s, sv, first, rows, DType::I64)?;
                 write_int(buf, val, row, v)
@@ -455,7 +472,7 @@ fn endpoint_groups<'a>(op: CombineOp, groups: impl ExactSizeIterator<Item = &'a 
         let first = rows[0];
         let (present, last) = endpoint_scan(first, rows[1..].iter().copied(), &present);
         valid.set(i, n, present);
-        if present && op == CombineOp::Replace { last } else { first }
+        endpoint_position(op, first, last, present)
     }).collect();
     (positions, valid)
 }
@@ -496,6 +513,12 @@ fn str_not_last(row: usize, n: usize) -> VolasError {
     VolasError::Shape(format!("a str cell folds in place only at the last row ({row} of {n})"))
 }
 
+/// Literal endpoint selection, shared by the dense and missing-aware paths.
+#[inline]
+fn endpoint_position(op: CombineOp, first: usize, last: usize, present: bool) -> usize {
+    if present && op == CombineOp::Replace { last } else { first }
+}
+
 /// Whether every row (`first` then `rest`) is present, and the last row.
 #[inline]
 fn endpoint_scan(first: usize, rest: impl Iterator<Item = usize>, valid: impl Fn(usize) -> bool) -> (bool, usize) {
@@ -508,51 +531,160 @@ fn endpoint_scan(first: usize, rest: impl Iterator<Item = usize>, valid: impl Fn
     (present, last)
 }
 
-/// One float fold step: the new aggregate, or `None` when it stays as it is. A
-/// missing (`NaN`) aggregate stays missing; a missing value makes it missing.
-#[inline]
-fn float_step<T: Numeric + std::ops::Add<Output = T>>(op: CombineOp, acc: T, x: T) -> Option<T> {
-    if acc.is_missing() {
-        return None;
-    }
-    if x.is_missing() {
-        return Some(x);
-    }
-    match op {
-        CombineOp::Keep => None,
-        CombineOp::Replace => Some(x),
-        _ => Some(float_combine(op, acc, x)),
+/// Storage sentinels and computation inputs have different domains. Keep
+/// Numeric's IEEE/storage semantics; delegate only input classification here.
+trait FloatInput: Numeric + Float {
+    const NAN: Self;
+}
+
+impl FloatInput for f64 { const NAN: Self = f64::NAN; }
+impl FloatInput for f32 { const NAN: Self = f32::NAN; }
+
+/// Reuse the buffer owner's fact. Only dense selections may trigger its SIMD
+/// scan: at most two source rows per selected row; sparse selections remain O(k).
+fn finite_inputs<T: Float>(s: &Buffer<T>, selected: usize) -> bool {
+    match s.known_has_nonfinite() {
+        Some(has_missing) => !has_missing,
+        None if selected >= s.len().div_ceil(2) => !s.has_nonfinite(),
+        None => false,
     }
 }
 
-/// `Max` / `Min` / `Sum` of two present floats.
+fn finite_group_inputs<'a, T: Float, G: Iterator<Item = &'a [usize]> + Clone>(s: &Buffer<T>, groups: &G) -> bool {
+    let selected = if s.known_has_nonfinite().is_some() { 0 }
+        else { groups.clone().fold(0usize, |n, rows| n.saturating_add(rows.len())) };
+    finite_inputs(s, selected)
+}
+
+fn float_endpoint_scan<T: Float>(s: &Buffer<T>, first: usize, rest: impl Iterator<Item = usize>) -> (bool, usize) {
+    if finite_inputs(s, rest.size_hint().0.saturating_add(1)) {
+        endpoint_scan(first, rest, |r| { let _ = s[r]; true })
+    } else {
+        endpoint_scan(first, rest, |r| !s[r].is_missing_value())
+    }
+}
+
+fn float_endpoint_values<'a, T: FloatInput>(
+    op: CombineOp, groups: impl ExactSizeIterator<Item = &'a [usize]>,
+    s: &Buffer<T>, spare: usize, finite: bool,
+) -> (Vec<T>, Validity, Option<usize>) {
+    if finite {
+        let values = collect_with_spare(groups.map(|rows| {
+            let first = rows[0];
+            let last = rows[rows.len() - 1];
+            let len = s.len();
+            let in_bounds = rows.iter().fold(true, |ok, &r| ok & (r < len));
+            assert!(in_bounds, "aggregation row is outside the column");
+            s[endpoint_position(op, first, last, true)]
+        }), spare);
+        (values, Validity::default(), None)
+    } else {
+        endpoint_values(op, groups, s, |r| !s[r].is_missing_value(), |_| T::NAN, spare)
+    }
+}
+
+/// Preserve a NaN input's payload, but normalize infinities to missing output.
+#[cold]
+#[inline(never)]
+fn missing_float<T: FloatInput>(x: T) -> T {
+    if x.is_missing() { x } else { T::NAN }
+}
+
+/// Complete the rare input write outside the finite fold, preserving a missing
+/// aggregate's bits and a NaN input's payload.
+#[cold]
+#[inline(never)]
+fn write_missing_float<T: FloatInput>(buf: &mut Buffer<T>, row: usize, x: T) {
+    if !buf[row].is_missing() { buf.set(row, missing_float(x)); }
+}
+
+/// Decide whether a write is needed before borrowing the destination mutably.
+/// Missing accumulators and `Keep` retain shared buffers and their learned facts;
+/// non-finite inputs stay on the cold write path.
 #[inline]
-fn float_combine<T: Numeric + std::ops::Add<Output = T>>(op: CombineOp, acc: T, x: T) -> T {
+fn float_fold<T: FloatInput + std::ops::Add<Output = T>>(buf: &mut Buffer<T>, row: usize, op: CombineOp, x: T) {
+    if x.is_missing_value() {
+        write_missing_float(buf, row, x);
+    } else if let Some(v) = float_step(op, *fold_cell(buf.get(row)), x) {
+        *fold_cell(buf.make_mut().get_mut(row)) = v;
+    }
+}
+
+/// One bounds failure for either borrow of a fold destination. The mutable
+/// access follows a checked read; copy-on-write preserves the buffer length.
+#[inline]
+fn fold_cell<T>(cell: Option<T>) -> T {
+    cell.unwrap()
+}
+
+/// One float fold step for a finite input. A NaN aggregate stays missing;
+/// `Keep` leaves its buffer untouched.
+#[inline]
+fn float_step<T: FloatInput + std::ops::Add<Output = T>>(op: CombineOp, acc: T, x: T) -> Option<T> {
+    if op == CombineOp::Keep || acc.is_missing() {
+        None
+    } else if op == CombineOp::Replace {
+        Some(x)
+    } else {
+        float_combine(op, acc, x)
+    }
+}
+
+/// Arithmetic on two present floats (ordered extrema, IEEE sum). Endpoints
+/// dispatch separately, so they never evaluate unrelated arithmetic. An unchanged
+/// extremum needs no write; batch reduction keeps its accumulator in that case.
+#[inline]
+fn float_combine<T: Numeric + std::ops::Add<Output = T>>(op: CombineOp, acc: T, x: T) -> Option<T> {
     match op {
-        CombineOp::Max => if x > acc { x } else { acc },
-        CombineOp::Min => if x < acc { x } else { acc },
-        _ => acc + x, // Sum (endpoints never reach here)
+        CombineOp::Max => if x > acc { Some(x) } else { None },
+        CombineOp::Min => if x < acc { Some(x) } else { None },
+        _ => Some(acc + x), // Sum (endpoints never reach here)
     }
 }
 
 /// `Max` / `Min` / `Sum` of `s` over `first` then `rest` — `NaN` at the first
 /// missing value.
 #[inline]
-fn float_reduce<T: Numeric + std::ops::Add<Output = T>>(
+fn float_reduce<T: FloatInput + std::ops::Add<Output = T>>(
     op: CombineOp,
     s: &[T],
     first: usize,
     rest: impl Iterator<Item = usize>,
+    finite: bool,
+) -> T {
+    if !finite { return float_reduce_missing(op, s, first, rest); }
+    match op {
+        CombineOp::Keep => float_reduce_by(s, first, rest, |a, _| a),
+        CombineOp::Replace => float_reduce_by(s, first, rest, |_, x| x),
+        CombineOp::Max => float_reduce_by(s, first, rest, |a, x| float_combine(CombineOp::Max, a, x).unwrap_or(a)),
+        CombineOp::Min => float_reduce_by(s, first, rest, |a, x| float_combine(CombineOp::Min, a, x).unwrap_or(a)),
+        CombineOp::Sum => float_reduce_by(s, first, rest, |a, x| float_combine(CombineOp::Sum, a, x).unwrap_or(a)),
+    }
+}
+
+/// Dispatch the operation once; the loop retains the scalar IEEE order.
+#[inline]
+fn float_reduce_by<T: Copy>(s: &[T], first: usize, rest: impl Iterator<Item = usize>, combine: impl Fn(T, T) -> T) -> T {
+    let mut acc = s[first];
+    for r in rest { acc = combine(acc, s[r]); }
+    acc
+}
+
+/// Non-finite repair stays outside the all-finite numerical loop.
+#[cold]
+#[inline(never)]
+fn float_reduce_missing<T: FloatInput + std::ops::Add<Output = T>>(
+    op: CombineOp, s: &[T], first: usize, rest: impl Iterator<Item = usize>,
 ) -> T {
     let mut acc = s[first];
-    if acc.is_missing() {
-        return acc;
+    if acc.is_missing_value() {
+        return missing_float(acc);
     }
     for x in rest.map(|r| s[r]) {
-        if x.is_missing() {
-            return x;
+        if x.is_missing_value() {
+            return missing_float(x);
         }
-        acc = float_combine(op, acc, x);
+        acc = float_combine(op, acc, x).unwrap_or(acc);
     }
     acc
 }
@@ -682,9 +814,91 @@ fn endpoint_values<'a, T: Copy>(
     for (i, rows) in groups.enumerate() {
         let first = rows[0];
         let (present, last) = endpoint_scan(first, rows[1..].iter().copied(), &present);
-        let row = if present && op == CombineOp::Replace { last } else { first };
+        let row = endpoint_position(op, first, last, present);
         valid.set(i, n, present);
         values.push(if present { source[row] } else { missing.get_or_insert(i); absent(source[row]) });
     }
     (values, valid, missing)
+}
+
+#[cfg(test)]
+mod float_operation_tests {
+    use super::{float_step, float_reduce, CombineOp};
+
+    #[test]
+    fn literal_endpoints_and_ordered_ties_keep_their_zero_bits() {
+        let negative = 1_u64 << 63;
+        let cases = [
+            (CombineOp::Keep, [negative, 0]),
+            (CombineOp::Replace, [0, negative]),
+            (CombineOp::Max, [negative, 0]),
+            (CombineOp::Min, [negative, 0]),
+            (CombineOp::Sum, [0, 0]),
+        ];
+        for (op, expected) in cases {
+            assert_eq!([
+                float_reduce(op, &[-0.0_f64, 0.0], 0, std::iter::once(1), true).to_bits(),
+                float_reduce(op, &[0.0_f64, -0.0], 0, std::iter::once(1), true).to_bits(),
+            ], expected, "{op:?} reduced float64");
+            assert_eq!([
+                float_reduce(op, &[-0.0_f32, 0.0], 0, std::iter::once(1), true).to_bits(),
+                float_reduce(op, &[0.0_f32, -0.0], 0, std::iter::once(1), true).to_bits(),
+            ], expected.map(|bits| (bits >> 32) as u32), "{op:?} reduced float32");
+            assert_eq!([
+                float_step(op, -0.0_f64, 0.0).unwrap_or(-0.0).to_bits(),
+                float_step(op, 0.0_f64, -0.0).unwrap_or(0.0).to_bits(),
+            ], expected, "{op:?} float64");
+            assert_eq!([
+                float_step(op, -0.0_f32, 0.0).unwrap_or(-0.0).to_bits(),
+                float_step(op, 0.0_f32, -0.0).unwrap_or(0.0).to_bits(),
+            ], expected.map(|bits| (bits >> 32) as u32), "{op:?} float32");
+        }
+    }
+}
+
+#[cfg(test)]
+mod aggregation_fact_tests {
+    use super::*;
+
+    #[test]
+    fn dense_groups_learn_finite_inputs_without_scanning_sparse_columns() {
+        for col in [Column::f64(vec![1.; 100]), Column::f32(vec![1.; 100])] {
+            let known = Column::known_has_nonfinite;
+            assert_eq!(known(&col), None);
+            let sparse = [vec![0, 99]];
+            let out = col.reduce_groups(CombineOp::Sum, sparse.iter().map(Vec::as_slice)).unwrap();
+            assert_eq!(out.get_f64(0), 2.);
+            assert_eq!(known(&col), None, "a sparse selection must not scan the source");
+            let dense = [(0..100).collect::<Vec<_>>()];
+            let out = col.reduce_groups(CombineOp::Sum, dense.iter().map(Vec::as_slice)).unwrap();
+            assert_eq!(out.get_f64(0), 100.);
+            assert_eq!(known(&col), Some(false), "dense groups reuse one finite-input fact");
+        }
+    }
+
+    #[test]
+    fn a_nonfinite_value_outside_the_groups_does_not_poison_selected_inputs() {
+        for col in [Column::f64(vec![1., 2., f64::INFINITY, 4.]),
+                    Column::f32(vec![1., 2., f32::INFINITY, 4.])] {
+            let groups = [vec![0, 1], vec![3]];
+            let out = col.reduce_groups(CombineOp::Sum, groups.iter().map(Vec::as_slice)).unwrap();
+            assert_eq!(out.get_f64(0), 3.);
+            assert_eq!(out.get_f64(1), 4.);
+        }
+    }
+}
+
+#[cfg(test)]
+mod endpoint_bounds_tests {
+    use super::*;
+
+    #[test]
+    #[should_panic]
+    fn finite_endpoints_validate_the_middle_positions_too() {
+        let col = Column::f64(vec![1.; 100]);
+        let dense = [(0..100).collect::<Vec<_>>()];
+        col.reduce_groups(CombineOp::Sum, dense.iter().map(Vec::as_slice)).unwrap();
+        let invalid = [vec![0, 1000, 1]];
+        col.reduce_groups(CombineOp::Keep, invalid.iter().map(Vec::as_slice)).unwrap();
+    }
 }

@@ -235,7 +235,7 @@ df['ma:2']
   - `'min'`——最小值
   - `'sum'`——求和
 
-  缺失值从不被跳过：只要桶内任一值缺失，该列的聚合结果（`'first'` / `'last'` / `'max'` / `'min'` / `'sum'` 皆然）即为缺失（全缺失的桶也是缺失，从不得到 `±inf`），实时折叠与批量 `cumulate` 结果一致。`datetime` 列不支持 `'sum'`，`bool` / `str` 列只支持 `'first'` / `'last'`；不支持的组合在构造 frame 时即被拒绝。
+  缺失值从不被跳过：只要桶内任一输入值缺失（含 `NaN`、`±inf`），该列的聚合结果（`'first'` / `'last'` / `'max'` / `'min'` / `'sum'` 皆然）即为缺失（全缺失的桶也是缺失；有限输入相加溢出的 IEEE 中间结果仍可为 `±inf`），实时折叠与批量 `cumulate` 结果一致。`datetime` 列不支持 `'sum'`，`bool` / `str` 列只支持 `'first'` / `'last'`；不支持的组合在构造 frame 时即被拒绝。
 - **window** `Optional[int] = None` 把它变成一个**有界滚动窗口** frame，只暴露最后 `window` 行（参见[有界滚动窗口](#有界滚动窗口)）。需要配合 `max_lookback`。
 - **max_lookback** `Optional[int | list[str]] = None` **与 `window` 同时必填**（且只在有 `window` 时有效）：可见行之前保留的隐藏 margin 行数，以及该 frame 能精确计算的 directive（参见[有界窗口能计算什么](#有界窗口能计算什么)）。传一个**指标 directive 列表**即为**声明**它们：margin 取它们 lookback 的最大值（例如 `['atr:14', 'ma:50']` → margin 49），每个声明的 directive 在构造时基于全部给定行计算并缓存——滑动累加类或递归类指标（`ma`、EMA、Wilder 平滑、累积线等）只能以这种方式计算。传一个 **int** 则只给出 margin，不声明任何 directive。每个列表项必须是指标 directive（`'ma:50'`），裸名 / 笔误（`'ma50'`）和空列表会被拒绝；列名与 frame 中某个数据列相同的 directive（数据列 `macd` 旁的 `'macd:'`）同样会被拒绝：请先重命名该数据列再声明。
 
@@ -384,7 +384,7 @@ df.append({'time_key': ts, 'open': o, 'high': h, 'low': l, 'close': c, 'volume':
 
 ### df.cumulate(time_frame: TimeFrame | str, cumulators: dict | None = None) -> DataFrame
 
-把 `DataFrame` 累积（重采样）到更粗的 `time_frame`，返回一个新的 `DataFrame`。需要一个 `DatetimeIndex`。
+把 `DataFrame` 累积（重采样）到更粗的 `time_frame`，返回一个新的 `DataFrame`。需要一个 `DatetimeIndex`。若目标周期与源 frame 相同，则比较每个数据列的有效聚合规则：相同就复制数据列并保留未收口周期的细 bar，不同则在变更前报错；省略覆盖项仍采用 OHLCV 默认规则。缓存指标列不携带到结果。
 
 - **time_frame** `TimeFrame | str` 目标 bar 间隔，例如 `TimeFrame.m5` 或 `'5m'`。参见 [TimeFrame](docs/zh-CN/cumulation.md#timeframe)。
 - **cumulators?** `dict[str, str] | None = None` 逐列聚合器覆盖（例如
@@ -459,8 +459,7 @@ frame 会把**未收口周期**的各根 bar 单独保存在一个小 DataFrame 
 - **构造时的最后一行就是正在形成的 bar。** `DataFrame(data, time_frame=...)` 把它作为未收口周期的第一根 bar，所以落在它所在周期内的更细 bar 会折叠进这一行，而不会再开一行同标签的新行。
 - **df.iloc[-1]** 是当前（仍未收口的）周期——live bar。
 - **df[directive]** / **df.exec(directive)** 在包含形成中那一行的累积 frame 上计算指标——惰性、读时计算：一次 `append` 只把它们标记为过期，下一次读取只重算尾部。
-- **df.cumulate(target)** 必须是源 frame 的整数倍（例如 `5m→15m`，而非
-  `5m→7m`；一周或 3 天的 bar 不会嵌套进月 / 年）；同一个 frame 是一次 `copy()`。
+- **df.cumulate(target)** 必须是源 frame 的整数倍（例如 `5m→15m`，而非 `5m→7m`；一周或 3 天的 bar 不会嵌套进月 / 年）；相同周期按现有数据列比较有效聚合规则：相同则复制并保留未收口周期的细 bar，不同则在变更前报错；缓存指标列被丢弃。
 
 ```py
 df = history.cumulate('5m')   # 带 tf 的 5m frame（history 更细，例如 1m）
@@ -955,7 +954,7 @@ Python 选择会检查布尔 Series 的索引对齐，并读取 NumPy MaskedArra
 ## 内置指标
 完整 directive 参考见 [INDICATORS.md](INDICATORS.md)，其中覆盖 Volas 独有指标、内置统计命令，以及与 TA-Lib 兼容的 directive。
 
-Rust 调用方通过 `parse` 或 `bind_frame` 获得经过校验、不可变更内部表示的 `volas_directive::Ast`。通过 `node()` 与 `continuation()` 查看它；命令参数提供只读的 `values()`、`spec()` 与 `bare()` 访问器。执行、lookback 与续算 API 都接受 `&Ast`。binder 在绑定时一次性准备续算计划，包括其中的有状态子树及其隐藏输入列。`stringify` 接受 `&Ast` 或宽松的 `&Form`，使用同一个规范渲染器。
+Rust 调用方通过 `parse` 或 `bind_frame` 获得经过校验、不可变更内部表示的 `volas_directive::Ast`。通过 `node()` 与 `continuation()` 查看它；命令参数提供只读的 `values()`、`spec()` 与 `bare()` 访问器。执行、lookback 与续算 API 都接受 `&Ast`。binder 在绑定时一次性准备续算计划，包括其中的有状态子树及其隐藏输入列。`stringify` 接受 `&Ast` 或宽松的 `&Form`，使用同一个规范渲染器。底层 Rust 分组 `Column` 归约的分组迭代器须可重复遍历（`Clone`）；密集选择复用输入有限性事实，稀疏选择不会扫描整列。
 
 # 参与与反馈
 

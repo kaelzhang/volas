@@ -164,6 +164,10 @@ print(cum)
 
 API 概览见[实时累积](../../README.zh-CN.md#实时累积--一个-tf-aware-dataframe)。
 
+目标周期与源 frame 相同时，`cumulate` 比较每个数据列的有效聚合规则：相同则复制数据列并保留未收口周期的细 bar，不同则在任何变更前报错。省略覆盖项仍使用 OHLCV 默认规则；缓存指标列不携带到结果。
+
+所有聚合器（`first`、`last`、`max`、`min`、`sum`）都把 `NaN` 与 `±inf` 输入视为缺失，桶内任一输入缺失就会使该列的聚合结果缺失；原始存储不变，有限输入相加溢出的 IEEE 中间结果仍可为 `±inf`。
+
 ## TimeFrame
 
 `TimeFrame` 表示一个 bar 间隔。凡是 volas 需要重采样的地方都接受它：`df.cumulate` 和 `DataFrame` 的 `time_frame` 参数。它既可以写成 `TimeFrame` 常量，也可以写成等价的**字符串标签**。没有 `TimeFrame(...)` 构造函数；请使用下面的常量或标签字符串。`hv` 指标在 directive 中使用标签；各时间框如何年化，见它的[参考条目](../../INDICATORS.md#user-content-indicator-hv)。

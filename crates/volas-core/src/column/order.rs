@@ -581,6 +581,19 @@ impl Column {
         }
     }
 
+    /// Equality for change detection: present floats must have identical bits
+    /// (including the sign of zero). Missing payloads are immaterial, just as in
+    /// [`equals`](Self::equals); other dtypes retain their native value comparison.
+    pub fn equals_exact(&self, other: &Column) -> bool {
+        match (self, other) {
+            (Column::F64(a), Column::F64(b)) => a.len() == b.len() && a.iter().zip(b.iter())
+                .all(|(a, b)| (a.is_nan() && b.is_nan()) || a.to_bits() == b.to_bits()),
+            (Column::F32(a), Column::F32(b)) => a.len() == b.len() && a.iter().zip(b.iter())
+                .all(|(a, b)| (a.is_nan() && b.is_nan()) || a.to_bits() == b.to_bits()),
+            _ => self.equals(other),
+        }
+    }
+
     /// Value equality (pandas `equals`): the same dtype and length, missing in the
     /// same positions, and equal present values. A missing cell is compared by its
     /// presence only — never by the payload it happens to hold (two all-NA int

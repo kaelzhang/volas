@@ -493,6 +493,31 @@ impl DataFrame {
         Ok(())
     }
 
+    /// A bulk fold's validation frame: only the forming data row is copied, but
+    /// the original historical dtype constraints still apply. Older visible rows
+    /// have these same data dtypes; cached values and their computation are unused.
+    pub fn forming_fold_probe(&self) -> DataFrame {
+        let mut probe = self.data_rows(self.height.saturating_sub(1), self.height);
+        probe.lead = self.lead.clone();
+        probe
+    }
+
+    /// Validate a checkpoint prefix followed by one admitted bar against this
+    /// destination, in column order, before either the checkpoints or frame change.
+    /// `None` starts a one-bar reduction (a correction with no earlier prefix).
+    /// Prefix and source use the source positions in `ops`, with matching dtypes.
+    pub fn check_fold_from(&self, prefix: Option<&DataFrame>, src: &DataFrame, ops: &[(usize, usize, CombineOp)]) -> Result<()> {
+        let row = self.height - 1;
+        for &(dst_col, src_col, op) in ops {
+            let (dst, from) = (&self.columns[dst_col], &src.columns[src_col]);
+            if !cannot_fail(dst, from) {
+                let cells = prefix.map(|p| (&p.columns[src_col], 0)).into_iter().chain([(from, 0)]);
+                self.check_fold_with_lead(dst_col, dst, (row, op, true), cells)?;
+            }
+        }
+        Ok(())
+    }
+
     /// Publish an already reduced, admitted row at the forming row, using the
     /// fold plan's positions. The source has this frame's data dtypes and every
     /// aggregation check has succeeded, so neither conversion nor reduction is

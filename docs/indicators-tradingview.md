@@ -197,13 +197,13 @@ Fractal swing-point detection. A bar is a **pivot high** when its value is the
 strict maximum of the window `[bar-leftbars, bar+rightbars]` (every neighbour
 strictly lower — a tie disqualifies it); `pivotlow` is the symmetric strict
 minimum. The pivot's value is emitted at the **confirmation bar**
-`pivot + rightbars` (it needs `rightbars` of future data to confirm), and `NA`
+`pivot + rightbars` (after observing `rightbars` later bars), and `NA`
 everywhere else — so the output is a sparse series of confirmed swing points.
 
-> **This is a non-causal (look-ahead) indicator**: the value at a bar describes
-> a pivot `rightbars` bars in the past. It is correct for **labeling / research**
-> (where reading future bars is intended), but a live trading signal must never
-> treat the emitted bar as the moment the pivot occurred.
+> **This indicator is causal:** a confirmed pivot is available on the confirmation
+> row, using only data observed through that row. The value is never back-filled
+> to the pivot bar. Moving it back by `rightbars` for a chart does not make it
+> available at that earlier time for a trading signal.
 
 - **leftbars** `int` (required) Bars of history required to the left, `>= 1`.
 - **rightbars** `int` (required) Confirmation bars to the right, `>= 1`.

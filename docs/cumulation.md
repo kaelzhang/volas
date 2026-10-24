@@ -70,10 +70,12 @@ Now we get a 5-minute kline:
 
 An empty DatetimeIndex input returns an empty time-frame-aware result with the
 same data columns, dtypes, index name and timezone; it can receive finer bars later.
-Cumulating to the source's own time frame re-aggregates its **current data rows**
-with the requested cumulators, drops cached directives, and uses those cumulators
-for later appends. It does not recover the original fine-bar history of already
-aggregated rows. Unknown columns or aggregator names raise on every target.
+Cumulating to the source's own time frame compares the effective aggregator for
+each data column. An identical spec returns a copy of those data columns and
+preserves the open period's fine bars, so a later re-send still replaces its fine
+bar exactly. A different spec raises before changing the frame. Omitted overrides
+use the OHLCV defaults, as on any other target. Cached directives are dropped.
+Unknown columns or aggregator names raise on every target.
 
 `cumulate` defaults to OHLCV semantics — `open`=first, `high`=max, `low`=min,
 `close`=last, `volume`=sum — and **any other column falls back to `last`**. Pass
@@ -96,9 +98,11 @@ its column's dtype, and each dtype supports:
 
 **A missing input is never skipped.** A period's `first` / `last` / `max` / `min` /
 `sum` is missing as soon as **any** of the period's values is missing — a `NaN`
-float, an int / bool / str `volas.NA`, a datetime `NaT` — whatever value a missing
-cell happens to carry, and an all-missing period is missing too (never `±inf`). One
-`NaN` high inside a 15-minute bar thus gives that bar a `NaN` high (which the
+or `±inf` float, an int / bool / str `volas.NA`, a datetime `NaT` — whatever value
+a missing cell happens to carry, and an all-missing period is missing too. Finite
+inputs may still overflow an IEEE floating-point sum to `±inf`; that intermediate
+is not reclassified as a missing input. One `NaN` high inside a 15-minute bar thus
+gives that bar a `NaN` high (which the
 indicators then treat as a missing row) instead of the maximum of the known highs,
 which could understate the true range with no sign that data was missing. The live
 fold (`append` on a `time_frame` frame) and the batch `cumulate` run the same

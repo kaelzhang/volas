@@ -181,3 +181,28 @@ fn rollover_keeps_the_original_grid_when_incoming_bars_use_another_zone() {
         same_bits(&live.frame().unwrap(), &cumulate(&raw, TimeFrame::Day1, &spec).unwrap());
     }
 }
+
+#[test]
+fn nonfinite_inputs_are_missing_in_initial_fold_and_resend_checkpoints() {
+    for bad in [f64::INFINITY, f64::NEG_INFINITY, f64::NAN] {
+        for col in [Column::f64(vec![bad, 2., 3.]), Column::f32(vec![bad as f32, 2., 3.])] {
+            for agg in [Agg::First, Agg::Last, Agg::Max, Agg::Min, Agg::Sum] {
+                let op = agg.as_combine_op();
+                let mut initial = col.take(&[1]);
+                initial.init_at(0, op, &col, 0).unwrap();
+                assert!(initial.get_f64(0).is_nan(), "initial {agg:?} {bad}");
+                let mut fold = col.take(&[1]);
+                fold.combine_at(0, op, &col, 0).unwrap();
+                assert!(fold.get_f64(0).is_nan(), "fold {agg:?} {bad}");
+                let mut checkpoint = col.take(&[1]);
+                checkpoint.combine_reduced_at(0, op, &col, 0, false).unwrap();
+                assert!(checkpoint.get_f64(0).is_nan(), "checkpoint {agg:?} {bad}");
+                let raw = frame(&[0, MINUTE, 2 * MINUTE], vec![col.clone()]);
+                let spec = spec(agg, 1);
+                let mut live = Cumulator::from_frame(&raw, TimeFrame::Min5, spec.clone()).unwrap();
+                live.append(&frame(&[2 * MINUTE], vec![col.slice(1, 2)])).unwrap();
+                assert!(live.last().unwrap().unwrap().columns()[0].get_f64(0).is_nan());
+            }
+        }
+    }
+}

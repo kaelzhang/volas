@@ -7,6 +7,7 @@ import pytest
 
 # (module, helper, returns a predicate, takes a diagnostic context)
 HELPERS = [
+    ('test_derivations', 'same', True, False),
     ('harness.observe', 'same_indicator', False, True),
     ('harness.observe', 'same_data', False, True),
     ('test_centred_moments', '_bits', False, True),

@@ -16,6 +16,7 @@ import pytest
 
 import volas
 from volas import DataFrame
+from .exact import same_exact
 
 N = 60
 rng = np.random.default_rng(11)
@@ -48,9 +49,7 @@ def cached(directives=DIRECTIVES, a=0, b=N):
 
 
 def same(got, want):
-    got, want = np.asarray(got, dtype=object), np.asarray(want, dtype=object)
-    norm = [lambda v: None if v is volas.NA or (isinstance(v, float) and v != v) else v] * 2
-    return [norm[0](v) for v in got] == [norm[1](v) for v in want]
+    return same_exact(got, want)
 
 
 def full(directive, rows):

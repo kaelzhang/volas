@@ -193,7 +193,7 @@ def period_start(ts: int, tf: str, tz: str | None) -> int:
 
 def _aggregate(op: str, values: list):
     """A period's aggregate: ``None`` (missing) as soon as any value is missing."""
-    if any(v is None or (isinstance(v, float) and math.isnan(v)) for v in values):
+    if any(v is None or (isinstance(v, float) and not math.isfinite(v)) for v in values):
         return None
     if op == 'first':
         return values[0]
