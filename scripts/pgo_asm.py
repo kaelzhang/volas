@@ -10,7 +10,7 @@ from build_pair import manifest
 from build_release import output
 
 
-from asm_symbols import parse, target_operand
+from asm_symbols import is_branch, is_call, parse, target_operand
 
 
 def main():
@@ -64,10 +64,7 @@ def main():
                 target = target_operand(body)
                 if target and int(target[1], 16) in addresses:
                     dest = addresses[int(target[1], 16)]
-                    if re.match(
-                        r"(?:b(?:\.[a-z]+)?|bl|cbn?z|tbn?z|j[a-z]*|callq?)\b",
-                        body,
-                    ):
+                    if is_branch(body):
                         edges.append([n, dest])
                     body = (
                         body[: target.start()]
@@ -76,7 +73,7 @@ def main():
                     )
                 body = re.sub(r"0x[0-9a-f]+ <([^>]+)>", r"<\1>", body)
                 normalized.append(body)
-                if re.match(r"(?:bl|blr|callq?)\b", body):
+                if is_call(body):
                     calls.append(body)
                 if re.search(r"\b(?:stp|str|ldp|ldr).*\[sp", body):
                     spills.append(body)

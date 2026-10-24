@@ -51,7 +51,7 @@ emit_asm() {
   crates="$(printf '%s\n' "$INVENTORY" | awk -F'|' -v mode="$MODE" 'NF>=4 && (mode=="dump" || $3=="max" || $3=="loop32"){print $1}' | sort -u)"
   for crate in $crates; do
     echo ">> emitting release asm for $crate ..." >&2
-    cargo rustc --release -q -p "$crate" -- \
+    cargo rustc --release -q --target-dir "$TARGET" -p "$crate" -- \
       --emit "asm=$ASM_DIR/$crate.s" -C "llvm-args=-x86-asm-syntax=intel"
   done
 }

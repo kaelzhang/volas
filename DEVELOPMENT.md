@@ -212,7 +212,11 @@ pair checks compare that identity independently of the source hash. Unbound tool
 flags, linker, SDK and release-profile overrides are rejected. The Cargo resolver
 records the complete target-info query and refuses an unfamiliar query grammar.
 Both resolved flags and real rustc argv must match the requested mode and absolute
-profile path; host crates cannot receive feedback flags. Cargo resolves ISA
+profile path. One argument parser accepts `-Cx`, `-C x`, `--codegen=x`, and
+`--codegen x`, normalizing underscores in option names only. The same parser
+checks mode, duplicate feedback options, paths, and forbidden overrides at
+configuration preflight and on recorded compiler invocations. Host crates cannot
+receive feedback flags. Cargo resolves ISA
 flags; the owner forwards those resolved flags to maturin so macOS link arguments
 cannot mask FMA or PGO instrumentation. Fat LTO and the release profile stay in Cargo.
 
@@ -220,7 +224,10 @@ Training covers the public indicator inventory and the existing live, first-cach
 range and interop factories. Its versioned operation budget is independent of
 elapsed time (four fixed passes). Every stage checks state changes, lengths,
 missing masks and values against operation expectations, and feeds verified results
-into its digest. The merged profile retains function counters. A missing-profile
+into its digest. First-cache validation reads the requested result with
+`get_column`, which cannot compute a missing cache; a factory caching a different
+indicator fails before validation can materialize the requested one. The merged
+profile retains function counters. A missing-profile
 diagnostic for an executed training function fails the use build; untrained cold
 misses are listed individually with counter evidence and reasons in
 `profile-warnings.json`. Unrecognized diagnostic formats and CFG/hash mismatches
@@ -258,8 +265,13 @@ distribution. To upload a previously built package, run
 `make upload BUILD_ARTIFACTS=<that-build-directory>`. Other files in `dist/` are
 untouched and never selected implicitly.
 
-Normal assembly gates reject target redirection in the environment or Cargo config.
+Normal assembly gates reject target-triple redirection in the environment or Cargo
+config. Both gates pass the same explicit `--target-dir` to Cargo and read outputs
+from that directory (`CARGO_TARGET_DIR`, or the repository's `target` directory),
+so a configured build-directory redirect cannot select stale probes.
 The hot-path gate emits each crate to its own invocation's explicit assembly file,
 and rejects a symbol body without instructions. Final-library branch normalization
-uses opcode-specific address operands, preserving bit-test immediates and separating
-indirect calls and address references from CFG edges.
+splits opcodes on any whitespace and uses opcode-specific address operands,
+preserving bit-test immediates and separating indirect calls and address references
+from CFG edges. ARM64 direct branches/calls and x86 conditional/unconditional
+jumps, calls, and loop branches use the same classification owner.

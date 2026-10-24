@@ -27,11 +27,11 @@ OBJDUMP="${OBJDUMP:-objdump}"
 
 command -v "$OBJDUMP" >/dev/null 2>&1 || { echo "asm-diff: '$OBJDUMP' not found"; exit 2; }
 
-echo ">> building kernel probes (release)..."
-cargo build --release -q --example asm_probe_numeric -p volas-compute
-cargo build --release -q --example asm_probe_string -p volas-core
-
 TARGET="${CARGO_TARGET_DIR:-$ROOT/target}"
+echo ">> building kernel probes (release)..."
+cargo build --release -q --target-dir "$TARGET" --example asm_probe_numeric -p volas-compute
+cargo build --release -q --target-dir "$TARGET" --example asm_probe_string -p volas-core
+
 NUM="$TARGET/release/examples/asm_probe_numeric"
 STR="$TARGET/release/examples/asm_probe_string"
 

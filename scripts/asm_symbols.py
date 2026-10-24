@@ -35,16 +35,41 @@ def require_symbol(functions, symbol):
     raise ValueError(f"missing assembly symbol: {symbol}")
 
 
+def opcode(body):
+    """LLVM separates mnemonics and operands with spaces or tabs."""
+    return body.split(None, 1)[0]
+
+
+def is_branch(body):
+    return (
+        re.fullmatch(
+            r"b(?:\.[a-z]+)?|bc\.[a-z]+|bl|cbn?z|tbn?z|j[a-z]+|call[qwl]?|loop(?:e|ne|z|nz)?",
+            opcode(body),
+        )
+        is not None
+    )
+
+
+def is_call(body):
+    return (
+        re.fullmatch(r"bl|blr|blraa|blrab|blraaz|blrabz|call[qwl]?", opcode(body))
+        is not None
+    )
+
+
 def target_operand(body):
-    """Only address operands count: the first immediate of tbz is a bit number."""
-    opcode, _, operands = body.partition(" ")
+    """Return an original-text match, preserving operand character positions."""
+    fields = re.match(r"(\S+)\s+(.*)", body)
+    if fields is None:
+        return None
+    op, operands = fields.groups()
     position = (
         2
-        if opcode in ("tbz", "tbnz")
+        if op in ("tbz", "tbnz")
         else 1
-        if opcode in ("cbz", "cbnz", "adr", "adrp")
+        if op in ("cbz", "cbnz", "adr", "adrp")
         else 0
-        if re.fullmatch(r"b(?:\.[a-z]+)?|bl|j[a-z]*|callq?", opcode)
+        if is_branch(body)
         else None
     )
     if position is None:
@@ -53,14 +78,11 @@ def target_operand(body):
     if position >= len(parts):
         raise ValueError(f"invalid target operands: {body}")
     part = parts[position]
-    match = re.search(
-        r"0x([0-9a-f]+)",
-        body[len(opcode) + 1 + part.start() : len(opcode) + 1 + part.end()],
-    )
-    if match is None:
-        return None  # An external symbol or indirect x86 operand has no local address.
-    start = len(opcode) + 1 + part.start() + match.start()
-    return re.compile(r"0x([0-9a-f]+)").search(body, start)
+    # x86 *address and register/memory operands are indirect, even with hex text.
+    if part[0].lstrip().startswith("*"):
+        return None
+    start, end = fields.start(2) + part.start(), fields.start(2) + part.end()
+    return re.compile(r"0x([0-9a-f]+)").search(body, start, end)
 
 
 def source_instructions(text):
