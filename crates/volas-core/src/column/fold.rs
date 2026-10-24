@@ -213,22 +213,8 @@ impl Column {
         match (&mut *self, src) {
             // `make_mut` forgets the column's NaN fact; a resume then checks its few
             // rows directly (tracking it here would grow this per-bar hot path).
-            (Column::F64(buf), Column::F64(s)) => {
-                let (acc, x) = (buf[row], s[r]);
-                if x.is_missing_value() {
-                    write_missing_float(buf, row, x);
-                } else if let Some(v) = float_step(op, acc, x) {
-                    buf.make_mut()[row] = v;
-                }
-            }
-            (Column::F32(buf), Column::F32(s)) => {
-                let (acc, x) = (buf[row], s[r]);
-                if x.is_missing_value() {
-                    write_missing_float(buf, row, x);
-                } else if let Some(v) = float_step(op, acc, x) {
-                    buf.make_mut()[row] = v;
-                }
-            }
+            (Column::F64(buf), Column::F64(s)) => float_fold(buf, row, op, s[r]),
+            (Column::F32(buf), Column::F32(s)) => float_fold(buf, row, op, s[r]),
             (Column::I64(buf, val), Column::I64(s, sv)) => {
                 int_step(buf, val, row, op, s[r], sv.is_valid(r), DType::I64)?
             }
@@ -268,11 +254,11 @@ impl Column {
         if !op.is_endpoint() {
             match (&mut *self, src) {
                 (Column::F64(a), Column::F64(b)) => {
-                    if !had_missing { a.set(row, if b[r].is_missing_value() { missing_float(b[r]) } else { float_combine(op, a[row], b[r]) }); }
+                    if !had_missing { a.set(row, if b[r].is_missing_value() { missing_float(b[r]) } else { float_combine(op, a[row], b[r]).unwrap_or(a[row]) }); }
                     return Ok(());
                 }
                 (Column::F32(a), Column::F32(b)) => {
-                    if !had_missing { a.set(row, if b[r].is_missing_value() { missing_float(b[r]) } else { float_combine(op, a[row], b[r]) }); }
+                    if !had_missing { a.set(row, if b[r].is_missing_value() { missing_float(b[r]) } else { float_combine(op, a[row], b[r]).unwrap_or(a[row]) }); }
                     return Ok(());
                 }
                 _ => {}
@@ -612,24 +598,41 @@ fn write_missing_float<T: FloatInput>(buf: &mut Buffer<T>, row: usize, x: T) {
     if !buf[row].is_missing() { buf.set(row, missing_float(x)); }
 }
 
+/// Read and write the destination through one checked mutable cell. `Keep`
+/// avoids copy-on-write entirely; non-finite inputs stay on the cold write path.
+#[inline]
+fn float_fold<T: FloatInput + std::ops::Add<Output = T>>(buf: &mut Buffer<T>, row: usize, op: CombineOp, x: T) {
+    if x.is_missing_value() {
+        write_missing_float(buf, row, x);
+    } else if op == CombineOp::Keep {
+        let _ = buf[row]; // validate the destination even when no write is needed
+    } else {
+        let cell = &mut buf.make_mut()[row];
+        if let Some(v) = float_step(op, *cell, x) { *cell = v; }
+    }
+}
+
 /// One float fold step for a finite input. A NaN aggregate stays missing;
 /// `Keep` leaves its buffer untouched.
 #[inline]
 fn float_step<T: FloatInput + std::ops::Add<Output = T>>(op: CombineOp, acc: T, x: T) -> Option<T> {
-    if op == CombineOp::Keep || acc.is_missing() { None }
-    else { Some(float_combine(op, acc, x)) }
+    if acc.is_missing() { return None; }
+    match op {
+        CombineOp::Keep => None,
+        CombineOp::Replace => Some(x),
+        _ => float_combine(op, acc, x),
+    }
 }
 
-/// The operation on two present floats (literal endpoints, ordered extrema,
-/// IEEE sum). Incremental and batch folds share this evaluation order.
+/// Arithmetic on two present floats (ordered extrema, IEEE sum). Endpoints
+/// dispatch separately, so they never evaluate unrelated arithmetic. An unchanged
+/// extremum needs no write; batch reduction keeps its accumulator in that case.
 #[inline]
-fn float_combine<T: Numeric + std::ops::Add<Output = T>>(op: CombineOp, acc: T, x: T) -> T {
+fn float_combine<T: Numeric + std::ops::Add<Output = T>>(op: CombineOp, acc: T, x: T) -> Option<T> {
     match op {
-        CombineOp::Keep => acc,
-        CombineOp::Replace => x,
-        CombineOp::Max => if x > acc { x } else { acc },
-        CombineOp::Min => if x < acc { x } else { acc },
-        CombineOp::Sum => acc + x,
+        CombineOp::Max => if x > acc { Some(x) } else { None },
+        CombineOp::Min => if x < acc { Some(x) } else { None },
+        _ => Some(acc + x), // Sum (endpoints never reach here)
     }
 }
 
@@ -645,11 +648,11 @@ fn float_reduce<T: FloatInput + std::ops::Add<Output = T>>(
 ) -> T {
     if !finite { return float_reduce_missing(op, s, first, rest); }
     match op {
-        CombineOp::Keep => float_reduce_by(s, first, rest, |a, x| float_combine(CombineOp::Keep, a, x)),
-        CombineOp::Replace => float_reduce_by(s, first, rest, |a, x| float_combine(CombineOp::Replace, a, x)),
-        CombineOp::Max => float_reduce_by(s, first, rest, |a, x| float_combine(CombineOp::Max, a, x)),
-        CombineOp::Min => float_reduce_by(s, first, rest, |a, x| float_combine(CombineOp::Min, a, x)),
-        CombineOp::Sum => float_reduce_by(s, first, rest, |a, x| float_combine(CombineOp::Sum, a, x)),
+        CombineOp::Keep => float_reduce_by(s, first, rest, |a, _| a),
+        CombineOp::Replace => float_reduce_by(s, first, rest, |_, x| x),
+        CombineOp::Max => float_reduce_by(s, first, rest, |a, x| float_combine(CombineOp::Max, a, x).unwrap_or(a)),
+        CombineOp::Min => float_reduce_by(s, first, rest, |a, x| float_combine(CombineOp::Min, a, x).unwrap_or(a)),
+        CombineOp::Sum => float_reduce_by(s, first, rest, |a, x| float_combine(CombineOp::Sum, a, x).unwrap_or(a)),
     }
 }
 
@@ -675,7 +678,7 @@ fn float_reduce_missing<T: FloatInput + std::ops::Add<Output = T>>(
         if x.is_missing_value() {
             return missing_float(x);
         }
-        acc = float_combine(op, acc, x);
+        acc = float_combine(op, acc, x).unwrap_or(acc);
     }
     acc
 }
@@ -814,7 +817,7 @@ fn endpoint_values<'a, T: Copy>(
 
 #[cfg(test)]
 mod float_operation_tests {
-    use super::{float_combine, float_reduce, CombineOp};
+    use super::{float_step, float_reduce, CombineOp};
 
     #[test]
     fn literal_endpoints_and_ordered_ties_keep_their_zero_bits() {
@@ -836,12 +839,12 @@ mod float_operation_tests {
                 float_reduce(op, &[0.0_f32, -0.0], 0, std::iter::once(1), true).to_bits(),
             ], expected.map(|bits| (bits >> 32) as u32), "{op:?} reduced float32");
             assert_eq!([
-                float_combine(op, -0.0_f64, 0.0).to_bits(),
-                float_combine(op, 0.0_f64, -0.0).to_bits(),
+                float_step(op, -0.0_f64, 0.0).unwrap_or(-0.0).to_bits(),
+                float_step(op, 0.0_f64, -0.0).unwrap_or(0.0).to_bits(),
             ], expected, "{op:?} float64");
             assert_eq!([
-                float_combine(op, -0.0_f32, 0.0).to_bits(),
-                float_combine(op, 0.0_f32, -0.0).to_bits(),
+                float_step(op, -0.0_f32, 0.0).unwrap_or(-0.0).to_bits(),
+                float_step(op, 0.0_f32, -0.0).unwrap_or(0.0).to_bits(),
             ], expected.map(|bits| (bits >> 32) as u32), "{op:?} float32");
         }
     }
