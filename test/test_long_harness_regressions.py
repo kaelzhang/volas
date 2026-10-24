@@ -139,3 +139,21 @@ def test_candle_missing_operand_is_unknown_until_window_recovers():
     values = df['0+style.gapsidesidewhite@iii'].to_numpy()
     assert np.isnan(values[:14]).all()
     assert np.isfinite(values[14:]).all()
+
+
+def test_cog_short_slice_last_row_resend_keeps_original_reach():
+    # Pinned minimal trace from the original slice/re-send counterexample.
+    # The first Row(label=0) appends; the second replaces that latest label.
+    x = np.arange(10, dtype=float) + 100
+    def frame(a, b):
+        return volas.DataFrame({'open': x[a:b]}, index=list(range(a, b)))
+    df = frame(0, 4).iloc[1:]
+    df.append(frame(4, 8))
+    df.append(volas.DataFrame({'open': [108.0]}).iloc[0])
+    df['COG:8@open']
+    df = df.iloc[1:]
+    df.append(volas.DataFrame({'open': [109.0]}).iloc[0])
+    got = df['COG:8@open'].to_numpy()
+    want = volas.DataFrame({'open': np.r_[x[1:8], 109.0]})['COG:8@open'].to_numpy()[1:]
+    assert np.isfinite(want[-1])
+    assert_exact(got, want)
