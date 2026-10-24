@@ -158,13 +158,50 @@ df['qty'].to_numpy(dtype='int64', na_value=0)    # or fill the holes with na_val
 pa.array(df['qty'])                              # lossless: keeps int64 + the null bitmap
 ```
 
-With an explicit NumPy dtype, only valid slots are converted, and `na_value`
+(numpy-export-rules)=
+### NumPy export rules
+
+Default string Series / `exec` exports are object arrays whose missing cells are
+`None`. Explicit `dtype='object'` exports preserve typed cells: missing int,
+bool, string and datetime cells are `volas.NA`; floats retain in-band `NaN`.
+Default mixed / string Frame exports also use typed cells.
+
+```py
+from volas import DataFrame, NA
+
+text = DataFrame({'x': ['a', None]})['x']
+integer = DataFrame({'x': [1, None]})['x']
+assert text.to_numpy()[1] is None
+assert text.to_numpy(dtype='object')[1] is NA
+assert integer.to_numpy(dtype='object')[1] is NA
+```
+
+The default numeric / bool Frame is a `float64` matrix (including `NaN` for
+missing bools); datetime-only Frames retain `datetime64[ns]`; other mixtures
+use typed object cells. Series / `exec` defaults retain dense native types,
+promote missing integers to `float64` + `NaN`, and reject missing bools.
+Without a fill, explicit non-object Series / `exec` casts start from that
+NA-model array; missing bools only allow float / complex targets. Frames use
+the same per-column rule, with two datetime exceptions: integer / bool targets
+keep NaT's epoch-ns sentinel, and float / complex targets replace NaT with NaN.
+Series / `exec` float / complex casts without a fill retain NumPy's epoch-ns
+NaT sentinel; `na_value` replaces the original missing slots when supplied.
+A Frame containing strings rejects numeric / temporal targets (even all-NA
+strings). These policies take precedence over plain NumPy casts.
+
+With an explicit NumPy dtype and `na_value`, only valid slots are converted, and `na_value`
 is filled in the target array. Missing payloads cannot cause conversion errors
 or warnings, including in an all-missing column. For example:
 `DataFrame({'qty': [1, None]})['qty'].to_numpy(dtype='float64', na_value=0.5)`
 returns `[1.0, 0.5]`. Integer exports cast directly from native integer values;
 `dtype='int64', na_value=0` preserves values beyond 2⁵³ exactly. Python errors
 from NumPy conversion or scalar boxing propagate to the caller.
+Each column retains its own source dtype until the common target is resolved
+by NumPy. Conversions then read those source arrays independently: a datetime
+column keeps its ns unit even beside numeric columns, and numeric columns
+interpret epoch counts in the resolved target unit. The output is assembled
+only after conversion and target filling. No shared i64 / f64 / object source
+matrix participates in explicit casts.
 For Frame, Series and `exec`, unsized text dtypes (`'U'`, `'str'`, `'S'`) infer
 their width from NumPy's valid-slot conversion, widened to fit the fill.
 The resolved dtype is retained before allocation: generic `datetime64` / `M`

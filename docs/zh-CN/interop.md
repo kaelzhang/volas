@@ -2,7 +2,7 @@
 
 本指南说明 DataFrame / Series 的构造和导出，以及 Row 的边界表示。选择和写入时会校验布尔 Series 键的索引；MaskedArray 的未知布尔信号会抛错。相等检查包含索引，并拒绝混合无时区与有时区的 datetime 索引。返回[中文 README](../../README.zh-CN.md)。
 
-显式指定 NumPy dtype 时，仅转换有效槽，`na_value` 在目标数组中填充；缺失载荷不触发转换错误或警告，全缺失列也如此。例如 `DataFrame({'qty': [1, None]})['qty'].to_numpy(dtype='float64', na_value=0.5)` 返回 `[1.0, 0.5]`。原生整数直接转换，`dtype='int64', na_value=0` 保留超过 2⁵³ 的整数精度；NumPy 调用失败会把原异常传播给调用方。Frame、Series 和 `exec` 的未定宽文本 dtype（`U` / `str` / `S`）保留 NumPy 对有效槽解析的宽度，并按填充值需要扩宽；`U2` 等显式宽度保留用户指定宽度，遵循 NumPy 的截断行为。分配前保留转换所得的实际 dtype：通用 `datetime64` / `M`、`timedelta64` / `m` 保留 datetime 源的单位，`V` / `V0` 保留原生 itemsize；全缺失列通过源 dtype 的空数组交给 NumPy 解析，不读取缺失载荷。
+显式指定 NumPy dtype 和 `na_value` 时，仅转换有效槽，`na_value` 在目标数组中填充；缺失载荷不触发转换错误或警告，全缺失列也如此。例如 `DataFrame({'qty': [1, None]})['qty'].to_numpy(dtype='float64', na_value=0.5)` 返回 `[1.0, 0.5]`。原生整数直接转换，`dtype='int64', na_value=0` 保留超过 2⁵³ 的整数精度；NumPy 调用失败会把原异常传播给调用方。Frame、Series 和 `exec` 的未定宽文本 dtype（`U` / `str` / `S`）保留 NumPy 对有效槽解析的宽度，并按填充值需要扩宽；`U2` 等显式宽度保留用户指定宽度，遵循 NumPy 的截断行为。分配前保留转换所得的实际 dtype：通用 `datetime64` / `M`、`timedelta64` / `m` 保留 datetime 源的单位，`V` / `V0` 保留原生 itemsize；全缺失列通过源 dtype 的空数组交给 NumPy 解析，不读取缺失载荷。
 
 ### DataFrame.from_pandas(pdf) -> DataFrame
 
@@ -31,7 +31,7 @@ df = DataFrame.from_arrow(polars_df)       # polars.DataFrame  -> DataFrame
 
 - **dtype** `str | None`——可选的导出转换。`None`（默认）给出按 dtype 的诚实表示；否则目标取 NumPy 对该写法的解析结果（`'f8'`、`'d'`、`'<f8'` 都是 `float64`，`'|O'` 是 `object`）：
   - `'object'`（或 `'O'`）——无损的二维「带类型单元格」数组（数字 / `str` /`Timestamp` / `volas.NA`）；唯一能保留 `str` 或 datetime 列的 dtype。
-  - `'int64'`、`'int32'`、`'int16'`、`'int8'`（以及无符号 `'uint*'`）——**精确**的`i64` 通道（大整数与 datetime 的 epoch-ns 不经 `float` 往返而存活）。对含缺失值的frame，除非给了 `na_value`，否则**抛错**。
+  - `'int64'`、`'int32'`、`'int16'`、`'int8'`（以及无符号 `'uint*'`）——**精确**的逐列原生整数转换（大整数与 datetime 的 epoch-ns 不经 `float` 往返而存活）。对含缺失值的frame，除非给了 `na_value`，否则**抛错**。
   - `'float64'`、`'float32'`、`'float16'`——（有损的）`float` 通道：缺失单元格为`NaN`，超过 2⁵³ ns 的 datetime 会量化。
   - `'bool'`——布尔：取每个值的真值（`0.5` → `True`）。对含缺失值的 frame，除非给了`na_value`，否则**抛错**。
   - `'datetime64[ns]'`——datetime 纳秒；`NaT` 单元格被保留。
@@ -169,11 +169,11 @@ s = Series.from_arrow(pa_array, name='close')   # pyarrow.Array -> Series
 
 - **dtype** `str | None`——可选的导出转换。`None`（默认）给出列的原生表示；否则可为任何 `numpy.ndarray.astype` 接受的 NumPy dtype 字符串，常用取值为：
   - `'int64'`、`'int32'`、`'int16'`、`'int8'`（以及无符号 `'uint64'`、`'uint32'`、`'uint16'`、`'uint8'`）——整型。对含缺失值的列，除非给了 `na_value`，否则**抛错**（NA 没有整型表示）。
-  - `'float64'`、`'float32'`、`'float16'`——浮点；缺失单元格为 `NaN`。
+  - `'float64'`、`'float32'`、`'float16'`——浮点；数值 / bool 的缺失单元格为 `NaN`。datetime Series / `exec` 不传 `na_value` 时沿用 NumPy，`NaT` 转为浮点／复数形式的 epoch-ns 哨兵；Frame 的 float／complex 出口则把 `NaT` 替换为 `NaN`。
   - `'bool'`——布尔。对含缺失值的列，除非给了 `na_value`，否则**抛错**（NA 没有布尔表示）。
   - `'datetime64[ns]'`——datetime 纳秒；缺失单元格为 `NaT`。
   - `'object'`（或 `'O'`）——Python 对象，每个单元格保留各自的类型值（无损）。
-- **na_value** `Any`——替换每个缺失单元格的值。默认是 NA 模型表示（float 导出为 `NaN`，object 数组为 `None`）。给了显式整型 `dtype` 时，值保持**精确**（大整数不经 `float64`漏斗），空洞变为 `na_value`。
+- **na_value** `Any`——替换每个缺失单元格的值。默认是 NA 模型表示（float 导出为 `NaN`；字符串 Series / `exec` 默认导出的 object 数组中为 `None`）。显式 `dtype='object'` 则保留类型化单元格：int、bool、str、datetime 缺失为 `volas.NA`，float 保留带内 `NaN`。给了显式整型 `dtype` 时，值保持**精确**（大整数不经 `float64`漏斗），空洞变为 `na_value`。
 
 ```py
 series = DataFrame({'qty': [1, None, 3]})['qty']    # 带缺失值的 int64
@@ -185,6 +185,18 @@ series.to_numpy(na_value=-1)               # -> array([ 1., -1.,  3.])   （默�
 # 不给 na_value 时，整型 dtype 遇缺失值会抛错
 series.to_numpy(dtype='int64')
 # ValueError: cannot convert a column with missing values to integer NumPy dtype 'int64' ...
+```
+
+默认字符串导出与显式 object 的区别如下（Frame 默认混合／字符串导出也使用类型化单元格）：
+
+```py
+from volas import DataFrame, NA
+
+text = DataFrame({'x': ['a', None]})['x']
+integer = DataFrame({'x': [1, None]})['x']
+assert text.to_numpy()[1] is None
+assert text.to_numpy(dtype='object')[1] is NA
+assert integer.to_numpy(dtype='object')[1] is NA
 ```
 
 注意：
@@ -301,3 +313,9 @@ pa.array(df['qty'])                              # 无损：保留 int64 + 空�
 ```
 
 **时区。** Arrow 表没有*索引*，因此帧的索引（及其时区）不会被携带，`from_arrow` 返回全新 `RangeIndex`。datetime 列导出为 `timestamp[ns, tz=UTC]`（见 [datetime 列是 UTC 瞬时](#datetime-列是-utc-瞬时)）；导入的任意时区（或无时区）timestamp 列都变成其精确瞬时，时区本身不保留。导入后用 `set_index` + `tz_localize('UTC')` + `tz_convert` 重新标注时区。
+
+### NumPy 逐列目标转换
+
+默认数值／bool Frame 导出为 `float64` 矩阵（缺失 bool 为 `NaN`）；纯 datetime Frame 保留 `datetime64[ns]`；其余组合使用类型化 object 单元格。Series / `exec` 的默认导出保留稠密原生类型，带 NA 的整数提升为 `float64` + `NaN`，缺失 bool 则拒绝默认导出。未给填充值时，显式非 object 转换从各列的上述 NA 模型数组出发；缺失 bool 只允许 float／complex 目标。Frame 沿用逐列规则，但 datetime 的整数／bool 目标保留 NaT 的 epoch-ns 哨兵，float／complex 目标把 NaT 替换为 NaN。含字符串的 Frame 拒绝 numeric／temporal 目标，全缺失字符串也一样；这些是优先于 NumPy cast 的 volas 规则。
+
+显式 dtype 与 `na_value` 一起使用时，每列保留自己的源 dtype，只选择有效槽。由 NumPy 统一解析共同目标的单位、kind 和 itemsize，再从各列源表示转换，在目标中填缺失槽，最后组装。datetime 与数值混合时，datetime 仍按源 ns 单位转换，数值 epoch 计数按解析后的目标单位解释；不先压成裸 i64／f64／object 矩阵。未定宽 U／S 的宽度同时容纳有效值和填充值；定宽仍遵守 NumPy 截断规则。

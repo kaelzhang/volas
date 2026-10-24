@@ -67,13 +67,19 @@ The column values as a 1-D NumPy array — `pandas.Series.to_numpy` semantics:
   - `'int64'`, `'int32'`, `'int16'`, `'int8'` (and the unsigned `'uint64'`, `'uint32'`,
     `'uint16'`, `'uint8'`) — integer. Over a column with missing values this **raises**
     unless `na_value` is given (an NA has no integer representation).
-  - `'float64'`, `'float32'`, `'float16'` — floating point; a missing cell is `NaN`.
+  - `'float64'`, `'float32'`, `'float16'` — floating point; missing numeric / bool
+    cells are `NaN`. Without `na_value`, datetime Series / `exec` follow NumPy:
+    `NaT` casts to its epoch-ns sentinel as a float (or complex); Frame float /
+    complex exports instead map `NaT` to `NaN`.
+
   - `'bool'` — boolean. Over a column with missing values this **raises** unless
     `na_value` is given (an NA has no boolean representation).
   - `'datetime64[ns]'` — datetime nanoseconds; a missing cell is `NaT`.
   - `'object'` (or `'O'`) — Python objects, each cell its own typed value (lossless).
 - **na_value** `Any` — the value to substitute for each missing cell. Default: the
-  NA-model representation (`NaN` for the float export, `None` in an object array). With
+  NA-model representation (`NaN` for floats; `None` for default string export).
+  Explicit `dtype='object'` preserves typed missing cells: int, bool, string and
+  datetime use `volas.NA`; float keeps its in-band `NaN`. With
   an explicit integer `dtype`, the values stay **exact** (a large int is not funnelled
   through `float64`) and the holes become `na_value`.
 
@@ -87,6 +93,19 @@ series.to_numpy(na_value=-1)               # -> array([ 1., -1.,  3.])   (defaul
 # without na_value, an integer dtype over a missing value raises
 series.to_numpy(dtype='int64')
 # ValueError: cannot convert a column with missing values to integer NumPy dtype 'int64' ...
+```
+
+Default string Series / `exec` exports use object arrays with `None`; explicit
+object exports use typed cells with `volas.NA`.
+
+```py
+from volas import DataFrame, NA
+
+text = DataFrame({'x': ['a', None]})['x']
+integer = DataFrame({'x': [1, None]})['x']
+assert text.to_numpy()[1] is None
+assert text.to_numpy(dtype='object')[1] is NA
+assert integer.to_numpy(dtype='object')[1] is NA
 ```
 
 Notes:
