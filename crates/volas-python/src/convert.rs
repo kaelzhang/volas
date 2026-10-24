@@ -2,6 +2,8 @@
 //! scalar boxing, the numpy-type cache, and index/label rendering).
 
 
+use std::cell::LazyCell;
+
 use numpy::IntoPyArray;
 use pyo3::exceptions::{PyIndexError, PyKeyError, PyTypeError, PyValueError};
 use pyo3::prelude::*;
@@ -309,8 +311,9 @@ impl<'py> IntoPyObject<'py> for ExportCell {
 /// (pandas `Series.to_numpy` semantics):
 /// - without `na_value`, an integer `dtype` over missing values **raises** (an NA has
 ///   no integer representation) — otherwise the NA-model default applies (`NaN` / `NaT`);
-/// - with `na_value`, missing cells are filled with it: for an explicit `dtype` the
-///   **native** values are cast directly (so a large int stays exact) and the fill
+/// - every explicit `dtype` casts valid **native** values directly, independently
+///   of the default missing representation (so a large int stays exact);
+/// - with `na_value`, missing cells are filled with it, and the fill
 ///   lands in the target representation; for the default dtype the fill lands in the NA-model array, keeping its
 ///   dtype (so `na_value=-1` on an int column with NA stays `float64`, like pandas).
 pub(crate) fn column_to_numpy_with<'py>(
@@ -345,6 +348,7 @@ struct ExportColumn<'py> {
     values: Bound<'py, PyAny>,
     missing: Option<Bound<'py, PyAny>>,
     converted: Option<Bound<'py, PyAny>>,
+    default_missing: Option<Bound<'py, PyAny>>,
 }
 
 /// The explicit-dtype conversion owner for Frame, Series and exec. Resolve one
@@ -371,37 +375,49 @@ pub(crate) fn columns_to_numpy_with<'py>(
     }
     let mut prepared = Vec::with_capacity(cols.len());
     for col in cols {
-        let missing = col.has_missing();
-        if na_value.is_none() && missing && target.has_no_na()
-            && !(frame && matches!(col, Column::Datetime(_)))
+        let missing = LazyCell::new(|| col.has_missing());
+        if na_value.is_none() && target.has_no_na()
+            && !(frame && matches!(col, Column::Datetime(_))) && *missing
         {
             return Err(no_na_target_err(if frame { "a frame" } else { "a column" }, dtype));
+        }
+        if na_value.is_none() && matches!(col, Column::Bool(..))
+            && !matches!(target, ExportTarget::Float | ExportTarget::Object) && *missing
+        {
+            return Err(bool_na_err());
         }
         let values = if target == ExportTarget::Object {
             let cells = (0..col.len()).map(|i| ExportCell(scalar_to_py(py, col, i)));
             let kwargs = PyDict::new(py);
             kwargs.set_item("dtype", &requested)?;
             np.call_method("array", (PyList::new(py, cells)?,), Some(&kwargs))?
-        } else if na_value.is_some() {
-            column_values_native(py, col)?
-        } else if missing && matches!(col, Column::Bool(..)) {
-            // An unknown truth has no non-float representation without a fill.
-            if target != ExportTarget::Float {
-                return Err(bool_na_err());
-            }
-            col.to_f64_vec().into_pyarray(py).into_any()
-        } else if frame && target == ExportTarget::Float && matches!(col, Column::Datetime(_)) {
-            // The documented frame float export maps NaT to NaN.
-            col.to_f64_vec().into_pyarray(py).into_any()
         } else {
-            column_to_numpy(py, col)?
+            column_values_native(py, col)?
         };
-        let mask = (na_value.is_some() && missing).then(|| na_mask(py, col));
+        // Native floats and datetimes already carry their default NA in-band.
+        // Mask only when a fill or a different missing representation needs it.
+        let separate_missing = na_value.is_some()
+            || (target != ExportTarget::Object && (matches!(col, Column::I64(..) | Column::I32(..) | Column::Bool(..) | Column::Str(..))
+                || (frame && target == ExportTarget::Float && matches!(col, Column::Datetime(_)))));
+        let mask = (separate_missing && *missing).then(|| na_mask(py, col));
+        let default_missing = if na_value.is_none() && mask.is_some() {
+            // Convert only the chosen missing representation, never valid values
+            // through the default whole-column export (not even for text/time).
+            Some(if matches!(col, Column::Str(..)) {
+                let kwargs = PyDict::new(py);
+                kwargs.set_item("dtype", "object")?;
+                np.call_method("array", (PyList::new(py, [py.None()])?,), Some(&kwargs))?
+            } else {
+                vec![f64::NAN].into_pyarray(py).into_any()
+            })
+        } else {
+            None
+        };
         let values = match &mask {
             Some(mask) => values.get_item(mask.call_method0("__invert__")?)?,
             None => values,
         };
-        prepared.push(ExportColumn { values, missing: mask, converted: None });
+        prepared.push(ExportColumn { values, missing: mask, converted: None, default_missing });
     }
     // A fully specified descriptor already is the common target. Promotion
     // would normalize explicit byte order (notably unit datetime / timedelta).
@@ -428,9 +444,17 @@ pub(crate) fn columns_to_numpy_with<'py>(
             }
         }
         if target == ExportTarget::UnsizedText && prepared.iter().any(|c| c.missing.is_some()) {
-            let kwargs = PyDict::new(py);
-            kwargs.set_item("dtype", &requested)?;
-            descriptors.append(np.call_method("asarray", (na_value,), Some(&kwargs))?.getattr("dtype")?)?;
+            if let Some(nv) = na_value {
+                let kwargs = PyDict::new(py);
+                kwargs.set_item("dtype", &requested)?;
+                descriptors.append(np.call_method("asarray", (nv,), Some(&kwargs))?.getattr("dtype")?)?;
+            } else {
+                for column in &prepared {
+                    if let Some(holes) = &column.default_missing {
+                        descriptors.append(holes.call_method1("astype", (&requested,))?.getattr("dtype")?)?;
+                    }
+                }
+            }
         }
         np.call_method1("result_type", PyTuple::new(py, descriptors.iter())?)?
     } else {
@@ -460,9 +484,13 @@ pub(crate) fn columns_to_numpy_with<'py>(
             Some(converted) => converted,
             None => column.values.call_method("astype", (&resolved,), Some(&cast_kwargs))?,
         };
-        if let (Some(mask), Some(nv)) = (column.missing, na_value) {
+        if let Some(mask) = column.missing {
             destination.set_item(mask.call_method0("__invert__")?, converted)?;
-            destination.set_item(mask, nv)?;
+            let fill = match na_value {
+                Some(nv) => nv.clone(),
+                None => column.default_missing.unwrap().call_method1("astype", (&resolved,))?,
+            };
+            destination.set_item(mask, fill)?;
         } else {
             destination.set_item(PySlice::new(py, 0, height as isize, 1), converted)?;
         }
@@ -481,8 +509,8 @@ pub(crate) fn na_mask<'py>(py: Python<'py>, col: &Column) -> Bound<'py, PyAny> {
 }
 
 /// The column values as a **native-dtype** NumPy array with no NA collapse (int stays
-/// int, datetime stays `datetime64`) — the exact base for an `na_value` fill. The value
-/// at a missing slot is unspecified (the caller overwrites it via [`na_mask`]).
+/// int, datetime stays `datetime64`) — the base for every explicit cast. Missing
+/// payloads are unspecified; the owner separates them when representation changes.
 fn column_values_native<'py>(py: Python<'py>, col: &Column) -> PyResult<Bound<'py, PyAny>> {
     Ok(match col {
         Column::F64(v) => v.to_vec().into_pyarray(py).into_any(),
@@ -490,8 +518,14 @@ fn column_values_native<'py>(py: Python<'py>, col: &Column) -> PyResult<Bound<'p
         Column::I64(v, _) => v.to_vec().into_pyarray(py).into_any(),
         Column::I32(v, _) => v.to_vec().into_pyarray(py).into_any(),
         Column::Bool(v, _) => v.to_vec().into_pyarray(py).into_any(),
-        // str has no fixed-width NumPy form — an object array (string or `None`).
-        Column::Str(..) => column_to_numpy(py, col)?,
+        // Variable-width string storage has an object representation; validity
+        // is kept separately, so missing payloads never influence a conversion.
+        Column::Str(v, _) => {
+            let kwargs = PyDict::new(py);
+            kwargs.set_item("dtype", "object")?;
+            let values = PyList::new(py, (0..v.len()).map(|i| v.get(i)))?;
+            py.import("numpy")?.call_method("array", (values,), Some(&kwargs))?
+        }
         Column::Datetime(v) => {
             v.to_vec().into_pyarray(py).call_method1("astype", ("datetime64[ns]",))?
         }

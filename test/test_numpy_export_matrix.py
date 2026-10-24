@@ -154,47 +154,48 @@ def reference(columns, dtype, filled, frame):
     target = np.dtype(dtype)
     if frame and target.kind in 'biufcMm' and any(s.kind == 'U' for s in columns):
         raise ValueError('string column has no numeric meaning')
-    arrays = []
+    arrays, holes = [], []
     for s in columns:
-        if target.kind == 'O':
-            a = s.objects()
-        elif filled:
-            a = s.native
-            if s.kind == 'U':
-                a = a.astype(object)  # volas text storage has no NumPy fixed width
-        else:
-            if s.mask.any() and target.kind in 'biu' and not (frame and s.kind == 'M'):
+        if not filled and s.mask.any():
+            if target.kind in 'biu' and not (frame and s.kind == 'M'):
                 raise ValueError('NA has no integer or boolean representation')
-            if s.kind == 'b' and s.mask.any():
-                if target.kind not in 'fc':
-                    raise ValueError('bool NA needs a meaning')
-                a = s.native.astype('f8')
-                a[s.mask] = np.nan
-            elif frame and s.kind == 'M' and target.kind in 'fc':
-                a = s.native.view('i8').astype('f8')
-                a[s.mask] = np.nan
-            elif frame and s.kind == 'M' and target.kind in 'biu':
-                a = s.native
-            else:
-                a = s.default()
-        arrays.append(a[~s.mask] if filled and s.mask.any() else a)
+            if s.kind == 'b' and target.kind not in 'fcO':
+                raise ValueError('bool NA needs a meaning')
+        # The oracle converts native valid slots; it never calls default() for
+        # explicit targets. Missing representations are independent source data.
+        native = s.objects() if target.kind == 'O' else s.native
+        if s.kind == 'U' and target.kind != 'O':
+            native = native.astype(object)  # storage is variable-width text
+        arrays.append(native[~s.mask] if s.mask.any() else native)
+        if filled:
+            holes.append(None)
+        elif target.kind == 'O':
+            holes.append(s.objects()[s.mask])
+        elif s.kind in 'ib' or (frame and s.kind == 'M' and target.kind in 'fc'):
+            holes.append(np.full(s.mask.sum(), np.nan))
+        elif s.kind == 'U':
+            holes.append(np.full(s.mask.sum(), None, dtype=object))
+        else:
+            holes.append(s.native[s.mask])
 
     # NumPy determines source-dependent target metadata; combine metadata before
     # converting any numeric epoch count into the agreed time unit. Subarray
     # astype expands dimensions, so its requested descriptor must remain intact.
     if target.itemsize == 0 or (target.kind in 'Mm' and np.datetime_data(target)[0] == 'generic'):
         resolved = np.result_type(*(a.astype(target).dtype for a in arrays))
-        if target.kind in 'US' and filled and any(s.mask.any() for s in columns):
-            resolved = np.result_type(resolved, np.asarray(fill, dtype=target).dtype)
+        if target.kind in 'US' and any(s.mask.any() for s in columns):
+            descriptors = [np.asarray(fill, dtype=target).dtype] if filled else [
+                h.astype(target).dtype for h, s in zip(holes, columns) if s.mask.any()]
+            resolved = np.result_type(resolved, *descriptors)
     else:
         resolved = target
     outputs = []
-    for a, s in zip(arrays, columns):
+    for a, h, s in zip(arrays, holes, columns):
         cast = a.astype(resolved)
-        if filled and s.mask.any():
+        if s.mask.any():
             output = np.empty((len(s.mask),) + cast.shape[1:], dtype=cast.dtype)
             output[~s.mask] = cast
-            output[s.mask] = fill
+            output[s.mask] = fill if filled else h.astype(resolved)
         else:
             output = cast
         outputs.append(output)

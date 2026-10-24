@@ -316,6 +316,6 @@ pa.array(df['qty'])                              # 无损：保留 int64 + 空�
 
 ### NumPy 逐列目标转换
 
-默认数值／bool Frame 导出为 `float64` 矩阵（缺失 bool 为 `NaN`）；纯 datetime Frame 保留 `datetime64[ns]`；其余组合使用类型化 object 单元格。Series / `exec` 的默认导出保留稠密原生类型，带 NA 的整数提升为 `float64` + `NaN`，缺失 bool 则拒绝默认导出。未给填充值时，显式非 object 转换从各列的上述 NA 模型数组出发；缺失 bool 只允许 float／complex 目标。Frame 沿用逐列规则，但 datetime 的整数／bool 目标保留 NaT 的 epoch-ns 哨兵，float／complex 目标把 NaT 替换为 NaN。含字符串的 Frame 拒绝 numeric／temporal 目标，全缺失字符串也一样；这些是优先于 NumPy cast 的 volas 规则。
+默认数值／bool Frame 导出为 `float64` 矩阵（缺失 bool 为 `NaN`）；纯 datetime Frame 保留 `datetime64[ns]`；其余组合使用类型化 object 单元格。Series / `exec` 的默认导出保留稠密原生类型，带 NA 的整数提升为 `float64` + `NaN`，缺失 bool 则拒绝默认导出。所有显式 dtype 转换无论是否提供 `na_value`，有效槽始终直接读取各列原生表示；整数不经默认 float64 导出。在目标可无损容纳有效值时，其他位置引入 NA 不会改变该值，包括时间和文本目标。默认缺失表示单独选择并转换：整数／bool 空洞使用 NaN，字符串空洞使用 None，datetime 空洞保留 NaT；缺失 bool 未给填充时只允许 float／complex／object 目标。Frame 的 datetime 整数／bool 目标保留 NaT 的 epoch-ns 哨兵，float／complex 目标把 NaT 替换为 NaN。含字符串的 Frame 拒绝 numeric／temporal 目标，全缺失字符串也一样；这些是优先于 NumPy cast 的 volas 规则。
 
 显式 dtype 与 `na_value` 一起使用时，每列保留自己的源 dtype，只选择有效槽。由 NumPy 统一解析共同目标的单位、kind 和 itemsize，再从各列源表示转换，在目标中填缺失槽，最后组装。datetime 与数值混合时，datetime 仍按源 ns 单位转换，数值 epoch 计数按解析后的目标单位解释；不先压成裸 i64／f64／object 矩阵。未定宽 U／S 的宽度同时容纳有效值和填充值；定宽仍遵守 NumPy 截断规则。

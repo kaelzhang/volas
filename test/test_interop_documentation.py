@@ -63,3 +63,19 @@ def test_string_default_and_explicit_object_missing_documentation():
         block, = [block for block in re.findall(r'```py\n(.*?)```', text, re.S)
                   if "assert text.to_numpy()[1] is None" in block]
         exec(compile(block, str(path), 'exec'), {})
+
+
+def test_explicit_dtype_documentation_preserves_native_valid_values():
+    from volas import DataFrame
+    import numpy as np
+
+    n = 2**53 + 1
+    frame = DataFrame({'x': [n, None]})
+    assert frame.to_numpy(dtype='datetime64[ns]').view('i8')[0, 0] == n
+    assert frame['x'].to_numpy(dtype='U')[0] == str(n)
+    assert frame.exec('x', dtype='timedelta64[ns]').view('i8')[0] == n
+    assert np.isnat(frame.to_numpy(dtype='datetime64[ns]')[1, 0])
+    english = (GUIDE.parents[2] / 'docs' / 'interop.md').read_text()
+    chinese = GUIDE.read_text()
+    assert 'explicit non-object Series / `exec` casts start from that' not in english
+    assert '显式非 object 转换从各列的上述 NA 模型数组出发' not in chinese

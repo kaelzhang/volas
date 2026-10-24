@@ -180,12 +180,18 @@ The default numeric / bool Frame is a `float64` matrix (including `NaN` for
 missing bools); datetime-only Frames retain `datetime64[ns]`; other mixtures
 use typed object cells. Series / `exec` defaults retain dense native types,
 promote missing integers to `float64` + `NaN`, and reject missing bools.
-Without a fill, explicit non-object Series / `exec` casts start from that
-NA-model array; missing bools only allow float / complex targets. Frames use
-the same per-column rule, with two datetime exceptions: integer / bool targets
-keep NaT's epoch-ns sentinel, and float / complex targets replace NaT with NaN.
-Series / `exec` float / complex casts without a fill retain NumPy's epoch-ns
-NaT sentinel; `na_value` replaces the original missing slots when supplied.
+Every explicit dtype converts valid slots directly from each column's native
+representation, with or without `na_value`. Adding NA in another row never
+changes a valid value in a target that holds it losslessly (including time and
+text targets); integers never pass through the default float64 export.
+Default missing representations are chosen separately: integer / bool holes
+use NaN, string holes use None, and datetime holes retain NaT. Missing bools
+only allow float / complex / object targets unless a fill is supplied. Frames
+have two datetime exceptions: integer / bool targets keep NaT's epoch-ns
+sentinel, and float / complex targets replace NaT with NaN. Series / `exec`
+float / complex casts without a fill retain NumPy's epoch-ns NaT sentinel.
+These missing representations are converted into the requested target;
+`na_value` replaces the original missing slots when supplied.
 A Frame containing strings rejects numeric / temporal targets (even all-NA
 strings). These policies take precedence over plain NumPy casts.
 
