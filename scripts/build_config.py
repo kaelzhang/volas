@@ -1,14 +1,15 @@
 """Effective release configuration, Cargo resolution and invocation invariants."""
 
+from collections import Counter
 import hashlib
 import json
 import os
 from pathlib import Path
-import re
 import shlex
 import shutil
 import subprocess
 import sys
+import sysconfig
 import tempfile
 import tomllib
 
@@ -234,22 +235,42 @@ def resolved_flags(root, target, flags, log):
         return [*resolved, *flags]
 
 
+CODEGEN_OVERRIDES = {
+    "linker",
+    "link-arg",
+    "link-args",
+    "llvm-args",
+    "lto",
+    "codegen-units",
+    "opt-level",
+}
+
+
 def codegen_flags(argv):
-    """Normalize -C x and -Cx only for validation; preserve stored argv verbatim."""
+    """One rustc spelling owner; keep archived argv verbatim, normalize names only."""
     result = []
-    for n, value in enumerate(argv):
-        if value == "-C":
-            if n + 1 == len(argv):
-                raise ValueError("incomplete codegen flag")
-            result.append(argv[n + 1])
+    args = iter(argv)
+    for value in args:
+        if value in ("-C", "--codegen"):
+            try:
+                option = next(args)
+            except StopIteration:
+                raise ValueError("incomplete codegen flag") from None
+        elif value.startswith("--codegen="):
+            option = value[len("--codegen=") :]
         elif value.startswith("-C"):
-            result.append(value[2:])
+            option = value[2:]
+        else:
+            continue
+        name, sep, setting = option.partition("=")
+        result.append(name.replace("_", "-") + sep + setting)
     return result
 
 
-def validate_flags(flags, mode, feedback=None):
+def validate_flags(flags, mode, feedback=None, owned_codegen=()):
+    parsed = codegen_flags(flags)
     actual = [
-        f for f in codegen_flags(flags) if re.match(r"profile-(generate|use)(?:=|$)", f)
+        f for f in parsed if f.split("=", 1)[0] in ("profile-generate", "profile-use")
     ]
     expected = [] if mode == "normal" else [f"profile-{mode}={feedback}"]
     if mode not in ("normal", "generate", "use") or actual != expected:
@@ -260,22 +281,38 @@ def validate_flags(flags, mode, feedback=None):
         raise ValueError("feedback path must be absolute")
     if mode != "normal" and feedback is None:
         raise ValueError("feedback path is required")
+    overrides = Counter(f for f in parsed if f.split("=", 1)[0] in CODEGEN_OVERRIDES)
+    if overrides - Counter(owned_codegen):
+        raise ValueError("unbound codegen override rejected")
+
+
+def trace_codegen(mode, is_target, target, config):
+    """Only Cargo's pinned release profile and the build owners may set overrides."""
+    owned = []
+    if is_target:
+        if config and "release" in config:
+            release = config["release"]
+            owned += [
+                f"opt-level={release['opt-level']}",
+                f"codegen-units={release['codegen-units']}",
+                "lto" if release["lto"] is True else f"lto={release['lto']}",
+            ]
+        if mode == "use":
+            owned.append("llvm-args=-pgo-warn-missing-function")
+        if config:
+            owned.append(f"linker={config['tools']['linker']['path']}")
+        if target.endswith("apple-darwin"):
+            owned += ["link-arg=-undefined", "link-arg=dynamic_lookup"]
+            owned.append(
+                "link-args=-Wl,-install_name,@rpath/volas_rs"
+                + sysconfig.get_config_var("EXT_SUFFIX")
+            )
+    return owned
 
 
 def configuration(root, target, log):
     flags = resolved_flags(root, target, [], log)
     validate_flags(flags, "normal")
-    forbidden = (
-        "linker",
-        "link-arg",
-        "link-args",
-        "llvm-args",
-        "lto",
-        "codegen-units",
-        "opt-level",
-    )
-    if any(f.split("=", 1)[0] in forbidden for f in codegen_flags(flags)):
-        raise ValueError("unbound codegen override rejected")
     manifests = tomllib.loads((root / "Cargo.toml").read_text())
     profile = manifests["profile"]["release"]
     if profile != {"lto": True, "codegen-units": 1, "opt-level": 3}:
@@ -340,7 +377,10 @@ def validate_argv(log, mode, target, feedback=None, config=None, trace=None):
             raise ValueError("actual rustc executable mismatch")
         is_target = a in target_commands
         validate_flags(
-            a, mode if is_target else "normal", feedback if is_target else None
+            a,
+            mode if is_target else "normal",
+            feedback if is_target else None,
+            trace_codegen(mode, is_target, target, config),
         )
         if is_target and config:
             # Cargo appends flags as a contiguous sequence, preserving order/duplicates.

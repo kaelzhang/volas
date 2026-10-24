@@ -238,7 +238,12 @@ def build(root, artifacts, mode, target, ident, profile=None):
         stage / "raw" if mode == "generate" else profile if mode == "use" else None
     )
     resolved = [*base, *flags]
-    validate_flags(resolved, mode, feedback)
+    validate_flags(
+        resolved,
+        mode,
+        feedback,
+        ["llvm-args=-pgo-warn-missing-function"] if mode == "use" else (),
+    )
     resolved += [f"-Clinker={config['tools']['linker']['path']}"]
     env = flag_environment(resolved)
     env.update(tool_environment(config))

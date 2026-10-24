@@ -87,3 +87,27 @@ def test_training_rejects_wrong_batch_results(monkeypatch, stage, damage):
     monkeypatch.setattr(P, "TRAIN_PASSES", 1)
     with pytest.raises(AssertionError):
         P.train(stage)
+
+
+def test_first_cache_rejects_factory_caching_another_indicator(monkeypatch):
+    from test import bench_first_cache as F
+
+    original = F.build
+    frames = []
+
+    def wrong(indicator):
+        _, setup = original(indicator)
+
+        def run(frame):
+            frame["ema:99"]
+            frames.append(frame)
+
+        return run, setup
+
+    monkeypatch.setattr(F, "build", wrong)
+    monkeypatch.setattr(P, "TRAIN_PASSES", 1)
+    with pytest.raises(AssertionError, match="first-cache"):
+        P.train("first-cache")
+    # Validation must not fill in the missing requested cache itself.
+    assert len(frames) == 1
+    assert frames[0].columns[-1] == "ema:99"

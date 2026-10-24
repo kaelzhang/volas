@@ -127,7 +127,19 @@ def train(stage=None):
             assert len(frame.columns) == 6, (
                 "first-cache stage did not materialize result"
             )
-            verified.frame(frame, F._ohlcv(int(rows)), [directive])
+            # get_column resolves an existing cache and never materializes one.
+            try:
+                cached = frame.get_column(directive)
+            except KeyError:
+                raise AssertionError(
+                    f"first-cache factory did not cache requested directive: {directive}"
+                ) from None
+            data = F._ohlcv(int(rows))
+            verified.equal(
+                cached.to_numpy(dtype="float64"),
+                DataFrame(data).exec(directive, dtype="float64"),
+            )
+            verified.frame(frame, data)
         return len(ids)
 
     def live():
