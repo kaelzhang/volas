@@ -36,6 +36,7 @@ df[directive]                  # Gets a Series
 df[[directive0, directive1]]   # Gets a DataFrame
 ```
 
+
 We have an example to show the most basic indexing using `[directive]`
 
 ```py
@@ -80,10 +81,10 @@ Which gets the 2-period simple moving average on column `"close"`.
 - **columns** `Optional[list[str]] = None` Select and order the columns to keep —
   the same projection as `df[[...]]` (see [Derived frames](#derived-frames)): the same
   rows, each listed cached directive column as a data column of its values (a stale one
-  is refreshed first), never continued; a bounded-window source gives its visible rows. A name not present raises
-  `KeyError` (a directive is never computed here; a cached one is found by any
-  spelling of its directive); a duplicate name is rejected, an empty list keeps no
-  column, and an absent column is never silently filled. With `index=`, `dtype=`
+  is refreshed first), never continued; a bounded-window source gives its visible rows.
+  On a DataFrame source, valid directives are computed on first request; an invalid entry raises the same error as `df[[...]]`, with no partial source changes.
+  Dict sources require existing keys (`KeyError` for a missing key). Duplicate identities raise, an empty list keeps no column, and absent columns are never silently filled.
+  With `index=`, `dtype=`
   or `window=`, a source `DataFrame` is read like any bulk read: it raises while one
   of its cached directive columns is stale.
 - **index** `Optional[list | np.ndarray] = None` Row labels (int64, string or datetime),

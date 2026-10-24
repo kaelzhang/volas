@@ -40,9 +40,7 @@ pub(crate) static NA_SINGLETON: GILOnceCell<Py<PyAny>> = GILOnceCell::new();
 
 /// The cached `volas.NA` singleton object.
 pub(crate) fn na(py: Python<'_>) -> Py<PyAny> {
-    NA_SINGLETON
-        .get_or_init(py, || Py::new(py, NaType).expect("create volas.NA").into_any())
-        .clone_ref(py)
+    NA_SINGLETON.get(py).expect("NA initialized with the module").clone_ref(py)
 }
 
 /// A timedelta operand as nanoseconds: an `np.timedelta64` in any unit (scaled

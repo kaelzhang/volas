@@ -125,8 +125,8 @@ impl PySeries {
         let d = PyDict::new(py);
         for i in 0..self.inner.len() {
             d.set_item(
-                label_to_py(py, &self.inner.index, i),
-                scalar_to_py(py, &self.inner.data, i),
+                label_to_py(py, &self.inner.index, i)?,
+                scalar_to_py(py, &self.inner.data, i)?,
             )?;
         }
         Ok(d)
@@ -136,25 +136,27 @@ impl PySeries {
     pub(crate) fn items<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyList>> {
         let pairs: Vec<(Py<PyAny>, Py<PyAny>)> = (0..self.inner.len())
             .map(|i| {
-                (
-                    label_to_py(py, &self.inner.index, i),
-                    scalar_to_py(py, &self.inner.data, i),
-                )
+                Ok((
+                    label_to_py(py, &self.inner.index, i)?,
+                    scalar_to_py(py, &self.inner.data, i)?,
+                ))
             })
-            .collect();
+            .collect::<PyResult<_>>()?;
         PyList::new(py, pairs)
     }
 
     pub(crate) fn to_list<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyList>> {
         let items: Vec<Py<PyAny>> = (0..self.inner.len())
             .map(|i| scalar_to_py(py, &self.inner.data, i))
-            .collect();
+            .collect::<PyResult<_>>()?;
         PyList::new(py, items)
     }
 
-    /// pandas-style equality: **same dtype** and value-equal (NaN equals NaN).
-    pub(crate) fn equals(&self, other: &PySeries) -> bool {
-        self.inner.data.dtype() == other.inner.data.dtype()
-            && self.inner.data.equals(&other.inner.data)
+    /// Same labels, dtype and values (NaN equals NaN); names and display zones
+    /// are ignored. Naive / aware datetime indexes cannot be compared.
+    pub(crate) fn equals(&self, other: &PySeries) -> PyResult<bool> {
+        Ok(indexes_equal(&self.inner.index, &other.inner.index)?
+            && self.inner.data.dtype() == other.inner.data.dtype()
+            && self.inner.data.equals(&other.inner.data))
     }
 }

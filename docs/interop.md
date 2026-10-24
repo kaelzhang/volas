@@ -157,6 +157,13 @@ df['qty'].to_numpy(dtype='int64', na_value=0)    # or fill the holes with na_val
 pa.array(df['qty'])                              # lossless: keeps int64 + the null bitmap
 ```
 
+With an explicit NumPy dtype, `na_value` is filled in that target representation:
+`DataFrame({'qty': [1, None]})['qty'].to_numpy(dtype='float64', na_value=0.5)`
+returns `[1.0, 0.5]`. Integer exports cast directly from native integer values;
+`dtype='int64', na_value=0` preserves values beyond 2⁵³ exactly. Python errors
+from NumPy conversion or scalar boxing propagate to the caller.
+
+
 **Timezone.** Arrow tables have no *index*, so the frame's index — and its timezone — is
 not carried, and `from_arrow` returns a fresh `RangeIndex`. A datetime column exports
 as `timestamp[ns, tz=UTC]` (see

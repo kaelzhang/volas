@@ -1,8 +1,6 @@
 //! `DataFrame` construction, the windowing setup, and frame-level accessors
 //! (timezone, shape, index, dtypes, the `.iloc`/`.loc`/`.iat`/`.at` accessors).
 
-use std::collections::HashSet;
-
 use pyo3::exceptions::{PyKeyError, PyTypeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList};
@@ -31,19 +29,6 @@ impl PyDataFrame {
     ) -> PyResult<Self> {
         // The windowing arguments are checked before any data is read.
         let bounds = crate::frame_bounded::bounds(window, max_lookback)?;
-        // `columns`, when given, selects and orders the columns — a strict projection, like
-        // `df[[...]]`: a name not present raises KeyError, a duplicate name is rejected, and
-        // an empty list keeps no column. It never silently NaN-fills an absent column.
-        if let Some(cols) = &columns {
-            let mut seen = HashSet::with_capacity(cols.len());
-            for c in cols {
-                if !seen.insert(c.as_str()) {
-                    return Err(PyValueError::new_err(format!(
-                        "duplicate column \"{c}\" in columns"
-                    )));
-                }
-            }
-        }
         // `data` is polymorphic over volas's own inputs: another volas DataFrame (copied —
         // index and any tf-state carried, exactly like `df.copy()`), or a dict of
         // columns (a fresh RangeIndex); with `columns` the frame is projected onto them. A
@@ -82,22 +67,7 @@ impl PyDataFrame {
                 }
                 None => (other.inner.clone(), other.tf.clone()),
                 Some(cols) => {
-                    // A projection reads like `df[[...]]` (stale cached columns refreshed,
-                    // the visible rows only); a tf-aware frame's forming-period state is
-                    // projected onto `cols` too. The cumulator spec is per-column with a
-                    // default, so the dropped columns' rules simply go unused — folding
-                    // stays correct on the kept ones.
-                    // A strict selection of existing columns, a cached one by any spelling of
-                    // its directive: a name that is not one raises (it is never computed here).
-                    let names = cols
-                        .iter()
-                        .map(|c| {
-                            other.column_name(c).ok_or_else(|| {
-                                PyKeyError::new_err(format!("column \"{c}\" not found"))
-                            })
-                        })
-                        .collect::<PyResult<Vec<_>>>()?;
-                    let projected = other.project(&names)?;
+                    let projected = other.project(cols)?;
                     (projected.inner, projected.tf)
                 }
             }

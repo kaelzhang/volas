@@ -360,6 +360,9 @@ fn volas_rs(m: &Bound<'_, PyModule>) -> PyResult<()> {
             .filter(|c| volas_directive::is_bare_command(c))
             .collect::<Vec<_>>(),
     )?;
-    m.add("NA", na(m.py()))?;
+    let missing = scalar::NA_SINGLETON.get_or_try_init(m.py(), || {
+        Py::new(m.py(), scalar::NaType).map(|v| v.into_any())
+    })?;
+    m.add("NA", missing)?;
     Ok(())
 }

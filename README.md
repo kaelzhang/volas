@@ -217,6 +217,13 @@ imported objects or views survive. `copy=True` takes an owned snapshot; conversi
 layouts still copy. Direct NumPy imports copy. See the
 [interop contract](docs/interop.md#arrow--dlpack-interop-zero-copy).
 
+
+Python selection preserves boolean Series labels and NumPy masked-array validity.
+Equality compares labels and rejects naive / aware datetime pairs. Constructor
+`columns=` shares directive projection with `df[[...]]`; explicit NumPy `na_value`
+fills use the requested dtype. See [selection](docs/pandas-compatibility.md#indexing--selection)
+and [interop](docs/interop.md).
+
 ## Built-in Indicators
 
 The complete directive reference lives in [INDICATORS.md](INDICATORS.md). It

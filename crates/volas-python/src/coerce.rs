@@ -88,7 +88,7 @@ pub(crate) fn datetime_unit_of(s: &str) -> Option<&'static str> {
 /// so they become volas NA in the column built from the underlying data — the mask
 /// is never dropped (the masked slots' data values are unspecified). `None` for
 /// anything that is not a masked array.
-fn masked_array_column(v: &Bound<'_, PyAny>) -> PyResult<Option<Column>> {
+pub(crate) fn masked_array_column(v: &Bound<'_, PyAny>) -> PyResult<Option<Column>> {
     if !v.hasattr("mask")? {
         return Ok(None);
     }

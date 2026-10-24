@@ -22,7 +22,7 @@ pub struct PyRow {
 impl PyRow {
     /// The row's index label.
     #[getter]
-    pub(crate) fn name(&self, py: Python<'_>) -> Py<PyAny> {
+    pub(crate) fn name(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         label_to_py(py, self.inner.index(), 0)
     }
 
@@ -32,7 +32,7 @@ impl PyRow {
     ///     the typed scalar at that column.
     pub(crate) fn __getitem__(&self, py: Python<'_>, key: &str) -> PyResult<Py<PyAny>> {
         let col = self.inner.column(key).map_err(pyerr)?;
-        Ok(np_scalar_to_py(py, col, 0))
+        np_scalar_to_py(py, col, 0)
     }
 
     /// The row's values as a ``(1, n_columns)`` float64 NumPy array. Only valid for
@@ -56,7 +56,7 @@ impl PyRow {
     pub(crate) fn to_dict<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
         let d = PyDict::new(py);
         for (name, col) in self.inner.names().iter().zip(self.inner.columns()) {
-            d.set_item(name, scalar_to_py(py, col, 0))?;
+            d.set_item(name, scalar_to_py(py, col, 0)?)?;
         }
         Ok(d)
     }

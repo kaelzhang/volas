@@ -1,7 +1,6 @@
 //! `DataFrame` element access and the live-stream lifecycle
 //! (`__getitem__`/`__setitem__`, `append`, `fulfill`).
 
-use numpy::PyReadonlyArray1;
 use pyo3::exceptions::{PyIndexError, PyKeyError, PyTypeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::PySlice;
@@ -79,8 +78,8 @@ impl PyDataFrame {
         value: &Bound<'_, PyAny>,
     ) -> PyResult<()> {
         // Boolean-mask assignment with a scalar fill: df[mask] = v
-        if let Some(mask) = bool_mask_key(key)? {
-            return self.assign_row_mask(&mask, value);
+        if let Some(mask) = bool_mask_key(key, || self.meta().labels().index())? {
+            return self.assign_row_mask(&mask.values(), value);
         }
         if let Ok(cond) = key.extract::<PyRef<PyDataFrame>>() {
             return self.assign_cell_mask(&cond, value);
@@ -142,30 +141,17 @@ impl PyDataFrame {
         // windowed frame's hidden margin is never selectable (a zero-cost borrow
         // when unbounded).
         // boolean mask (Series or numpy)
-        if let Ok(s) = key.extract::<PyRef<PySeries>>() {
-            if let Column::Bool(..) = &s.inner.data {
-                // O5: reject an NA-carrying mask (an unknown signal is not False).
-                let mask = bool_mask_vec(&s.inner.data)?;
-                return Ok(Py::new(py, self.masked(&mask)?)?.into_any());
+        if let Some(mask) = bool_mask_key(key, || self.meta().labels().index())? {
+            let bits = mask.values();
+            let height = self.logical_range().1;
+            if bits.len() != height
+                && (key.is_instance_of::<pyo3::types::PyList>() || key.is_instance_of::<pyo3::types::PyTuple>())
+            {
+                return Err(PyIndexError::new_err(format!(
+                    "boolean index has wrong length: {} instead of {}", bits.len(), height
+                )));
             }
-        }
-        if let Ok(arr) = key.extract::<PyReadonlyArray1<bool>>() {
-            return Ok(Py::new(py, self.masked(&crate::coerce::numpy_values(&arr))?)?.into_any());
-        }
-        // boolean mask as a plain Python list (df[[True, False, ...]]). An empty
-        // list is an empty column projection, not a mask, so it falls through.
-        if let Ok(mask) = key.extract::<Vec<bool>>() {
-            if !mask.is_empty() {
-                let height = self.logical_range().1;
-                if mask.len() != height {
-                    return Err(PyIndexError::new_err(format!(
-                        "boolean index has wrong length: {} instead of {}",
-                        mask.len(),
-                        height
-                    )));
-                }
-                return Ok(Py::new(py, self.masked(&mask)?)?.into_any());
-            }
+            return Ok(Py::new(py, self.masked(&bits)?)?.into_any());
         }
         // label / positional slice: df[:'date'], df[1:5]
         if let Ok(slice) = key.downcast::<PySlice>() {

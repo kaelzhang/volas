@@ -146,7 +146,7 @@ def test_a_refold_that_fills_the_last_missing_int_keeps_an_int_export():
     df.append(build.frame(schema, [dict(first, n=3)], [t0]))  # the bar re-sent with a value
     df.append(build.frame(schema, [second], [t0 + 60 * NS]))
     n = df.get_column('n')
-    assert n.equals(volas.DataFrame({'n': np.array([7])})['n'])
+    assert n.equals(volas.DataFrame({'n': np.array([7])}, index=df.index)['n'])
     observe.structure(df)
 
 

@@ -67,7 +67,7 @@ fn object_array<'py>(py: Python<'py>, df: &DataFrame) -> PyResult<Bound<'py, PyA
     for i in 0..h {
         let row = PyList::empty(py);
         for col in cols {
-            row.append(scalar_to_py(py, col, i))?;
+            row.append(scalar_to_py(py, col, i)?)?;
         }
         rows.append(row)?;
     }
@@ -365,8 +365,7 @@ impl PyDataFrame {
             match target {
                 ExportTarget::Object => return fill_na_2d(object_array(py, df)?, mask, nv),
                 ExportTarget::Other => {
-                    return fill_na_2d(object_array(py, df)?, mask, nv)?
-                        .call_method1("astype", (dt,))
+                    return astype_filled(object_array(py, df)?, dt, mask, nv, true)
                 }
                 _ => {}
             }
@@ -395,7 +394,7 @@ impl PyDataFrame {
             // survives, instead of an f64 round-trip.
             let via_f64 = matches!(target, ExportTarget::Float | ExportTarget::Bool);
             // The two channels carry different Vec element types, so each builds its
-            // own (type-erased) NumPy matrix; the fill + cast is then shared.
+            // own (type-erased) NumPy matrix; target conversion + fill is shared.
             let arr = if via_f64 {
                 let (data, h, w) = df.to_row_major_f64();
                 ndarray::Array2::from_shape_vec((h, w), data)
@@ -411,7 +410,7 @@ impl PyDataFrame {
                     .into_pyarray(py)
                     .into_any()
             };
-            return fill_na_2d(arr, mask, nv)?.call_method1("astype", (dt,));
+            return astype_filled(arr, dt, mask, nv, false);
         }
 
         // Default (no dtype) — the honest representation chosen by the dtypes.
@@ -540,6 +539,8 @@ impl PyDataFrame {
 
     /// Value equality (same columns + index + values, `NaN == NaN`).
     pub(crate) fn equals(&self, other: &PyDataFrame) -> PyResult<bool> {
-        Ok(self.read()?.equals(&*other.read()?))
+        let (a, b) = (self.read()?, other.read()?);
+        require_comparable_indexes(a.index(), b.index())?;
+        Ok(a.equals(&b))
     }
 }

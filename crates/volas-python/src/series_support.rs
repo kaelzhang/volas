@@ -60,14 +60,31 @@ pub(crate) fn series_rhs_col(s: &Series, other: &Bound<'_, PyAny>) -> PyResult<C
 
 /// Guard a positional binary op between two labelled operands — the single
 /// alignment rule, owned by [`Index::require_aligned`]. Same-frame columns share
-/// the index handle (`Arc::ptr_eq`, O(1)); otherwise the labels are compared. A
+/// the index allocation (pointer identity, O(1)); otherwise the labels are compared. A
 /// mismatch is an error rather than a silently misaligned (positional) result —
 /// volas does not auto-align by label.
-pub(crate) fn require_aligned(a: &Arc<Index>, b: &Arc<Index>) -> PyResult<()> {
-    if Arc::ptr_eq(a, b) {
+pub(crate) fn require_aligned(a: &Index, b: &Index) -> PyResult<()> {
+    if std::ptr::eq(a, b) {
         return Ok(());
     }
     a.require_aligned(b).map_err(pyerr)
+}
+
+/// Equality returns False for different labels, but a datetime awareness mismatch
+/// is still an invalid comparison. Empty datetime slices preserve that metadata:
+/// the alignment owner checks it without making a label mismatch an error here.
+pub(crate) fn require_comparable_indexes(a: &Index, b: &Index) -> PyResult<()> {
+    if !std::ptr::eq(a, b)
+        && matches!((a.kind(), b.kind()), (volas_core::IndexKind::Datetime(..), volas_core::IndexKind::Datetime(..)))
+    {
+        a.slice(0, 0).require_aligned(&b.slice(0, 0)).map_err(pyerr)?;
+    }
+    Ok(())
+}
+
+pub(crate) fn indexes_equal(a: &Index, b: &Index) -> PyResult<bool> {
+    require_comparable_indexes(a, b)?;
+    Ok(std::ptr::eq(a, b) || a.label_eq(b))
 }
 
 /// A new F64 `Series` carrying `s`'s name and index.
@@ -211,21 +228,47 @@ pub(crate) fn bool_mask_vec(col: &Column) -> PyResult<Vec<bool>> {
         .collect()
 }
 
+/// A recognized key keeps a NumPy read borrow alive until selection completes.
+/// Dense arrays remain borrowed; strided arrays gather in logical order.
+pub(crate) enum BoolMask<'py> {
+    Array(PyReadonlyArray1<'py, bool>),
+    Owned(Vec<bool>),
+}
+
+impl BoolMask<'_> {
+    pub(crate) fn values(&self) -> std::borrow::Cow<'_, [bool]> {
+        match self {
+            Self::Array(a) => crate::coerce::numpy_values(a),
+            Self::Owned(v) => std::borrow::Cow::Borrowed(v),
+        }
+    }
+}
+
 /// Recognise a boolean-mask key (`s[mask]` / `df[mask] = v`): a boolean Series, a
 /// boolean ndarray, or a non-empty `list[bool]`. Returns `None` for any other key
 /// so the caller can fall through to its label / position / column handling.
-pub(crate) fn bool_mask_key(key: &Bound<'_, PyAny>) -> PyResult<Option<Vec<bool>>> {
+pub(crate) fn bool_mask_key<'a, 'py>(
+    key: &Bound<'py, PyAny>,
+    labels: impl FnOnce() -> std::borrow::Cow<'a, Index>,
+) -> PyResult<Option<BoolMask<'py>>> {
     if let Ok(s) = key.extract::<PyRef<PySeries>>() {
         return Ok(match &s.inner.data {
-            Column::Bool(..) => Some(bool_mask_vec(&s.inner.data)?),
+            Column::Bool(..) => {
+                require_aligned(&labels(), &s.inner.index)?;
+                Some(BoolMask::Owned(bool_mask_vec(&s.inner.data)?))
+            },
             _ => None,
         });
     }
     if let Ok(arr) = key.extract::<PyReadonlyArray1<bool>>() {
-        return Ok(Some(crate::coerce::numpy_values(&arr).into_owned()));
+        // MaskedArray is an ndarray subclass: read validity before taking its buffer.
+        if let Some(col) = crate::coerce::masked_array_column(key)? {
+            return Ok(Some(BoolMask::Owned(bool_mask_vec(&col)?)));
+        }
+        return Ok(Some(BoolMask::Array(arr)));
     }
     match key.extract::<Vec<bool>>() {
-        Ok(m) if !m.is_empty() => Ok(Some(m)),
+        Ok(m) if !m.is_empty() => Ok(Some(BoolMask::Owned(m))),
         _ => Ok(None),
     }
 }

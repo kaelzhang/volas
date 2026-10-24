@@ -1,8 +1,9 @@
 """DataFrame(data, columns=...) — strict column projection at construction.
 
 `columns` selects and orders the columns to keep (the same projection as ``df[[...]]``):
-a name not present raises ``KeyError``; an empty list or a duplicate name is rejected;
-an absent column is never silently filled. It works over a dict and over a volas DataFrame —
+a missing dict key raises ``KeyError``; a DataFrame source resolves directives just
+like ``df[[...]]``. Empty lists keep no columns, duplicate identities raise, and an
+absent column is never silently filled. It works over a dict and over a volas DataFrame —
 and a tf-aware frame keeps its ``time_frame``, with the forming-period state projected to
 match the kept columns.
 """
@@ -58,9 +59,14 @@ def test_dataframe_subset_and_reorder():
     assert out['open'].to_list() == [1., 2.]
 
 
-def test_dataframe_missing_name_raises_keyerror():
-    with pytest.raises(KeyError):
-        DataFrame(DataFrame(D), columns=['close', 'nope'])
+def test_dataframe_invalid_directive_raises_the_projection_error():
+    from volas import DirectiveValueError
+    df = DataFrame(D)
+    with pytest.raises(DirectiveValueError) as selected:
+        df[['close', 'nope']]
+    with pytest.raises(DirectiveValueError) as constructed:
+        DataFrame(df, columns=['close', 'nope'])
+    assert str(constructed.value) == str(selected.value)
 
 
 # --- tf-aware DataFrame: columns keeps the time_frame and folds correctly ---

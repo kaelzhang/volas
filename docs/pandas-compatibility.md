@@ -147,6 +147,17 @@ arrays with positive or negative strides (`df.iloc[:, column_mask]` also works
 for scalar assignment). For array assignment, select one column. A bool dtype
 never becomes integer positions; scalar or
 multidimensional bool selectors raise. An empty list selects no rows or columns.
+A boolean Series key must have the same labels as the selected axis, in the same
+order (row masks use only the visible window; column masks use column names).
+Index names and display zones are ignored; mixing naive and aware datetime
+indexes raises. NumPy masked arrays preserve their mask: any unknown boolean
+signal raises until explicitly filled or dropped. This applies to reads and writes.
+
+`DataFrame.equals` and `Series.equals` compare index labels, ignoring index names
+and display zones; a naive / aware datetime pair raises. Different labels return
+`False`. Series equality also requires the same dtype and values; Series names
+are ignored.
+
 Column names in `loc`, `at` and export selections resolve equivalent directive
 spellings to the stored physical label; these reads never materialize a missing
 column (use `df[directive]` first).

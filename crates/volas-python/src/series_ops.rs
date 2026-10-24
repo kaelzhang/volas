@@ -92,13 +92,13 @@ impl PySeries {
     /// `series[key]`: an integer position, a datetime label, or a slice.
     pub(crate) fn __getitem__(&self, py: Python<'_>, key: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
         // boolean mask -> the True rows, as a new Series (pandas `s[bool_mask]`)
-        if let Some(mask) = bool_mask_key(key)? {
-            let sub = self.inner.filter_mask(&mask).map_err(pyerr)?;
+        if let Some(mask) = bool_mask_key(key, || std::borrow::Cow::Borrowed(&self.inner.index))? {
+            let sub = self.inner.filter_mask(&mask.values()).map_err(pyerr)?;
             return Ok(Py::new(py, PySeries { inner: sub })?.into_any());
         }
         if let Ok(i) = key.extract::<isize>() {
             let i = norm_idx(i, self.inner.len())?;
-            return Ok(np_scalar_to_py(py, &self.inner.data, i));
+            return np_scalar_to_py(py, &self.inner.data, i);
         }
         if let Ok(slice) = key.downcast::<PySlice>() {
             return Ok(Py::new(py, slice_series(&self.inner, slice)?)?.into_any());
@@ -110,7 +110,7 @@ impl PySeries {
             .index
             .position_of(&label)
             .ok_or_else(|| PyKeyError::new_err("label not found"))?;
-        Ok(np_scalar_to_py(py, &self.inner.data, pos))
+        np_scalar_to_py(py, &self.inner.data, pos)
     }
 
     /// In-place assignment by boolean mask (`s[mask] = v`) or integer position
@@ -120,7 +120,8 @@ impl PySeries {
     /// raises `TypeError`.
     pub(crate) fn __setitem__(&mut self, key: &Bound<'_, PyAny>, value: &Bound<'_, PyAny>) -> PyResult<()> {
         let n = self.inner.len();
-        let positions: Vec<usize> = if let Some(mask) = bool_mask_key(key)? {
+        let positions: Vec<usize> = if let Some(mask) = bool_mask_key(key, || std::borrow::Cow::Borrowed(&self.inner.index))? {
+            let mask = mask.values();
             if mask.len() != n {
                 return Err(PyValueError::new_err(format!(
                     "boolean mask length {} != series length {n}",

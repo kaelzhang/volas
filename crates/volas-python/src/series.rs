@@ -62,7 +62,7 @@ impl PySeries {
 
     /// Box a float statistic as the column's float dtype: `np.float32` for an f32
     /// column, else `np.float64` (pandas: `f32.mean() -> np.float32`).
-    pub(crate) fn box_float(&self, py: Python<'_>, value: f64) -> Py<PyAny> {
+    pub(crate) fn box_float(&self, py: Python<'_>, value: f64) -> PyResult<Py<PyAny>> {
         if self.inner.data.dtype() == DType::F32 {
             np_f32(py, value as f32)
         } else {
@@ -202,7 +202,7 @@ impl SeriesILoc {
     pub(crate) fn __getitem__(&self, py: Python<'_>, key: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
         if let Ok(i) = key.extract::<isize>() {
             let i = norm_idx(i, self.inner.len())?;
-            return Ok(np_scalar_to_py(py, &self.inner.data, i));
+            return np_scalar_to_py(py, &self.inner.data, i);
         }
         if let Ok(slice) = key.downcast::<PySlice>() {
             return Ok(Py::new(py, slice_series(&self.inner, slice)?)?.into_any());

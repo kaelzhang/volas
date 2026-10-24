@@ -170,10 +170,11 @@ impl<'a> Meta<'a> {
 ///     columns (list[str], optional): select and order the columns to keep (like
 ///         ``df[[...]]``: the same rows, a listed cached column as a data column of its
 ///         values — refreshed if stale, never continued —, a windowed source gives its
-///         visible rows); a name not present
-///         raises ``KeyError`` (a cached one is found by any spelling). A duplicate name
-///         is rejected, an empty list keeps no column, and an absent column is never
-///         NaN-filled.
+///         visible rows). On a DataFrame source, valid directives are computed on
+///         first request and all entries are validated before the source changes;
+///         invalid directives raise the same error as ``df[[...]]``. Dict sources
+///         require existing keys. Duplicate identities raise, an empty list keeps no
+///         column, and absent columns are never NaN-filled.
 ///     index (Sequence, optional): row labels (int64, str or datetime), one per row,
 ///         unique as ``set_index`` requires them: a repeated label raises (``NaT`` is no
 ///         label).
