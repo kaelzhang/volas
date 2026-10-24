@@ -3,7 +3,7 @@
 from collections import Counter
 import re
 
-from asm_symbols import opcode, target_operand
+from asm_symbols import is_branch, is_call, opcode, target_operand
 
 
 class References:
@@ -35,7 +35,7 @@ class References:
                             sec[0].split(",")[-1],
                             int(symbol[1], 16),
                             int(size[1], 16) if size else 0,
-                            size[2] if size else name,
+                            (size[2] if size else name).removeprefix(".hidden "),
                         )
                     )
             heading = re.match(r"Disassembly of section (.+):", line)
@@ -70,11 +70,16 @@ class References:
         # was supplied (probe consumers), but undefined symbols never become bases.
         known = {(a, n) for _, a, _, n in self.symbols}
         self.ends = {}
+        self.next_addresses = {}
         for name, function in functions.items():
             address = function["address"]
             sec = self.section(address, function.get("section"))
             instructions = function["instructions"]
             for index, instruction in enumerate(instructions):
+                if index + 1 < len(instructions):
+                    self.next_addresses[
+                        (function.get("section"), instruction["address"])
+                    ] = instructions[index + 1]["address"]
                 self.ends[(function.get("section"), instruction["address"])] = (
                     instructions[index + 1]["address"]
                     if index + 1 < len(instructions)
@@ -82,6 +87,73 @@ class References:
                 )
             if sec and (address, name) not in known:
                 self.symbols.append((sec[0], address, 0, name))
+
+        self.resolved = {}
+        for function in functions.values():
+            self.resolve_pages(function)
+
+    def resolve_pages(self, function):
+        """Track ADRP definitions to their ADD/LDR consumers within a basic block.
+
+        The page alone has no stable symbol identity. All consumers name what
+        they actually reach, and the defining ADRP names that ordered target set.
+        Register writes and control transfers end a definition's lifetime.
+        """
+        pages = {}
+        block_starts = set()
+        for instruction in function["instructions"]:
+            target = target_operand(instruction["text"])
+            if is_branch(instruction["text"]) and target:
+                block_starts.add(int(target[1], 16))
+        for instruction in function["instructions"]:
+            if instruction["address"] in block_starts:
+                pages.clear()
+            body = instruction["text"]
+            key = (function.get("section"), instruction["address"])
+            op = opcode(body)
+            page = re.fullmatch(r"adrp\s+(x\d+),\s*(0x[0-9a-f]+)(?: <.*>)?", body)
+            if page and not self.instruction_relocations(instruction, function):
+                pages[page[1]] = (key, int(page[2], 16), body, [])
+                continue
+            add = re.fullmatch(r"add\s+x\d+,\s*(x\d+),\s*#(0x[0-9a-f]+|[0-9]+)", body)
+            load = re.fullmatch(
+                r"(?:ldr|ldrsw|ldrb|ldrh)\s+\w+,\s*\[(x\d+)(?:,\s*#(0x[0-9a-f]+|[0-9]+))?\]",
+                body,
+            )
+            consumer = add or load
+            if (
+                consumer
+                and consumer[1] in pages
+                and not self.instruction_relocations(instruction, function)
+            ):
+                definition, address, original, refs = pages[consumer[1]]
+                ref = self.reference(address + int(consumer[2] or "0", 0), function)
+                refs.append(ref)
+                self.resolved[key] = (
+                    body[: consumer.start(2)] + ref + body[consumer.end(2) :]
+                    if consumer[2] is not None
+                    else body[: consumer.end(1)] + ", #" + ref + body[consumer.end(1) :]
+                )
+                target = target_operand(original)
+                self.resolved[definition] = (
+                    original[: target.start()] + "@page(" + ",".join(refs) + ")"
+                )
+            # ARM instructions that write the first register kill its page fact.
+            # Stores, compares and control transfers do not define that operand.
+            dest = re.match(r"\S+\s+([xw]\d+)\b", body)
+            if dest and not (
+                op.startswith("st") or op in ("cmp", "cmn", "tst") or is_branch(body)
+            ):
+                pages.pop("x" + dest[1][1:], None)
+            if op.startswith("ldp"):
+                second = re.match(r"\S+\s+\w+,\s*[xw](\d+)", body)
+                if second:
+                    pages.pop("x" + second[1], None)
+            writeback = re.search(r"\[(x\d+)[^]]*\](?:!|,)", body)
+            if writeback:
+                pages.pop(writeback[1], None)
+            if is_branch(body) or is_call(body) or op in ("ret", "br", "braa", "brab"):
+                pages.clear()
 
     def section(self, address, name=None):
         return next(
@@ -162,6 +234,23 @@ class References:
             # ELF x86 encodes a PC-relative displacement without the 0x prefix.
             body = re.sub(r"-?\d+(?=\(%rip\))", "@relocated", body)
             return body + " @relocation" + repr(relocs)
+        key = (function.get("section"), instruction["address"])
+        if key in self.resolved:
+            return self.resolved[key]
+        rip = re.search(r"(?:-?0x[0-9a-f]+|-?[0-9]+)?(?=\(%rip\))", body)
+        if rip:
+            annotation = re.search(r"#+\s*0x([0-9a-f]+)(?: <.*>)?", body)
+            end = self.next_addresses.get(key)
+            # LLVM gives an exact resolved address in its comment, even for the
+            # last instruction. Otherwise use the next instruction's address.
+            if annotation or end is not None:
+                dest = (
+                    int(annotation[1], 16)
+                    if annotation
+                    else end + int(rip[0] or "0", 0)
+                )
+                ref = self.reference(dest, function)
+                body = body[: rip.start()] + ref + body[rip.end() :]
         if target:
             dest = int(target[1], 16)
             ref = (

@@ -79,7 +79,9 @@ def test_real_macho_equal_relocation_is_unchanged(tmp_path, monkeypatch):
         for f in h["functions"].values()
         for i in f["normalized"]
     )
-    assert any("section" in i for i in h["functions"][EXECUTE]["normalized"])
+    assert (
+        h["functions"][EXECUTE]["normalized"][0] == "adrp\tx0, @page(@symbol(_named,0))"
+    )
 
 
 def test_final_entry_rejects_one_empty_selected_body(tmp_path, monkeypatch):
