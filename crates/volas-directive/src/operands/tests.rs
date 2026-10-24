@@ -95,6 +95,19 @@ fn a_boolean_read_is_recorded() {
     assert!(Operands::new(&df, &[]).bool(0).is_err()); // no operand given
 }
 
+#[test]
+fn a_numeric_boolean_read_accepts_the_full_integer_domain() {
+    let df = DataFrame::new(vec!["close".into()], vec![Column::i64_from_options([
+        Some(i64::MIN), Some(i64::MAX), Some(0), None,
+    ])], None).unwrap();
+    let node = parse("repeat:1@close").unwrap();
+    let crate::types::Node::Command(cmd) = node.node() else { unreachable!() };
+    let ops = Operands::new(&df, &cmd.series);
+    let want = vec![Some(true), Some(true), Some(false), None];
+    assert_eq!(ops.bool(0).unwrap(), want);
+    assert_eq!(ops.bool(0).unwrap(), want);
+}
+
 /// A window reads the frame's rows from its start on — converted only there, an `@`
 /// operand evaluated over them alone — and keeps their absolute positions.
 #[test]

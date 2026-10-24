@@ -155,10 +155,10 @@ def test_ema_continues_from_the_last_complete_row(bad):
     assert_exact(got, want)
 
 
-def test_elementwise_columns_keep_ieee_infinities():
+def test_directive_elements_treat_infinite_inputs_as_missing():
     df = volas.DataFrame({'close': [np.inf, -np.inf, 3.], 'open': [1., 1., 1.]})
-    assert_exact(df.exec('close * 2'), np.array([np.inf, -np.inf, 6.]))
-    assert_exact(df.exec('close > open'), np.array([True, False, True]))
+    assert_exact(df.exec('close * 2'), np.array([np.nan, np.nan, 6.]))
+    assert_exact(df.exec('close > open', dtype='float64'), np.array([np.nan, np.nan, 1.]))
 
 
 @pytest.mark.parametrize('dtype', ['float32', 'float64'])

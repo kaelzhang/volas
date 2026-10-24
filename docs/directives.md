@@ -73,6 +73,11 @@ left operator right
   `left` and `right`, returning a `bool` series.
 - arithmetic `+ - * /`, logical `& | ^`, and unary `~` (not) / `-` (negate).
 
+NaN and both infinity signs are missing numeric inputs to every directive operator
+and command, including numeric-to-boolean conversion and `repeat`. Finite-input
+arithmetic still produces IEEE results (for example, division by zero can produce
+infinity); a later operator or command consumes that result as a missing input.
+
 **A directive boolean is missing where it cannot be known.** A comparison whose
 operand is missing — e.g. the warm-up rows of `close > ma:20` — is `volas.NA`, not
 `False`; a cross is missing while either of its two rows is (so its first row is
