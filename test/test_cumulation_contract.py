@@ -37,8 +37,8 @@ def test_same_time_frame_cumulate_rejects_a_different_effective_spec_atomically(
     with pytest.raises(ValueError, match='same time frame.*cumulators'):
         source.cumulate('5m', cumulators=requested)
     pd.testing.assert_frame_equal(source.to_pandas(), before)
-    source.append(bar(1, 4))
-    assert source['volume'].to_list() == [4.0]
+    source.append(bar(1, 0.5))
+    assert source['volume'].to_list() == [1.0]
 
 
 def test_same_time_frame_cumulate_compares_effective_columns_and_drops_cached_columns():
