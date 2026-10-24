@@ -43,6 +43,15 @@ impl PeriodAggregate {
         &self.current
     }
 
+    /// The checkpoint a proposed push continues, without changing either one.
+    /// A destination frame validates this prefix and the incoming bar together
+    /// before the push is committed; a first-bar correction has no prefix.
+    pub fn prefix(&self, resent: bool) -> Option<&DataFrame> {
+        if !resent { Some(&self.current) }
+        else if self.has_before { Some(&self.before_last) }
+        else { None }
+    }
+
     /// Start a new period from its already reduced first bar. The admitted bar
     /// has the same schema, so keep the fold plan and checkpoint buffers. The
     /// previous prefix becomes relevant only after the next distinct bar, when
