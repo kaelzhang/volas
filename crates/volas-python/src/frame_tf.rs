@@ -51,8 +51,9 @@ pub(crate) struct TfState {
     /// Copy the aggregate into the forming row positionally, skipping cached
     /// directives. Schema writes clear this; materialization changes `names`.
     fold_plan: Option<FoldPlan>,
-    /// A column added as missing to the raw bars supersedes its written forming
-    /// value on the next fold, as a re-send's complete re-reduction does.
+    /// The displayed row is not yet the reduction of the raw bars (a construction
+    /// seed, a single-bar write, or a column added as missing). Publish the owner
+    /// reduction on the next fold; never classify the displayed accumulator as input.
     refold_next: bool,
 }
 
@@ -178,7 +179,7 @@ impl TfState {
             0 => None,
             _ => Some(forming_bar(frame)?),
         };
-        Ok(TfState { time_frame, cumulators, open, open_key: None, aggregate: None, fold_plan: None, refold_next: false })
+        Ok(TfState { time_frame, cumulators, open, open_key: None, aggregate: None, fold_plan: None, refold_next: true })
     }
 
     /// The tf state of a `cumulate` result: the cumulator's open period carries on.
@@ -354,7 +355,10 @@ impl TfState {
             });
             columns.push(match kept {
                 Some(bars) => bars,
-                None if n == 1 => cell.clone(),
+                None if n == 1 => {
+                    self.refold_next = true;
+                    cell.clone()
+                },
                 None => {
                     return Err(PyValueError::new_err(format!(
                         "cannot overwrite column {name:?} of the forming row: it is the cumulation \

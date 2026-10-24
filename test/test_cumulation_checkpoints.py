@@ -109,7 +109,9 @@ def test_cumulator_names_and_callable_rejection_do_not_expand_the_contract(unsup
 def test_live_fold_and_resend_preserve_their_nan_bits(agg):
     stamps = np.arange(3).astype('datetime64[s]').astype('datetime64[ns]')
     nan = np.array([0x7ff8000000000042], dtype='uint64').view('float64')[0]
-    live = DataFrame({'v': [1.]}, index=stamps[:1], time_frame='1d', cumulators={'v': agg})
+    # This is an already reduced period; construction seeds publish their
+    # owner's batch reduction on the first later fold (covered separately).
+    live = DataFrame({'v': [1.]}, index=stamps[:1]).cumulate('1d', cumulators={'v': agg})
     bar = DataFrame({'v': [nan]}, index=stamps[1:2])
     live.append(bar)
     assert live.to_numpy().view('uint64')[0, 0] == 0x7ff8000000000042
@@ -139,3 +141,28 @@ def test_dtype_write_keeps_live_rounding_and_refold_error_timing(middle, tail, o
         assert live['v'].to_list() == [tail]
     live.append(make([0], 'int32', stamps[3:]))
     assert live['v'].to_list() == [middle]
+
+
+@pytest.mark.parametrize('dtype,uint,payload', [
+    ('float64', 'uint64', 0x7ff8000000000042),
+    ('float32', 'uint32', 0x7fc00042),
+])
+@pytest.mark.parametrize('agg', AGGS)
+@pytest.mark.parametrize('entry', ['seed', 'write'])
+def test_first_fold_publishes_the_owners_batch_nan_bits(dtype, uint, payload, agg, entry):
+    stamps = np.arange(2).astype('datetime64[s]').astype('datetime64[ns]')
+    spec = {'v': agg}
+    seed = DataFrame({'v': np.array([1.], dtype=dtype)}, index=stamps[:1])
+    if entry == 'seed':
+        live = DataFrame(seed, time_frame='1d', cumulators=spec)
+    else:
+        live = seed.cumulate('1d', cumulators=spec)
+        live.iloc[0, 0] = 2.0
+    nan = np.array([payload], dtype=uint).view(dtype)
+    bar = DataFrame({'v': nan}, index=stamps[1:])
+    value = 1.0 if entry == 'seed' else 2.0
+    raw = DataFrame({'v': np.array([value, nan[0]], dtype=dtype)}, index=stamps)
+    expected = raw.cumulate('1d', cumulators=spec).to_numpy().view(uint)
+    for _ in range(2):
+        live.append(bar)
+        np.testing.assert_array_equal(live.to_numpy().view(uint), expected)

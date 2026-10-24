@@ -67,3 +67,51 @@ def test_independent_aggregation_oracle_keeps_ieee_intermediates():
     from .harness.ledger import _aggregate
     maximum = float(np.finfo('float64').max)
     assert np.isposinf(_aggregate('sum', [maximum, maximum, -maximum]))
+
+
+@pytest.mark.parametrize('dtype', ['float64', 'float32'])
+@pytest.mark.parametrize('agg', ['first', 'last', 'max', 'min', 'sum'])
+@pytest.mark.parametrize('bad', [np.nan, np.inf, -np.inf])
+@pytest.mark.parametrize('entry', ['seed', 'write'])
+@pytest.mark.parametrize('copy', [False, True])
+def test_unreduced_tf_input_enters_the_aggregation_owner(dtype, agg, bad, entry, copy):
+    spec = {'value': agg}
+    if entry == 'seed':
+        live = frame([bad], dtype=dtype, time_frame='5m', cumulators=spec)
+    else:
+        live = frame([1.0], dtype=dtype).cumulate('5m', cumulators=spec)
+        live.iloc[0, 0] = bad
+    if copy:
+        live = live.cumulate('5m', cumulators=spec)
+    raw = frame([bad, 2.0], dtype=dtype)
+    live.append(frame([2.0], 1, dtype))
+    expected = raw.cumulate('5m', cumulators=spec)['value'].to_numpy()
+    assert_exact(live['value'].to_numpy(), expected)
+    live.append(frame([2.0], 1, dtype))
+    assert_exact(live['value'].to_numpy(), expected)
+    # Correct the initial input before appending: a one-bar resend replaces it.
+    repaired = frame([bad], dtype=dtype, time_frame='5m', cumulators=spec)
+    repaired.append(frame([-0.0], 0, dtype))
+    repaired.append(frame([2.0], 1, dtype))
+    assert_exact(repaired['value'].to_numpy(),
+                 frame([-0.0, 2.0], dtype=dtype).cumulate('5m', cumulators=spec)['value'].to_numpy())
+
+
+@pytest.mark.parametrize('dtype', ['float64', 'float32'])
+@pytest.mark.parametrize('entry', ['seed', 'write'])
+@pytest.mark.parametrize('copy', [False, True])
+def test_unreduced_finite_seed_keeps_sum_overflow(dtype, entry, copy):
+    maximum = np.finfo(dtype).max
+    spec = {'value': 'sum'}
+    if entry == 'seed':
+        live = frame([maximum], dtype=dtype, time_frame='5m', cumulators=spec)
+    else:
+        live = frame([1.0], dtype=dtype).cumulate('5m', cumulators=spec)
+        live.iloc[0, 0] = float(maximum)
+    if copy:
+        live = live.cumulate('5m', cumulators=spec)
+    for minute, value in [(1, maximum), (2, -maximum), (2, -maximum)]:
+        live.append(frame([value], minute, dtype))
+        raw = frame([maximum, maximum, -maximum][:minute + 1], dtype=dtype)
+        assert_exact(live['value'].to_numpy(), raw.cumulate('5m', cumulators=spec)['value'].to_numpy())
+        assert np.isposinf(live['value'].to_numpy()[0])
