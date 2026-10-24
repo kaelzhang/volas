@@ -45,8 +45,6 @@ release: build
 
 build-pkg:
 	@$(PYTHON) scripts/build_release.py --mode $(BUILD_OPT) --artifacts "$(BUILD_ARTIFACTS)" --sdist
-	@mkdir -p dist
-	@$(PYTHON) -c 'import json,shutil,pathlib; a=pathlib.Path("$(BUILD_ARTIFACTS)"); shutil.copy2(json.loads((a/"final.json").read_text())["wheel"], "dist"); [shutil.copy2(p,"dist") for p in (a/"sdist").glob("*.tar.gz")]'
 
 # Build the Rust extension only (development mode)
 build-ext:
@@ -310,12 +308,11 @@ cargo-publish:
 
 # Upload to PyPI
 upload:
-	twine upload --config-file ~/.pypirc -r pypi dist/* --verbose
+	@$(PYTHON) scripts/publish_artifacts.py --manifest "$(BUILD_ARTIFACTS)/delivery.json"
 
 # Publish (build package + upload)
-publish:
-	make build-pkg
-	make upload
+publish: build-pkg
+	@$(PYTHON) scripts/publish_artifacts.py --manifest "$(BUILD_ARTIFACTS)/delivery.json"
 
 # Bump the workspace version, commit, tag (no `v` prefix), then push the commit and
 # the tag to origin. The pushed tag triggers the GitHub release workflow, which

@@ -4,7 +4,6 @@
 import argparse
 import hashlib
 import importlib
-import importlib.metadata
 import json
 import os
 import subprocess
@@ -13,7 +12,9 @@ import sys
 import time
 
 ROOT = Path(__file__).resolve().parents[1]
-TRAIN_PASSES = 16
+sys.path.insert(0, str(ROOT))
+# Fixed before adoption; validation now recomputes every operation.
+TRAIN_PASSES = 4
 STAGES = (
     "batch",
     "append",
@@ -57,24 +58,27 @@ def train(stage=None):
     assert len(forms) == 254, "public inventory changed: review training budget"
     stages = []
     checks = hashlib.sha256()
+    from scripts.pgo_validation import Results, live_expected, fold
+
+    verified = Results(checks)
 
     def record(name, fn):
         wall, cpu = time.monotonic(), time.process_time()
+        before = checks.digest()
         operations = fn()
+        assert operations > 0 and checks.digest() != before, (
+            f"unverified training stage: {name}"
+        )
         stages.append(
             {
                 "stage": name,
                 "operations": operations,
+                "result_sha256": checks.hexdigest(),
                 "wall_s": time.monotonic() - wall,
                 "cpu_s": time.process_time() - cpu,
             }
         )
         print(json.dumps(stages[-1]), flush=True)
-
-    def check(values):
-        a = np.asarray(values, dtype="float64")
-        checks.update(np.isnan(a).tobytes())
-        checks.update(np.nan_to_num(a).tobytes())
 
     def batch():
         for n in (2048, 20000):
@@ -84,7 +88,7 @@ def train(stage=None):
                     df = DataFrame(data)
                     result = df.exec(d, dtype="float64")
                     assert len(result) == n, d
-                    check(result)
+                    verified.equal(result, df[d].to_numpy(dtype="float64"))
         return len(forms) * 4
 
     def append():
@@ -95,9 +99,9 @@ def train(stage=None):
                 args, kw = setup()
                 run(*args, **kw)
                 expected = DataFrame(data).exec(d, dtype="float64")
-                np.testing.assert_array_equal(
-                    args[0][d].to_numpy(dtype="float64"), expected
-                )
+                assert len(args[0]) == len(data["close"])
+                verified.equal(args[0][d].to_numpy(dtype="float64"), expected)
+                verified.frame(args[0], data)
         return len(forms) * 16
 
     def first():
@@ -116,7 +120,14 @@ def train(stage=None):
         for d in ids:
             run, setup = F.build(d)
             args, kw = setup()
+            frame = args[0]
+            directive, rows = d.split("@n=")
+            assert len(frame.columns) == 5
             run(*args, **kw)
+            assert len(frame.columns) == 6, (
+                "first-cache stage did not materialize result"
+            )
+            verified.frame(frame, F._ohlcv(int(rows)), [directive])
         return len(ids)
 
     def live():
@@ -126,7 +137,12 @@ def train(stage=None):
                 run, setup = T.build(data, W.COLUMNS, d, phase)
                 for _ in range(32):
                     args, kw = setup()
+                    before = args[0].to_numpy().copy()
                     run(*args, **kw)
+                    assert not np.array_equal(
+                        before, args[0].to_numpy(), equal_nan=True
+                    ), "live stage did not change state"
+                    verified.frame(args[0], live_expected(data, phase), [d])
         return len(T.TF_LIVE_PHASES) * len(T.TF_LIVE_INDICATORS) * 32
 
     def streams():
@@ -145,37 +161,76 @@ def train(stage=None):
             )
             args, kw = setup()
             df = run(*args, **kw)
-            for d in directives:
-                check(df[d].to_numpy(dtype="float64"))
-            if window:
-                assert len(df) <= window
-            _ = df[-20:][directives[0]]
+            data = {
+                c: a for c, a in W.generated_ohlcv(n, SEED).items() if c in W.COLUMNS
+            }
+            expected = fold(data) if tf else data
+            # Bucket aggregation uses the same left-to-right sum as the live feed.
+            if tf:
+                expected["volume"] = np.array(
+                    [sum(data["volume"][i : i + 15]) for i in range(0, n, 15)]
+                )
+            verified.frame(df, expected, directives, window)
+            view = df[-20:]
+            verified.equal(
+                view[directives[0]].to_numpy(dtype="float64"),
+                df[directives[0]].to_numpy(dtype="float64")[-20:],
+            )
         return sum(c[0] - 1 for c in configs)
 
     def boundaries():
         for n, reps in ((4096, 8), (1000000, 2)):
-            for fn in W.interop(n).values():
+            factories = W.interop(n)
+            assert set(factories) == {
+                "frame_from_arrow",
+                "frame_to_arrow",
+                "series_from_arrow",
+                "series_to_arrow",
+                "dlpack_import",
+                "dlpack_export",
+            }
+            for name, fn in factories.items():
                 for _ in range(reps):
-                    assert fn() is not None
+                    value = fn()
+                    if name in ("frame_from_arrow", "dlpack_import"):
+                        value = value.to_numpy()
+                    elif name == "frame_to_arrow":
+                        value = np.column_stack(
+                            [value[c].to_numpy() for c in W.COLUMNS]
+                        )
+                    elif name in ("series_from_arrow", "series_to_arrow"):
+                        value = value.to_numpy()
+                    expected = np.arange(n, dtype="float64")
+                    if name.startswith("frame_"):
+                        expected = np.tile(expected[:, None], (1, 5))
+                    elif name == "dlpack_import":
+                        expected = expected[:, None]
+                    verified.equal(value, expected)
         data = W.generated_ohlcv(2048, SEED)
         df = DataFrame(data)
         for _ in range(64):
-            _ = (
-                DataFrame(data),
-                df["close"],
-                df[100:1900],
-                df[df["close"] > 100],
-                df.copy(),
-                df[-100:],
-                df[800:1000],
-            )
+            verified.frame(DataFrame(data), data)
+            verified.equal(df["close"].to_numpy(), data["close"])
+            verified.frame(df[100:1900], {c: a[100:1900] for c, a in data.items()})
+            mask = data["close"] > 100
+            verified.frame(df[df["close"] > 100], {c: a[mask] for c, a in data.items()})
+            verified.frame(df.copy(), data)
+            verified.frame(df[-100:], {c: a[-100:] for c, a in data.items()})
+            verified.frame(df[800:1000], {c: a[800:1000] for c, a in data.items()})
             df["scratch"] = data["close"]
+            verified.equal(df["scratch"].to_numpy(), data["close"])
             df.iat[100, 0] = 1.5
-            _ = (
-                df.to_numpy(),
-                df["close"].to_numpy(),
-                DataFrame({"close": data["close"][::2]}),
+            assert df.iat[100, 0] == 1.5
+            altered = {c: a.copy() for c, a in data.items()}
+            altered["open"][100] = 1.5
+            verified.frame(df, altered)
+            verified.equal(
+                df.to_numpy(), np.column_stack([*altered.values(), data["close"]])
             )
+            verified.frame(
+                DataFrame({"close": data["close"][::2]}), {"close": data["close"][::2]}
+            )
+            df = DataFrame(data)
         return 6 * 10 + 64 * 12
 
     def ranges():
@@ -183,11 +238,15 @@ def train(stage=None):
         c = 100 + np.sin(t * 0.03) + np.cos(t * 0.017)
         data = {"high": c + 1.5, "low": c - 0.5, "close": c}
         for d in ("atr:14", "natr:14", "adx:14", "sar", "sarext"):
-            check(DataFrame(data).exec(d, dtype="float64"))
+            frame = DataFrame(data)
+            verified.equal(
+                frame.exec(d, dtype="float64"), frame[d].to_numpy(dtype="float64")
+            )
             run, setup = W.append({k: v[:2000] for k, v in data.items()}, d)
             for _ in range(32):
                 args, kw = setup()
                 run(*args, **kw)
+                verified.frame(args[0], {c: a[:2000] for c, a in data.items()}, [d])
         return 5 * 33
 
     def exceptional():
@@ -200,7 +259,12 @@ def train(stage=None):
                 for c in W.COLUMNS:
                     data[c][[50, 100, 150]] = [np.nan, np.inf, -np.inf]
             for d in forms:
-                check(DataFrame(data).exec(d, dtype="float64"))
+                # Validate direct execution against the cache materialization path
+                # on the same exceptional inputs; this is not a formula oracle.
+                verified.equal(
+                    DataFrame(data).exec(d, dtype="float64"),
+                    DataFrame(data)[d].to_numpy(dtype="float64"),
+                )
         return 3 * len(forms)
 
     for name, fn in [
@@ -240,18 +304,16 @@ def main():
     ap.add_argument("--output", type=Path, required=True)
     ap.add_argument("--stage", choices=STAGES)
     ap.add_argument("--identity", type=Path, required=True)
+    ap.add_argument("--dependencies", type=Path, required=True)
     args = ap.parse_args()
     ident = json.loads(args.identity.read_text())
     for name, expected in ident["training"].items():
         if hashlib.sha256((ROOT / name).read_bytes()).hexdigest() != expected:
             raise ValueError(f"training provenance mismatch: {name}")
+    from scripts.pgo_dependencies import verify
+
+    distributions = verify(args.dependencies.resolve())
     native = load_site(args.site.resolve(), args.native_sha256)
-    for line in (ROOT / "scripts/pgo-requirements.txt").read_text().splitlines():
-        if line and not line.startswith("#"):
-            name, version = line.split("==")
-            assert importlib.metadata.version(name) == version, (
-                f"training dependency mismatch: {name}"
-            )
     start = time.monotonic()
     if args.stage is None:
         parts = []
@@ -266,6 +328,7 @@ def main():
             subprocess.run(
                 [
                     sys.executable,
+                    "-S",
                     __file__,
                     "--site",
                     str(args.site),
@@ -277,6 +340,8 @@ def main():
                     stage,
                     "--identity",
                     str(args.identity),
+                    "--dependencies",
+                    str(args.dependencies),
                 ],
                 env=env,
                 check=True,
@@ -288,10 +353,14 @@ def main():
         result["stage_checksums"] = {
             s: p["result_sha256"] for s, p in zip(STAGES, parts)
         }
+        result["result_sha256"] = hashlib.sha256(
+            json.dumps(result["stage_checksums"], sort_keys=True).encode()
+        ).hexdigest()
     else:
         result = train(args.stage)
     result.update(
         native=native.__file__,
+        dependencies=distributions,
         native_sha256=args.native_sha256,
         wall_s=time.monotonic() - start,
     )

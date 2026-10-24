@@ -13,22 +13,35 @@ def test_pair_rejects_mixed_modes_and_cross_source_adoption(tmp_path, monkeypatc
     sys.path.insert(0, str(ROOT / "scripts"))
     import build_pair
 
-    base = {"mode": "normal", "identity": {"source": "same", "target": "arm"}}
-    head = {"mode": "use", "identity": {"source": "same", "target": "arm"}}
-    monkeypatch.setattr(build_pair, "manifest", lambda p: base if p == "base" else head)
+    from test.test_pgo_entrypoints import site
+    import json
+
+    base = site(tmp_path / "base")
+    head = site(tmp_path / "head", mode="use")
+
+    def change(path, **changes):
+        p = path / "volas-build.json"
+        data = json.loads(p.read_text())
+        for key, value in changes.items():
+            if key == "source":
+                data["identity"]["source"] = value
+            else:
+                data[key] = value
+        p.write_text(json.dumps(data))
+
     with pytest.raises(ValueError, match="matching build modes"):
-        build_pair.validate("base", "head")
+        build_pair.validate(base, head)
     assert (
-        build_pair.validate("base", "head", "optimization")["comparison"]
-        == "optimization"
+        build_pair.validate(base, head, "optimization")["comparison"] == "optimization"
     )
-    head["identity"]["source"] = "different"
+    change(head, source="different")
     with pytest.raises(ValueError, match="same-source"):
-        build_pair.validate("base", "head", "optimization")
-    head["mode"] = "normal"
-    assert build_pair.validate("base", "head")["comparison"] == "regression"
-    base["mode"] = head["mode"] = "use"
-    assert build_pair.validate("base", "head")["comparison"] == "regression"
+        build_pair.validate(base, head, "optimization")
+    change(head, mode="normal")
+    assert build_pair.validate(base, head)["comparison"] == "regression"
+    change(base, mode="use", profile_sha256="base-profile")
+    change(head, mode="use")
+    assert build_pair.validate(base, head)["comparison"] == "regression"
 
 
 def test_consistent_slower_is_retained_even_below_wall_gate():

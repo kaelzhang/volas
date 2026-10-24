@@ -145,14 +145,14 @@ def test_timing_budget_keeps_default_and_total_samples(monkeypatch, pairs, expec
     assert all(value * int(pairs or '1') >= count for value, count in zip(actual, [3, 5, 20]))
 
 
-def _shell_arguments(tmp_path, script, build_opt='normal', comparison='regression', archive=False):
+def _shell_arguments(tmp_path, script, build_opt='normal', comparison='regression', archive=False, invalid=None):
     import os
     import subprocess
     import sys
 
     fake = tmp_path / 'python'
     fake.write_text(f'#!{sys.executable}\n' + '''
-import json, os, pathlib, sys
+import json, os, pathlib, sys, runpy
 args = sys.argv[1:]
 calls = pathlib.Path(os.environ['CALLS_CAPTURE'])
 with calls.open('a') as f:
@@ -161,18 +161,33 @@ if args and args[0].endswith('build_release.py'):
     mode = args[args.index('--mode') + 1]
     output = pathlib.Path(args[args.index('--artifacts') + 1])
     stage = output / ('use' if mode == 'pgo' else mode)
-    (stage / 'site').mkdir(parents=True)
+    stage.mkdir(parents=True)
+    sys.path.insert(0, str(pathlib.Path(args[0]).resolve().parents[1]))
+    from test.test_pgo_entrypoints import site
+    site(stage / 'site', mode='use' if mode=='pgo' else mode)
     (stage / 'target').mkdir()
     (stage / 'target' / 'cache.rlib').write_text('not an artifact')
     (output / 'profile.profdata').write_text('profile')
     (output / 'training-raw').mkdir()
     (output / 'training-raw' / 'phase.profraw').write_text('raw')
+elif args and args[0].endswith('build_pair.py'):
+    sys.path.insert(0, str(pathlib.Path(args[0]).resolve().parent))
+    sys.argv = args
+    runpy.run_path(args[0], run_name='__main__')
 elif args and args[0].endswith('perf_pairs.py'):
     pathlib.Path(os.environ['PAIRS_CAPTURE']).write_text(json.dumps(args))
 ''')
     fake.chmod(0o755)
     site = tmp_path / 'base'
-    site.mkdir()
+    from test.test_pgo_entrypoints import site as build_site
+    build_site(site, mode='normal' if build_opt=='normal' or comparison=='optimization' else 'use')
+    if invalid == 'native':
+        (site / 'volas_rs.so').write_bytes(b'corrupt native')
+    elif invalid == 'mode':
+        data = json.loads((site / 'volas-build.json').read_text())
+        data['mode'] = 'use'
+        data['profile_sha256'] = 'profile'
+        (site / 'volas-build.json').write_text(json.dumps(data))
     capture = tmp_path / 'arguments.json'
     environment = dict(os.environ, VOLAS_PYTHON=str(fake), BASE_SITE=str(site),
                        PAIRS_CAPTURE=str(capture), CALLS_CAPTURE=str(tmp_path / 'calls.jsonl'),
@@ -180,6 +195,13 @@ elif args and args[0].endswith('perf_pairs.py'):
                        PERF_AB_JSON_DIR=str(tmp_path / 'archive') if archive else '', PERF_AB_KSELECT='')
     result = subprocess.run(['bash', str(script), 'HEAD'], env=environment,
                             capture_output=True, text=True)
+    if invalid:
+        assert result.returncode != 0, 'comparison continued past invalid build identity'
+        assert not capture.exists(), 'measurement started before validation'
+        calls = [json.loads(line) for line in (tmp_path / 'calls.jsonl').read_text().splitlines()]
+        assert any(args and args[0].endswith('build_pair.py') for args in calls)
+        assert not any(args and args[0].endswith('perf_pairs.py') for args in calls)
+        return None
     assert result.returncode == 0, result.stderr
     calls = [json.loads(line) for line in (tmp_path / 'calls.jsonl').read_text().splitlines()]
     build_index = next(i for i, args in enumerate(calls) if args and args[0].endswith('build_release.py'))

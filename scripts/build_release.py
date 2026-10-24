@@ -9,11 +9,10 @@ import json
 import os
 import resource
 from pathlib import Path
-import shlex
-import tempfile
 import subprocess
 import sys
 import sysconfig
+import tempfile
 import time
 import zipfile
 
@@ -26,22 +25,19 @@ def digest(path):
     return hashlib.sha256(Path(path).read_bytes()).hexdigest()
 
 
-def check_environment(env):
-    bad = [
-        k
-        for k in env
-        if k
-        in {
-            "RUSTFLAGS",
-            "CARGO_ENCODED_RUSTFLAGS",
-            "MATURIN_PGO",
-            "CARGO_BUILD_RUSTFLAGS",
-        }
-        or (k.startswith("CARGO_TARGET_") and k.endswith("_RUSTFLAGS"))
-        or k.startswith("CARGO_PROFILE_RELEASE_")
-    ]
-    if bad:
-        raise ValueError(f"ambient build overrides rejected: {sorted(bad)}")
+# The driver is also used against source archives that do not contain this tooling.
+sys.path.insert(0, str(DRIVER))
+from scripts.build_config import (  # noqa: E402
+    check_environment,
+    configuration,
+    resolved_flags,
+    tool_environment,
+    trace_environment,
+    validate_argv,
+    validate_flags,
+)
+from scripts.pgo_diagnostics import audit, coverage  # noqa: E402
+from scripts import pgo_dependencies  # noqa: E402
 
 
 def flag_environment(flags):
@@ -70,9 +66,14 @@ def validate_profile(profile, identity, provenance, profdata):
     if digest(profile) != provenance["profile_sha256"]:
         raise ValueError("profile hash mismatch")
     if profdata:
-        subprocess.run(
-            [str(profdata), "show", str(profile)], check=True, capture_output=True
+        result = subprocess.run(
+            [str(profdata), "show", "--all-functions", "--counts", str(profile)],
+            check=True,
+            capture_output=True,
+            text=True,
         )
+        if coverage(result.stdout) != provenance["coverage"]:
+            raise ValueError("profile training coverage mismatch")
 
 
 def output(cmd, **kwargs):
@@ -96,7 +97,10 @@ def source_hash(root):
 
 
 def identity(root, target):
-    rust = output(["rustc", "-Vv"])
+    check_environment(os.environ)
+    with tempfile.TemporaryDirectory(prefix="volas-identity-") as temp:
+        config = configuration(root, target, Path(temp) / "flags.log")
+    rust = config["tools"]["rustc"]["version"]
     if f"release: {RUST}\n" not in rust + "\n":
         raise ValueError(f"requires rustc {RUST}: {rust}")
     if output([sys.executable, "-m", "maturin", "--version"]) != f"maturin {MATURIN}":
@@ -105,7 +109,7 @@ def identity(root, target):
         line.split(": ", 1)[1] for line in rust.splitlines() if line.startswith("host:")
     )
     llvm = (
-        Path(output(["rustc", "--print", "sysroot"]))
+        Path(output([config["tools"]["rustc"]["path"], "--print", "sysroot"]))
         / "lib/rustlib"
         / host
         / "bin/llvm-profdata"
@@ -114,6 +118,11 @@ def identity(root, target):
         raise ValueError("install llvm-tools-preview for the pinned Rust toolchain")
     training = [
         DRIVER / "scripts/build_release.py",
+        DRIVER / "scripts/build_config.py",
+        DRIVER / "scripts/rustc_record.py",
+        DRIVER / "scripts/pgo_diagnostics.py",
+        DRIVER / "scripts/pgo_dependencies.py",
+        DRIVER / "scripts/pgo_validation.py",
         DRIVER / "scripts/count_indicators.py",
         DRIVER / "scripts/pgo_train.py",
         DRIVER / "test/bench_workloads.py",
@@ -124,31 +133,14 @@ def identity(root, target):
     ]
     return {
         "source": source_hash(root),
-        "rustc": rust,
-        "cargo": output(["cargo", "-V"]),
+        "configuration": config,
         "target": target,
         "python_abi": sysconfig.get_config_var("SOABI"),
         "maturin": MATURIN,
         "llvm": output([str(llvm), "--version"]),
         "llvm_sha256": digest(llvm),
         "training": {str(p.relative_to(DRIVER)): digest(p) for p in training},
-        "dependencies": output(
-            [
-                sys.executable,
-                "-c",
-                'import importlib.metadata as m,json; print(json.dumps({n:m.version(n) for n in ("numpy","pyarrow","tzdata")} ,sort_keys=True))',
-            ]
-        ),
-        "platform_env": {
-            k: os.environ.get(k)
-            for k in (
-                "MACOSX_DEPLOYMENT_TARGET",
-                "SDKROOT",
-                "CC",
-                "CARGO_BUILD_TARGET",
-                "RUSTUP_TOOLCHAIN",
-            )
-        },
+        "dependencies": pgo_dependencies.locked(),
     }, llvm
 
 
@@ -211,78 +203,6 @@ def install(wheel, site, root, log):
     return libs[0]
 
 
-def resolved_flags(root, target, flags, log):
-    """Ask Cargo to resolve target/cfg config, before maturin adds link flags.
-
-    The explicit triple marker precedes cfg-target flags in Cargo's argv. A tiny
-    native-independent probe records that tail; no second ISA configuration lives
-    in this script. Keep the complete resolver invocation for auditing.
-    """
-    with tempfile.TemporaryDirectory(prefix="volas-flags-") as tmp:
-        probe = Path(tmp)
-        (probe / "src").mkdir()
-        (probe / "Cargo.toml").write_text(
-            '[package]\nname="volas-flags-probe"\nversion="0.0.0"\nedition="2021"\n[workspace]\n'
-        )
-        (probe / "src/main.rs").write_text("fn main() {}\n")
-        marker = "--cfg=volas_flags_marker"
-        config = f"target.{target}.rustflags={json.dumps([marker, *flags])}"
-        run(
-            [
-                "cargo",
-                "build",
-                "--manifest-path",
-                probe / "Cargo.toml",
-                "--target",
-                target,
-                "--target-dir",
-                probe / "target",
-                "--config",
-                config,
-                "-v",
-            ],
-            log,
-            root,
-        )
-        lines = Path(log).read_text().splitlines()
-        command = next(
-            line.strip()[9:-1]
-            for line in lines
-            if "Running `" in line and "--crate-name volas_flags_probe" in line
-        )
-        argv = shlex.split(command)
-        return argv[argv.index(marker) + 1 :]
-
-
-def validate_argv(log, mode, target):
-    commands = [
-        shlex.split(line.strip()[9:-1])
-        for line in Path(log).read_text().splitlines()
-        if line.strip().startswith("Running `") and "--crate-name" in line
-    ]
-    target_commands = [
-        c for c in commands if "--target" in c and c[c.index("--target") + 1] == target
-    ]
-    if not any("volas_rs" in c for c in target_commands):
-        raise ValueError("missing actual cdylib rustc argv")
-    for c in commands:
-        feedback = [v for v in c if "profile-generate=" in v or "profile-use=" in v]
-        is_target = c in target_commands
-        if not is_target and feedback:
-            raise ValueError("host build unexpectedly instrumented")
-        if is_target and mode in ("generate", "use") and not feedback:
-            raise ValueError("target crate missing PGO flags")
-        if (
-            is_target
-            and target.startswith("x86_64")
-            and "-Ctarget-feature=+fma" not in c
-        ):
-            raise ValueError("target crate missing configured FMA")
-        if "volas_rs" in c and target.endswith("apple-darwin"):
-            if "link-arg=dynamic_lookup" not in c or "link-arg=-undefined" not in c:
-                raise ValueError("missing macOS extension link flags")
-
-
 def build(root, artifacts, mode, target, ident, profile=None):
     stage = artifacts / mode
     stage.mkdir(parents=True, exist_ok=False)
@@ -309,25 +229,32 @@ def build(root, artifacts, mode, target, ident, profile=None):
         stage / "wheels",
         "-v",
     ]
-    resolved = resolved_flags(root, target, flags, stage / "flags.log")
+    config = ident["configuration"]
+    # Re-resolve to catch configuration changes after identity collection.
+    base = resolved_flags(root, target, [], stage / "flags.log")
+    if base != config["flags"]:
+        raise ValueError("effective configuration changed before build")
+    feedback = (
+        stage / "raw" if mode == "generate" else profile if mode == "use" else None
+    )
+    resolved = [*base, *flags]
+    validate_flags(resolved, mode, feedback)
+    resolved += [f"-Clinker={config['tools']['linker']['path']}"]
     env = flag_environment(resolved)
+    env.update(tool_environment(config))
+    env = trace_environment(env, stage / "rustc-argv.jsonl")
     run(cmd, stage / "build.log", root, env)
     build_log = (stage / "build.log").read_text()
-    expected = (
-        "profile-generate="
-        if mode == "generate"
-        else "profile-use="
-        if mode == "use"
-        else None
+    validate_argv(
+        stage / "build.log", mode, target, feedback, config, stage / "rustc-argv.jsonl"
     )
-    if expected and expected not in build_log:
-        raise ValueError("maturin masked PGO flags; inspect actual rustc argv")
-    validate_argv(stage / "build.log", mode, target)
-    if (
-        "hash mismatch" in build_log.lower()
-        or "control flow change" in build_log.lower()
-    ):
-        raise ValueError("stale profile / CFG mismatch; see build log")
+    trained = (
+        json.loads(profile.with_suffix(".json").read_text())["coverage"]
+        if mode == "use"
+        else {}
+    )
+    warnings = audit(build_log, trained)
+    write(stage / "profile-warnings.json", warnings)
     wheels = list((stage / "wheels").glob("*.whl"))
     if len(wheels) != 1:
         raise ValueError("expected exactly one wheel")
@@ -337,16 +264,9 @@ def build(root, artifacts, mode, target, ident, profile=None):
             raise ValueError("wheel missing stubs")
     lib = install(wheel, stage / "site", root, stage / "install.log")
     manifest = {
-        "schema": 1,
-        "flags": sorted(
-            set(
-                f
-                for f in resolved
-                if "profile-generate=" not in f
-                and "profile-use=" not in f
-                and "pgo-warn-missing-function" not in f
-            )
-        ),
+        "schema": 2,
+        "argv_sha256": digest(stage / "rustc-argv.jsonl"),
+        "profile_warnings": warnings,
         "mode": mode,
         "identity": ident,
         "wheel": str(wheel),
@@ -379,6 +299,11 @@ def main():
         help="install final wheel into this interpreter",
     )
     ap.add_argument("--sdist", action="store_true")
+    ap.add_argument(
+        "--dependency-wheels",
+        type=Path,
+        help="offline wheelhouse for hash-locked training",
+    )
     args = ap.parse_args()
     check_environment(os.environ)
     root, artifacts = args.source.resolve(), args.artifacts.resolve()
@@ -398,25 +323,41 @@ def main():
             stage = args.generated.resolve()
             manifest = json.loads((stage / "build.json").read_text())
             prior, current = manifest["identity"].copy(), ident.copy()
-            prior.pop("training")
-            current.pop("training")
             if prior != current or manifest["mode"] != "generate":
                 raise ValueError("generated build provenance mismatch")
             verify_library(
                 Path(manifest["native"]), stage / "site", manifest["native_sha256"]
             )
-            validate_argv(stage / "build.log", "generate", target)
+            validate_argv(
+                stage / "build.log",
+                "generate",
+                target,
+                stage / "raw",
+                ident["configuration"],
+                stage / "rustc-argv.jsonl",
+            )
             write(artifacts / "generated.json", manifest)
         else:
             stage, manifest = build(root, artifacts, "generate", target, ident)
+        if identity(root, target)[0] != ident:
+            raise ValueError("provenance changed during generate build")
         if args.mode == "generate":
             return
+        deps = artifacts / "training-dependencies"
+        pgo_dependencies.install(
+            deps, artifacts / "dependencies.log", args.dependency_wheels
+        )
         raw = artifacts / "training-raw"
         raw.mkdir()
-        env = dict(os.environ, LLVM_PROFILE_FILE=str(raw / "train-%m-%p.profraw"))
+        env = dict(
+            os.environ,
+            LLVM_PROFILE_FILE=str(raw / "train-%m-%p.profraw"),
+            PYTHONPATH=str(deps),
+        )
         run(
             [
                 sys.executable,
+                "-S",
                 DRIVER / "scripts/pgo_train.py",
                 "--site",
                 stage / "site",
@@ -426,6 +367,8 @@ def main():
                 artifacts / "training.json",
                 "--identity",
                 artifacts / "identity.json",
+                "--dependencies",
+                deps,
             ],
             artifacts / "training.log",
             artifacts,
@@ -451,6 +394,14 @@ def main():
                 "identity": ident,
                 "profile_sha256": digest(profile),
                 "raw": {p.name: digest(p) for p in raws},
+                "coverage": coverage((artifacts / "profile-show.log").read_text()),
+                "training_sha256": digest(artifacts / "training.json"),
+                "training_result_sha256": json.loads(
+                    (artifacts / "training.json").read_text()
+                )["result_sha256"],
+                "training_dependencies": json.loads(
+                    (artifacts / "training.json").read_text()
+                )["dependencies"],
             },
         )
     if args.mode in ("use", "pgo"):
@@ -461,8 +412,11 @@ def main():
         )
         stage, manifest = build(root, artifacts, "use", target, ident, profile)
         manifest["profile_sha256"] = digest(profile)
+        manifest["profile_provenance_sha256"] = digest(profile.with_suffix(".json"))
     else:
         stage, manifest = build(root, artifacts, "normal", target, ident)
+    if identity(root, target)[0] != ident:
+        raise ValueError("provenance changed during final build")
     # A fresh process proves both library identity and absence of instrumentation.
     probe = artifacts / "final-probe"
     probe.mkdir()
@@ -501,12 +455,26 @@ def main():
         )
         installed_manifest = Path(sysconfig.get_path("purelib")) / "volas-build.json"
         write(installed_manifest, manifest)
+    delivery = [Path(manifest["wheel"])]
     if args.sdist:
         run(
             [sys.executable, "-m", "maturin", "sdist", "--out", artifacts / "sdist"],
             artifacts / "sdist.log",
             root,
         )
+        sdists = list((artifacts / "sdist").glob("*.tar.gz"))
+        if len(sdists) != 1:
+            raise ValueError("expected exactly one source distribution")
+        delivery += sdists
+    write(
+        artifacts / "delivery.json",
+        {
+            "schema": 1,
+            "artifacts": [
+                {"path": str(p.resolve()), "sha256": digest(p)} for p in delivery
+            ],
+        },
+    )
 
 
 if __name__ == "__main__":

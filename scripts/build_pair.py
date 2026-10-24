@@ -11,8 +11,11 @@ from build_release import verify_library
 def manifest(site):
     site = Path(site).resolve()
     data = json.loads((site / "volas-build.json").read_text())
-    if data["schema"] != 1 or data["mode"] not in ("normal", "use"):
+    if data["schema"] != 2 or data["mode"] not in ("normal", "use"):
         raise ValueError("performance requires a final normal/use build")
+    config = data['identity']['configuration']
+    if not {'flags', 'release', 'features', 'tools'} <= config.keys() or not isinstance(config['flags'], list):
+        raise ValueError('missing effective build configuration')
     native = list(site.rglob("volas_rs*.so")) + list(site.rglob("volas_rs*.pyd"))
     if len(native) != 1:
         raise ValueError("missing or ambiguous native library")
@@ -28,8 +31,6 @@ def validate(base, head, comparison="regression"):
     b, h = manifest(base), manifest(head)
     bi, hi = b["identity"].copy(), h["identity"].copy()
     bs, hs = bi.pop("source"), hi.pop("source")
-    if b.get("flags") != h.get("flags"):
-        raise ValueError("effective target flags mismatch")
     if bi != hi:
         raise ValueError("build provenance mismatch")
     if comparison == "optimization":
