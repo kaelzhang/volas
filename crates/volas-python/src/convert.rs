@@ -359,10 +359,7 @@ pub(crate) fn column_to_numpy_with<'py>(
     let mask = na_mask(py, col);
     match dtype {
         Some(dt) => {
-            let sanitize = matches!(col, Column::Str(..))
-                || (col.dtype().is_float()
-                    && matches!(target, Some(ExportTarget::Integer | ExportTarget::Temporal)));
-            astype_filled(column_values_native(py, col)?, dt, Some(&mask), Some(nv), sanitize,
+            astype_filled(column_values_native(py, col)?, dt, Some(&mask), Some(nv),
                 target == Some(ExportTarget::UnsizedText))
         },
         // The NA-model array keeps its default dtype; only the holes change.
@@ -382,26 +379,28 @@ pub(crate) fn astype_filled<'py>(
     dtype: &str,
     mask: Option<&Bound<'py, PyAny>>,
     na_value: Option<&Bound<'py, PyAny>>,
-    sanitize_payloads: bool,
     infer_text_width: bool,
 ) -> PyResult<Bound<'py, PyAny>> {
     if let (Some(mask), Some(nv)) = (mask, na_value) {
-        // Integer/native temporal holes and float -> float/bool casts already
-        // have convertible payloads: keep their one-pass fill path.
-        if sanitize_payloads {
-            native.set_item(mask, 0)?;
+        // Select before casting: even integers / NaT can overflow a narrow
+        // float, and no placeholder is convertible to every NumPy dtype.
+        // Boolean indexing keeps the native dtype and exact integer bits.
+        let valid = mask.call_method0("__invert__")?;
+        let values = native.get_item(&valid)?;
+        let np = native.py().import("numpy")?;
+        let kwargs = PyDict::new(native.py());
+        kwargs.set_item("dtype", if infer_text_width { "object" } else { dtype })?;
+        let target = np.call_method("empty", (native.getattr("shape")?,), Some(&kwargs))?;
+        if values.getattr("size")?.extract::<usize>()? != 0 {
+            let converted = values.call_method1("astype", (dtype,))?;
+            target.set_item(valid, converted)?;
         }
-        if infer_text_width {
-            // NumPy sizes a native numeric -> text cast from its dtype, and an
-            // object -> text cast from its current cells. Neither sees the fill.
-            // Format native values first, then infer the final width from valid
-            // strings and the fill together. Replaced payloads cannot widen it.
-            let cells = native.call_method1("astype", (dtype,))?.call_method1("astype", ("object",))?;
-            cells.set_item(mask, nv)?;
-            return cells.call_method1("astype", (dtype,));
-        }
-        let target = native.call_method1("astype", (dtype,))?;
+        // Every slot is initialized in its destination representation. For
+        // unsized text, infer width from the valid formatted cells and fill.
         target.set_item(mask, nv)?;
+        if infer_text_width {
+            return target.call_method1("astype", (dtype,));
+        }
         Ok(target)
     } else {
         native.call_method1("astype", (dtype,))

@@ -2,7 +2,7 @@
 
 本指南说明 DataFrame / Series 的构造和导出，以及 Row 的边界表示。选择和写入时会校验布尔 Series 键的索引；MaskedArray 的未知布尔信号会抛错。相等检查包含索引，并拒绝混合无时区与有时区的 datetime 索引。返回[中文 README](../../README.zh-CN.md)。
 
-显式指定 NumPy dtype 时，`na_value` 在目标表示中填充。例如 `DataFrame({'qty': [1, None]})['qty'].to_numpy(dtype='float64', na_value=0.5)` 返回 `[1.0, 0.5]`。原生整数直接转换，`dtype='int64', na_value=0` 保留超过 2⁵³ 的整数精度；NumPy 调用失败会把原异常传播给调用方。Frame、Series 和 `exec` 的未定宽文本 dtype（`U` / `str` / `S`）由有效值与填充值共同推断宽度；`U2` 等显式宽度保留用户指定宽度，遵循 NumPy 的截断行为。
+显式指定 NumPy dtype 时，仅转换有效槽，`na_value` 在目标数组中填充；缺失载荷不触发转换错误或警告，全缺失列也如此。例如 `DataFrame({'qty': [1, None]})['qty'].to_numpy(dtype='float64', na_value=0.5)` 返回 `[1.0, 0.5]`。原生整数直接转换，`dtype='int64', na_value=0` 保留超过 2⁵³ 的整数精度；NumPy 调用失败会把原异常传播给调用方。Frame、Series 和 `exec` 的未定宽文本 dtype（`U` / `str` / `S`）由有效值与填充值共同推断宽度；`U2` 等显式宽度保留用户指定宽度，遵循 NumPy 的截断行为。
 
 ### DataFrame.from_pandas(pdf) -> DataFrame
 
@@ -270,7 +270,8 @@ pa.array(df['close'])              # Series   -> pyarrow.Array（共享缓冲区
 pa.table(df)                       # DataFrame -> pyarrow.Table（单个 RecordBatch）
 df['close'].to_arrow()             # pa.array(...) 的便捷写法
 
-Series.from_arrow(pa_array, name='close')   # Arrow array -> Series（owned 快照）
+Series.from_arrow(pa_array, name='close')   # 默认借用匹配缓冲区
+Series.from_arrow(pa_array, name='close', copy=True)   # owned 快照
 DataFrame.from_arrow(pa_table)              # Arrow table -> DataFrame
 
 # DLPack —— NumPy / PyTorch / JAX 借用一个稠密的数值（或 bool）列。

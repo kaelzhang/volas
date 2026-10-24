@@ -83,7 +83,8 @@ pa.array(df['close'])              # Series  -> pyarrow.Array  (shares the buffe
 pa.table(df)                       # DataFrame -> pyarrow.Table (one RecordBatch)
 df['close'].to_arrow()             # convenience for pa.array(...)
 
-Series.from_arrow(pa_array, name='close')   # Arrow array  -> Series (borrows matching buffers)
+Series.from_arrow(pa_array, name='close')   # borrows matching buffers by default
+Series.from_arrow(pa_array, name='close', copy=True)   # owned snapshot
 DataFrame.from_arrow(pa_table)              # Arrow table  -> DataFrame (row count kept even with no columns)
 
 # DLPack — NumPy / PyTorch / JAX borrow a dense numeric (or bool) column.
@@ -157,7 +158,9 @@ df['qty'].to_numpy(dtype='int64', na_value=0)    # or fill the holes with na_val
 pa.array(df['qty'])                              # lossless: keeps int64 + the null bitmap
 ```
 
-With an explicit NumPy dtype, `na_value` is filled in that target representation:
+With an explicit NumPy dtype, only valid slots are converted, and `na_value`
+is filled in the target array. Missing payloads cannot cause conversion errors
+or warnings, including in an all-missing column. For example:
 `DataFrame({'qty': [1, None]})['qty'].to_numpy(dtype='float64', na_value=0.5)`
 returns `[1.0, 0.5]`. Integer exports cast directly from native integer values;
 `dtype='int64', na_value=0` preserves values beyond 2⁵³ exactly. Python errors

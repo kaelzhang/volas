@@ -39,8 +39,7 @@ impl PyDataFrame {
         // window validation can still fail. Stage the entire construction, and
         // publish the source's cache writes only once the final frame exists.
         let mut source = data.extract::<PyRefMut<PyDataFrame>>().ok();
-        let mut staged = source.as_ref().map(|other| other.copy());
-        let (df, tf) = if let Some(other) = staged.as_mut() {
+        if let Some(other) = source.as_ref() {
             if columns.is_none()
                 && index.is_none()
                 && dtype.is_none()
@@ -48,9 +47,13 @@ impl PyDataFrame {
                 && time_frame.is_none()
                 && cumulators.is_none()
             {
-                // `DataFrame(other)` is `other.copy()`: the window and time-frame state too
+                // `DataFrame(other)` takes exactly one snapshot, including
+                // window, staleness and time-frame continuation state.
                 return Ok(other.copy());
             }
+        }
+        let mut staged = source.as_ref().map(|other| other.copy());
+        let (df, tf) = if let Some(other) = staged.as_mut() {
             if index.is_some() || dtype.is_some() || window.is_some() || time_frame.is_some() {
                 // a derivation that re-labels, re-types, re-windows or re-frames the rows reads them
                 other.read()?;

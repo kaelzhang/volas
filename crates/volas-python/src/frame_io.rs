@@ -365,7 +365,7 @@ impl PyDataFrame {
             match target {
                 ExportTarget::Object => return fill_na_2d(object_array(py, df)?, mask, nv),
                 ExportTarget::UnsizedText | ExportTarget::Other => {
-                    return astype_filled(object_array(py, df)?, dt, mask, nv, true,
+                    return astype_filled(object_array(py, df)?, dt, mask, nv,
                         target == ExportTarget::UnsizedText)
                 }
                 _ => {}
@@ -411,7 +411,7 @@ impl PyDataFrame {
                     .into_pyarray(py)
                     .into_any()
             };
-            return astype_filled(arr, dt, mask, nv, false, false);
+            return astype_filled(arr, dt, mask, nv, false);
         }
 
         // Default (no dtype) — the honest representation chosen by the dtypes.
