@@ -3,6 +3,7 @@
 //! represented independently as `Value::Bool(None)`.
 use std::cmp::Ordering;
 use volas_core::{Column, Result, VolasError};
+use volas_core::missing::is_missing;
 use crate::types::{Op, UnaryOp};
 
 #[derive(Clone, Copy)]
@@ -16,11 +17,19 @@ impl Value {
             Self::Bool(b) => Some(b.map_or(f64::NAN, |v| f64::from(u8::from(v)))),
         }
     }
+    // Normalize numeric inputs through the computation owner, independently of
+    // storage validity. `float` also exports results, which retain IEEE overflow.
+    fn input(self) -> Option<f64> {
+        let f = self.float()?;
+        Some(if is_missing(f) { f64::NAN } else { f })
+    }
     pub fn truth(self) -> Option<bool> {
-        match self { Self::Int(i) => Some(i != 0), Self::Float(f) => (!f.is_nan()).then_some(f != 0.0), Self::Bool(b) => b }
+        match self { Self::Int(i) => Some(i != 0), Self::Float(f) => (!is_missing(f)).then_some(f != 0.0), Self::Bool(b) => b }
     }
     pub fn order(self, other: Self) -> Option<Ordering> {
         match (self, other) {
+            (Self::Float(f), _) if is_missing(f) => None,
+            (_, Self::Float(f)) if is_missing(f) => None,
             (Self::Int(a), Self::Int(b)) => Some(a.cmp(&b)),
             (Self::Int(a), Self::Float(b)) => volas_core::numeric::cmp_i64_f64(a, b),
             (Self::Float(a), Self::Int(b)) => volas_core::numeric::cmp_i64_f64(b, a).map(Ordering::reverse),
@@ -43,17 +52,22 @@ pub(crate) fn unary(op: UnaryOp, v: Value) -> Option<Value> {
             Value::Int(i) => Value::Int(i.checked_neg()?),
             Value::Bool(Some(b)) => Value::Int(-i64::from(b)),
             Value::Bool(None) => Value::Bool(None),
-            Value::Float(f) => Value::Float(-f),
+            Value::Float(_) => Value::Float(-v.input()?),
         },
     })
 }
 
 pub(crate) fn binary(op: Op, a: Value, b: Value, previous: Option<(Value, Value)>) -> Option<Value> {
+    binary_with::<false>(op, a, b, previous)
+}
+
+fn binary_with<const COMPLETE: bool>(op: Op, a: Value, b: Value, previous: Option<(Value, Value)>) -> Option<Value> {
+    let input = |v: Value| if COMPLETE { v.float() } else { v.input() };
     Some(match op {
-        Op::Add => Value::Float(a.float()? + b.float()?),
-        Op::Sub => Value::Float(a.float()? - b.float()?),
-        Op::Mul => Value::Float(a.float()? * b.float()?),
-        Op::Div => Value::Float(a.float()? / b.float()?),
+        Op::Add => Value::Float(input(a)? + input(b)?),
+        Op::Sub => Value::Float(input(a)? - input(b)?),
+        Op::Mul => Value::Float(input(a)? * input(b)?),
+        Op::Div => Value::Float(input(a)? / input(b)?),
         Op::And => Value::Bool(and(a.truth(), b.truth())),
         Op::Or => Value::Bool(or(a.truth(), b.truth())),
         Op::Xor => Value::Bool(a.truth().zip(b.truth()).map(|(a,b)| a ^ b)),
@@ -111,13 +125,29 @@ pub(crate) fn binary_column(op: Op, l: &Column, r: &Column) -> Result<Column> {
                 }
             }
         }
+        // Reuse the storage owner's learned fact: clean arithmetic retains its
+        // original per-row loop; only the cold path normalizes missing inputs.
+        if l.has_nonfinite() || r.has_nonfinite() {
+            return binary_missing_column(op, l, r);
+        }
     }
+    binary_elements::<true>(op, l, r)
+}
+
+#[cold]
+#[inline(never)]
+fn binary_missing_column(op: Op, l: &Column, r: &Column) -> Result<Column> {
+    binary_elements::<false>(op, l, r)
+}
+
+fn binary_elements<const COMPLETE: bool>(op: Op, l: &Column, r: &Column) -> Result<Column> {
+    let arithmetic = matches!(op, Op::Add | Op::Sub | Op::Mul | Op::Div);
     let crossing = matches!(op, Op::Cross | Op::CrossUp | Op::CrossDown);
     let values = (0..l.len()).map(|i| {
         let a = at(l, i).expect("numeric operand");
         let b = at(r, i).expect("numeric operand");
         let previous = if crossing { i.checked_sub(1).and_then(|p| Some((at(l,p)?, at(r,p)?))) } else { None };
-        binary(op, a, b, previous).ok_or_else(|| VolasError::Value("invalid numeric operation".into()))
+        binary_with::<COMPLETE>(op, a, b, previous).ok_or_else(|| VolasError::Value("invalid numeric operation".into()))
     });
     if arithmetic {
         Ok(Column::f64(values.map(|v| v.map(|v| v.float().expect("float"))).collect::<Result<_>>()?))
@@ -129,6 +159,36 @@ pub(crate) fn binary_column(op: Op, l: &Column, r: &Column) -> Result<Column> {
 #[cfg(test)]
 mod traversal_tests {
     use super::*;
+
+    #[test]
+    fn nonfinite_inputs_match_nan_for_mixed_numeric_operands() {
+        let partners = [Value::Int(i64::MAX), Value::Int(0), Value::Float(-0.0),
+            Value::Float(f64::MAX), Value::Float(f64::INFINITY),
+            Value::Bool(Some(false)), Value::Bool(Some(true)), Value::Bool(None)];
+        for bad in [f64::INFINITY, f64::NEG_INFINITY, f64::NAN] {
+            let missing = Value::Float(bad);
+            assert!(missing.input().unwrap().is_nan());
+            assert_eq!(missing.truth(), None);
+            for other in partners {
+                assert_eq!(missing.order(other), None);
+                assert_eq!(other.order(missing), None);
+                for op in [Op::Lt, Op::Le, Op::Eq, Op::Ne, Op::Ge, Op::Gt,
+                    Op::Cross, Op::CrossUp, Op::CrossDown, Op::And, Op::Or, Op::Xor] {
+                    for (a, b, x, y) in [(missing, other, Value::Float(f64::NAN), other),
+                        (other, missing, other, Value::Float(f64::NAN))] {
+                        assert_eq!(binary(op, a, b, Some((other, other))).unwrap().truth(),
+                            binary(op, x, y, Some((other, other))).unwrap().truth(), "{op:?}");
+                    }
+                }
+            }
+            assert_eq!(unary(UnaryOp::Not, missing).unwrap().truth(), None);
+            assert!(unary(UnaryOp::Neg, missing).unwrap().float().unwrap().is_nan());
+        }
+        // Overflow is an IEEE result; consuming it as an input applies missingness.
+        let overflow = binary(Op::Mul, Value::Float(f64::MAX), Value::Float(2.0), None).unwrap();
+        assert!(matches!(overflow, Value::Float(f64::INFINITY)));
+        assert_eq!(overflow.truth(), None);
+    }
 
     #[test]
     fn batch_binary_matches_scalar_owner_for_every_op_and_numeric_type() {
