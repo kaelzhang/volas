@@ -281,6 +281,11 @@ impl TfState {
         self.time_frame
     }
 
+    /// Compare effective aggregators through their owner, for the current data schema.
+    pub(crate) fn same_cumulators(&self, spec: &AggSpec, names: &[String]) -> bool {
+        self.cumulators.equivalent_for(spec, names)
+    }
+
     /// THE write entry of a tf frame: `change` (cells written, a column added or
     /// replaced) is checked already, and the open period follows what it LEAVES in the
     /// forming row, however many writes reached it (see [`follow`](Self::follow)) — judged

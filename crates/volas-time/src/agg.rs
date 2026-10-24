@@ -113,6 +113,12 @@ impl AggSpec {
         self.by_name.get(name).copied().unwrap_or(self.default)
     }
 
+    /// Whether both specs assign the same effective aggregator to every given
+    /// data column. Redundant overrides and absent OHLCV columns do not matter.
+    pub fn equivalent_for(&self, other: &Self, names: &[String]) -> bool {
+        names.iter().all(|name| self.agg_for(name) == other.agg_for(name))
+    }
+
     /// Check every column of `df` against the support table
     /// ([`CombineOp::supports`]) before any period is aggregated — a frame whose
     /// spec asks for, say, the `max` of a `str` column is rejected up front, by

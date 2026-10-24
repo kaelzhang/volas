@@ -33,8 +33,8 @@ impl PeriodAggregate {
             current.clone()
         };
         let ops = bars.names().iter().enumerate().map(|(i, name)| (i, i, spec.agg_for(name).as_combine_op())).collect();
-        let before_missing: Vec<_> = bars.columns().iter().map(|c| (0..bars.height() - 1).any(|i| !c.is_valid(i))).collect();
-        let missing = bars.columns().iter().zip(&before_missing).map(|(c, &before)| before || !c.is_valid(bars.height() - 1)).collect();
+        let before_missing: Vec<_> = bars.columns().iter().map(|c| (0..bars.height() - 1).any(|i| c.is_missing_input(i))).collect();
+        let missing = bars.columns().iter().zip(&before_missing).map(|(c, &before)| before || c.is_missing_input(bars.height() - 1)).collect();
         Ok(Self { current, before_last, has_before, ops, missing, before_missing })
     }
 
@@ -50,7 +50,7 @@ impl PeriodAggregate {
     pub fn restart(&mut self, current: DataFrame, bar: &DataFrame) {
         self.current = current;
         self.has_before = false;
-        for (missing, col) in self.missing.iter_mut().zip(bar.columns()) { *missing = !col.is_valid(0); }
+        for (missing, col) in self.missing.iter_mut().zip(bar.columns()) { *missing = col.is_missing_input(0); }
     }
 
     /// Take one admitted complete bar of this period. Validation precedes every
@@ -59,7 +59,7 @@ impl PeriodAggregate {
     pub fn push(&mut self, bar: &DataFrame, resent: bool) -> Result<()> {
         if resent && !self.has_before {
             self.current.refold_forming_row(0, bar, &self.ops)?;
-            for (missing, col) in self.missing.iter_mut().zip(bar.columns()) { *missing = !col.is_valid(0); }
+            for (missing, col) in self.missing.iter_mut().zip(bar.columns()) { *missing = col.is_missing_input(0); }
             return Ok(());
         }
         let missing = if resent { &self.before_missing } else { &self.missing };
@@ -70,7 +70,7 @@ impl PeriodAggregate {
             self.before_missing.copy_from_slice(&self.missing);
             self.has_before = true;
         }
-        for (missing, col) in self.missing.iter_mut().zip(bar.columns()) { *missing |= !col.is_valid(0); }
+        for (missing, col) in self.missing.iter_mut().zip(bar.columns()) { *missing |= col.is_missing_input(0); }
         Ok(())
     }
 }

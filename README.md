@@ -203,7 +203,8 @@ df.to_numpy()                    # 2-D ndarray (rows x columns)
 ```
 
 [Cumulation](docs/cumulation.md) accepts empty datetime frames and applies the
-requested aggregation rules even at the same time frame. Window declarations
+requested aggregation rules. At the same time frame, an identical effective spec
+copies the frame's data and open fine bars; a different spec raises. Window declarations
 also accept raw columns (`max_lookback=['close']`, lookback zero). A physical data
 column owns every equivalent directive spelling; schemas reject two labels for
 one identity (for example, `ema:2` and `EMA:02`). Column projections preserve
@@ -235,6 +236,9 @@ window, decay, quantile, rank, or input-shape parameters; see the
 [compute crate guide](crates/volas-compute/README.md). `time::Agg::reduce` rejects
 empty or out-of-range selections. `time::aggregate_period` requires non-empty,
 ordered datetime bars within one period and rejects NaT or multiple periods.
+Low-level grouped `Column` reductions take repeatable (`Clone`) group iterators;
+dense selections reuse finite-input facts, while sparse selections inspect only
+their selected values.
 
 # Contributing & feedback
 

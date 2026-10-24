@@ -13,16 +13,43 @@ def bar(minute, volume):
 
 
 
-def test_same_time_frame_cumulate_applies_new_cumulators_on_later_folds():
+@pytest.mark.parametrize('requested', [None, {}, {'volume': 'sum'}])
+def test_same_time_frame_cumulate_copies_open_fine_bars(requested):
     source = bar(0, 1).cumulate('5m')
+    source.append(bar(1, 2))
+    result = source.cumulate('5m', cumulators=requested)
+    assert result is not source
+    # A correction must replace the last fine bar, not the whole coarse row.
+    result.append(bar(1, 4))
+    assert result['volume'].to_list() == [5.0]
+    result.append(bar(2, 8))
+    assert result['volume'].to_list() == [13.0]
+    assert source['volume'].to_list() == [3.0]
+    source.append(bar(1, 6))
+    assert source['volume'].to_list() == [7.0]
+
+
+@pytest.mark.parametrize('requested', [None, {}, {'volume': 'sum'}, {'volume': 'min'}])
+def test_same_time_frame_cumulate_rejects_a_different_effective_spec_atomically(requested):
+    source = bar(0, 1).cumulate('5m', cumulators={'volume': 'max'})
+    source.append(bar(1, 2))
+    before = source.to_pandas()
+    with pytest.raises(ValueError, match='same time frame.*cumulators'):
+        source.cumulate('5m', cumulators=requested)
+    pd.testing.assert_frame_equal(source.to_pandas(), before)
+    source.append(bar(1, 4))
+    assert source['volume'].to_list() == [4.0]
+
+
+def test_same_time_frame_cumulate_compares_effective_columns_and_drops_cached_columns():
+    source = bar(0, 1).cumulate('5m', cumulators={'volume': 'max'})
     source.append(bar(1, 2))
     source['ema:2@volume']
     result = source.cumulate('5m', cumulators={'volume': 'max'})
-    result.append(bar(2, 4))
-    assert result['volume'].to_list() == [4.0]
     assert 'ema:2@volume' not in result.columns
-    assert source['volume'].to_list() == [3.0]
-
+    result.append(bar(1, 4))
+    assert result['volume'].to_list() == [4.0]
+    assert source['volume'].to_list() == [2.0]
 
 
 @pytest.mark.parametrize('spec,error', [
@@ -75,3 +102,17 @@ def test_empty_cumulate_still_validates_index_and_dtype_support():
     with pytest.raises((TypeError, ValueError), match='cannot sum'):
         volas.DataFrame.from_pandas(empty).cumulate('5m', cumulators={'text': 'sum'})
 
+
+
+def test_same_time_frame_compares_effective_spec_after_renaming():
+    source = bar(0, 1).cumulate('5m', cumulators={'volume': 'max'})
+    source.append(bar(1, 2))
+    source = source.rename(columns={'volume': 'amount'})
+    # The source's spec still has volume=max; the request has volume=sum by
+    # default. Only amount exists, and both effective aggregators are max.
+    result = source.cumulate('5m', cumulators={'amount': 'max'})
+    correction = volas.DataFrame({'amount': [0.5]},
+                                index=[volas.Timestamp('2024-01-01 00:01')])
+    result.append(correction)
+    assert result['amount'].to_list() == [1.0]
+    assert source['amount'].to_list() == [2.0]

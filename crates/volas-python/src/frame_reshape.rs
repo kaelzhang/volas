@@ -205,8 +205,9 @@ impl PyDataFrame {
     /// per column via ``cumulators``. A cached directive column is not carried (it
     /// is computed over the coarse bars when requested there). If the source already has a ``time_frame``,
     /// the target must be a whole multiple of it (e.g. 5m→15m, not 5m→7m, and not
-    /// a week/3-day into a month). The same target re-aggregates the current data
-    /// rows with the requested cumulators, just like any other target.
+    /// a week/3-day into a month). The same target requires identical effective
+    /// cumulators: it copies the data columns and keeps the open fine bars;
+    /// different cumulators raise before any change.
     ///
     /// Args:
     ///     time_frame (str | TimeFrame): the target bucket, e.g. ``'1d'``,
@@ -244,6 +245,16 @@ impl PyDataFrame {
             view.names().iter().filter(|n| !view.is_computed(n)).cloned().collect();
         let base = view.select(&data).map_err(pyerr)?;
         let spec = build_agg_spec_for(cumulators, Some(base.names()))?;
+        if let Some(tfs) = &self.tf {
+            if tfs.time_frame() == target {
+                if !tfs.same_cumulators(&spec, base.names()) {
+                    return Err(PyValueError::new_err(
+                        "cannot cumulate to the same time frame with different cumulators",
+                    ));
+                }
+                return Ok(PyDataFrame { inner: base, tf: Some(tfs.clone()), window: None });
+            }
+        }
         let cum = Cumulator::from_frame(&base, target, spec.clone()).map_err(pyerr)?;
         let (frame, open, aggregate) = cum.into_parts().map_err(pyerr)?;
         // The result is a fresh frame (no cached directive columns -> cursor 0)
