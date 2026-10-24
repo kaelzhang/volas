@@ -4,12 +4,13 @@ import json
 import os
 from pathlib import Path
 import shutil
+import platform
 import subprocess
 import sys
 
 import pytest
 
-from test.pgo_toolchain import ROOT, LLVM, clean_env
+from test.pgo_toolchain import ROOT, HOST, LLVM, clean_env
 
 
 @pytest.mark.parametrize("arch", ["aarch64", "x86_64"])
@@ -138,12 +139,14 @@ def test_real_cargo_redirect_with_stale_probes(tmp_path, gate):
     scripts = tmp_path / "scripts"
     shutil.copytree(ROOT / "scripts", scripts)
     (scripts / "asm_baseline.txt").write_text(
-        "# arch: arm64)\nprobe_ma exact 1\nprobe_ema exact 1\nprobe_str_eq_scan max 1\n"
+        f"# arch: {platform.machine()})\nprobe_ma exact 1\nprobe_ema exact 1\nprobe_str_eq_scan max 1\n"
     )
     (scripts / "hot_asm_inventory.txt").write_text(
         "volas-core|execute|max|regression\n"
     )
-    (scripts / "hot_asm_baseline.txt").write_text("# arch: arm64)\nexecute max 1\n")
+    (scripts / "hot_asm_baseline.txt").write_text(
+        f"# arch: {platform.machine()})\nexecute max 1\n"
+    )
     (tmp_path / "Cargo.toml").write_text(
         '[workspace]\nmembers=["volas-core","volas-compute"]\nresolver="2"\n'
     )
@@ -160,8 +163,15 @@ def test_real_cargo_redirect_with_stale_probes(tmp_path, gate):
         (p / "src/lib.rs").write_text(
             '#[inline(never)]\npub fn execute() { unsafe { core::arch::asm!("nop", "nop"); } }\n'
         )
+        prefix = "_" if sys.platform == "darwin" else ""
+        assembly = ".text\n" + "".join(
+            f".globl {prefix}{name}\n{prefix}{name}:\nnop\nret\n"
+            for name in ("probe_ma", "probe_ema", "probe_str_eq_scan")
+        )
         (p / f"examples/{example}.rs").write_text(
-            'core::arch::global_asm!(".globl _probe_ma\\n_probe_ma:\\nnop\\nret\\n.globl _probe_ema\\n_probe_ema:\\nnop\\nret\\n.globl _probe_str_eq_scan\\n_probe_str_eq_scan:\\nnop\\nret"); extern "C" { fn probe_ma(); fn probe_ema(); fn probe_str_eq_scan(); } fn main() { unsafe { probe_ma(); probe_ema(); probe_str_eq_scan(); } }\n'
+            "core::arch::global_asm!(" + json.dumps(assembly) + ");"
+            ' extern "C" { fn probe_ma(); fn probe_ema(); fn probe_str_eq_scan(); }'
+            " fn main() { unsafe { probe_ma(); probe_ema(); probe_str_eq_scan(); } }\n"
         )
     (tmp_path / ".cargo").mkdir()
     redirect = tmp_path / "cargo redirected"
@@ -179,8 +189,13 @@ def test_real_cargo_redirect_with_stale_probes(tmp_path, gate):
     assert Path(metadata["target_directory"]) == redirect
     # Compile stale probes that pass the baseline into the old default location.
     source = tmp_path / "stale.s"
+    prefix = "_" if sys.platform == "darwin" else ""
     source.write_text(
-        ".text\n.globl _probe_ma\n_probe_ma:\nret\n.globl _probe_ema\n_probe_ema:\nret\n.globl _probe_str_eq_scan\n_probe_str_eq_scan:\nret\n"
+        ".text\n"
+        + "".join(
+            f".globl {prefix}{name}\n{prefix}{name}:\nret\n"
+            for name in ("probe_ma", "probe_ema", "probe_str_eq_scan")
+        )
     )
     stale = tmp_path / "target/release/examples"
     stale.mkdir(parents=True)
@@ -189,7 +204,7 @@ def test_real_cargo_redirect_with_stale_probes(tmp_path, gate):
             [
                 "clang",
                 "-target",
-                "aarch64-linux-gnu",
+                HOST,
                 "-c",
                 str(source),
                 "-o",

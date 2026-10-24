@@ -1,5 +1,6 @@
 """PGO asm tooling contracts."""
 
+import platform
 from pathlib import Path
 
 import pytest
@@ -117,7 +118,7 @@ def test_opcode_target_uses_address_operand(tmp_path, monkeypatch, opcode, opera
 
 
 @pytest.mark.parametrize("changed_target", [False, True])
-def test_real_hot_shell_rejects_empty_or_reads_built_target(tmp_path, changed_target):
+def test_real_hot_shell_rejects_empty_or_unbound_target(tmp_path, changed_target):
     import os
     import shutil
     import subprocess
@@ -129,7 +130,9 @@ def test_real_hot_shell_rejects_empty_or_reads_built_target(tmp_path, changed_ta
         shutil.copy2(p, scripts / p.name)
     shutil.copy2(ROOT / "scripts/hot_path_asm.sh", scripts)
     (scripts / "hot_asm_inventory.txt").write_text("volas-core|execute|max|test\n")
-    (scripts / "hot_asm_baseline.txt").write_text("# arch: arm64)\nexecute max 1\n")
+    (scripts / "hot_asm_baseline.txt").write_text(
+        f"# arch: {platform.machine()})\nexecute max 1\n"
+    )
     target = tmp_path / "target"
     deps = target / "release/deps"
     deps.mkdir(parents=True)
@@ -144,7 +147,7 @@ def test_real_hot_shell_rejects_empty_or_reads_built_target(tmp_path, changed_ta
     instructions = "\tret\n" if changed_target else ""
     (bin_ / "cargo").write_text(f"""#!{sys.executable}
 import os,pathlib,sys
-p=pathlib.Path(os.environ['CARGO_TARGET_DIR'])/'aarch64-apple-darwin/release/deps'
+p=pathlib.Path(os.environ['CARGO_TARGET_DIR'])/'cross-target/release/deps'
 p.mkdir(parents=True,exist_ok=True)
 (p/'volas_core-built.s').write_text('_execute17h123456E:\\n.cfi_startproc\\n\\tnop\\n\\tret\\n.cfi_endproc\\n')
 for a in sys.argv:
@@ -163,7 +166,7 @@ for a in sys.argv:
     env.pop("RUSTFLAGS", None)
     env.pop("CARGO_ENCODED_RUSTFLAGS", None)
     if changed_target:
-        env["CARGO_BUILD_TARGET"] = "aarch64-apple-darwin"
+        env["CARGO_BUILD_TARGET"] = "cross-target"
     result = subprocess.run(
         ["bash", str(scripts / "hot_path_asm.sh"), "check"],
         env=env,
@@ -171,7 +174,10 @@ for a in sys.argv:
         text=True,
     )
     assert result.returncode != 0, result.stdout
-    if not changed_target:
+    if changed_target:
+        assert "ambient build overrides rejected" in result.stderr
+        assert "CARGO_BUILD_TARGET" in result.stderr
+    else:
         assert "empty" in result.stderr or "instruction" in result.stderr
 
 
