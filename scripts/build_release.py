@@ -37,7 +37,7 @@ from scripts.build_config import (  # noqa: E402
     validate_flags,
 )
 from scripts.pgo_diagnostics import audit, coverage  # noqa: E402
-from scripts import pgo_dependencies  # noqa: E402
+from scripts import build_install, pgo_dependencies  # noqa: E402
 
 
 def flag_environment(flags):
@@ -279,9 +279,22 @@ def build(root, artifacts, mode, target, ident, profile=None):
         "native": str(lib),
         "native_sha256": digest(lib),
     }
-    write(stage / "site/volas-build.json", manifest)
+    build_install.publish(stage / "site", manifest)
     write(stage / "build.json", manifest)
     return stage, manifest
+
+
+def install_final(manifest, artifacts):
+    run(
+        [
+            sys.executable,
+            DRIVER / "scripts/build_install.py",
+            "install",
+            artifacts / "final.json",
+        ],
+        artifacts / "install-final.log",
+        artifacts,
+    )
 
 
 def main():
@@ -442,24 +455,10 @@ def main():
     )
     if list(probe.iterdir()):
         raise ValueError("final wheel is instrumented")
-    write(stage / "site/volas-build.json", manifest)
+    build_install.publish(stage / "site", manifest)
     write(artifacts / "final.json", manifest)
     if args.install:
-        run(
-            [
-                sys.executable,
-                "-m",
-                "pip",
-                "install",
-                "--no-deps",
-                "--force-reinstall",
-                manifest["wheel"],
-            ],
-            artifacts / "install-final.log",
-            artifacts,
-        )
-        installed_manifest = Path(sysconfig.get_path("purelib")) / "volas-build.json"
-        write(installed_manifest, manifest)
+        install_final(manifest, artifacts)
     delivery = [Path(manifest["wheel"])]
     if args.sdist:
         run(

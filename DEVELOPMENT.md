@@ -216,7 +216,9 @@ profile path. One argument parser accepts `-Cx`, `-C x`, `--codegen=x`, and
 `--codegen x`, normalizing underscores in option names only. The same parser
 checks mode, duplicate feedback options, paths, and forbidden overrides at
 configuration preflight and on recorded compiler invocations. Host crates cannot
-receive feedback flags. Cargo resolves ISA
+receive feedback flags. Rustc `@response-file` arguments are rejected by the same
+validator at configuration preflight, resolved flags and actual argv; response-file
+contents are not supported as build inputs. Cargo resolves ISA
 flags; the owner forwards those resolved flags to maturin so macOS link arguments
 cannot mask FMA or PGO instrumentation. Fat LTO and the release profile stay in Cargo.
 
@@ -238,6 +240,12 @@ not a performance adoption verdict.
 
 `make test` first runs the functional suite against an installed owner-built wheel,
 then measures coverage with separate instrumentation and restores that exact wheel.
+The installation identity owner registers `volas-build.json` in the installed
+distribution RECORD, so replacing a release with `make build-ext` or direct
+`maturin develop` removes the old identity. Coverage validates and saves its own
+copy before installation changes, then restores the wheel and its registered
+identity together. A debug install has no release identity; its full test run
+measures coverage and restores a normal release through the build owner.
 Keep coverage and performance builds sequential.
 
 For code regressions, `make perf-ab BASE=<ref> BUILD_OPT=normal` compares normal
@@ -256,7 +264,14 @@ architectures report unsupported. To inspect a final wheel separately, run
 `python scripts/pgo_asm.py --site <use/site> --output <report-dir>` (optionally
 `--base-report <normal-report-dir>`), or set `PGO_SITE` and `PGO_ASM_OUT` when
 running either assembly gate. Reports contain final addresses, normalized
-instructions, branch edges, calls, stack accesses and NOP counts. PGO differences
+instructions, branch edges, calls, stack accesses and NOP counts. Every selected
+function must contain instructions. Address references use defined symbols,
+section-relative locations (distinguishing same-named sections) and relocation records; unresolved references are
+explicitly marked, rather than trusting LLVM nearest-symbol annotations. Comparison
+reports list added, removed and modified functions across both inventories.
+The integration tests require the active Rust sysroot LLVM tools
+(`rustup component add llvm-tools-preview`) and clang; their Cargo fixtures use
+the host architecture and symbol ABI on both ELF and Mach-O. PGO differences
 require review and performance validation; they never update normal baselines.
 
 `make build-pkg` writes `delivery.json` inside its isolated `BUILD_ARTIFACTS`

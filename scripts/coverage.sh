@@ -57,21 +57,8 @@ fi
 
 # A release wheel is tested directly before the separate coverage build replaces it.
 # Preserve the exact wheel across coverage; coverage is never proof of PGO behavior.
-RELEASE_WHEEL="$("$PYTHON" - <<'PYCODE'
-import json, pathlib, sysconfig
-p = pathlib.Path(sysconfig.get_path('purelib')) / 'volas-build.json'
-if p.exists():
-    from scripts.build_release import digest
-    m = json.loads(p.read_text())
-    if digest(m['wheel']) != m['wheel_sha256']:
-        raise ValueError('release wheel hash mismatch')
-    import importlib
-    native = importlib.import_module('volas_rs.volas_rs')
-    if digest(native.__file__) != m['native_sha256']:
-        raise ValueError('installed native library hash mismatch')
-    print(m['wheel'])
-PYCODE
-)"
+RELEASE_SNAPSHOT="$PWD/$PROF_DIR/release-build.json"
+RELEASE_WHEEL="$("$PYTHON" scripts/build_install.py save "$RELEASE_SNAPSHOT")"
 if [ -n "$RELEASE_WHEEL" ]; then
     echo ">> testing the installed release wheel before coverage: $RELEASE_WHEEL"
     "$PYTHON" -m pytest test/ --benchmark-skip -q --basetemp="$PWD/$PROF_DIR/release-pytest"
@@ -80,15 +67,7 @@ fi
 restore() {
     if [ -n "$RELEASE_WHEEL" ]; then
         echo ">> restoring the exact release wheel..."
-        "$PYTHON" -m pip install --no-deps --force-reinstall "$RELEASE_WHEEL"
-        "$PYTHON" - <<'PYCODE'
-import importlib, json, pathlib, sysconfig
-from scripts.build_release import digest
-m = json.loads((pathlib.Path(sysconfig.get_path('purelib')) / 'volas-build.json').read_text())
-native = importlib.import_module('volas_rs.volas_rs')
-assert digest(native.__file__) == m['native_sha256'], 'release restore hash mismatch'
-print('restored release native SHA-256:', m['native_sha256'])
-PYCODE
+        "$PYTHON" scripts/build_install.py restore "$RELEASE_SNAPSHOT"
     else
         echo ">> restoring a normal release through the build owner..."
         env -u RUSTFLAGS -u LLVM_PROFILE_FILE \
