@@ -22,3 +22,19 @@ def test_arrow_examples_distinguish_default_borrow_and_owned_snapshot():
         text = path.read_text()
         assert "Series.from_arrow(pa_array, name='close', copy=True)" in text, path
         assert not re.search(r"Series\.from_arrow\(pa_array, name='close'\)[^\n]*(?:owned|快照)", text), path
+
+
+def test_pandas_default_backend_examples_distinguish_int_and_bool_na():
+    import numpy as np
+    import pandas as pd
+    from volas import DataFrame
+
+    result = DataFrame({'i': [1, None], 'b': [True, None]}).to_pandas()
+    assert result['i'].dtype == np.dtype('float64')
+    assert result['i'].iloc[0] == 1 and np.isnan(result['i'].iloc[1])
+    assert result['b'].dtype == pd.BooleanDtype()
+    assert result['b'].iloc[0] and result['b'].iloc[1] is pd.NA
+    for path in (GUIDE, GUIDE.parents[2] / 'docs' / 'interop.md'):
+        line, = [line for line in path.read_text().splitlines() if line.startswith('pdf = df.to_pandas()') and ('backend:' in line or '后端：' in line)]
+        assert 'int/bool' not in line, path
+        assert all(word in line for word in ('int', 'float64', 'NaN', 'bool', 'boolean', 'pd.NA')), path

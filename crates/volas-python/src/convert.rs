@@ -31,8 +31,8 @@ pub(crate) fn column_into_numpy<'py>(py: Python<'py>, col: Column) -> PyResult<B
 
 /// A column as a pandas array for `to_pandas`. With `nullable`, an int/bool
 /// column becomes a pandas masked `Int64` / `Int32` / `boolean` (a faithful,
-/// lossless NA round-trip); otherwise it is the numpy export (a missing value
-/// becomes NaN, like `Int64.to_numpy()`).
+/// lossless NA round-trip); otherwise integers use the NumPy export (NA becomes
+/// NaN) while bool with NA remains masked `boolean` with `pd.NA`.
 pub(crate) fn column_to_pandas<'py>(
     py: Python<'py>,
     pd: &Bound<'py, PyModule>,
@@ -388,19 +388,27 @@ pub(crate) fn astype_filled<'py>(
         let valid = mask.call_method0("__invert__")?;
         let values = native.get_item(&valid)?;
         let np = native.py().import("numpy")?;
-        let kwargs = PyDict::new(native.py());
-        kwargs.set_item("dtype", if infer_text_width { "object" } else { dtype })?;
-        let target = np.call_method("empty", (native.getattr("shape")?,), Some(&kwargs))?;
-        if values.getattr("size")?.extract::<usize>()? != 0 {
-            let converted = values.call_method1("astype", (dtype,))?;
-            target.set_item(valid, converted)?;
-        }
-        // Every slot is initialized in its destination representation. For
-        // unsized text, infer width from the valid formatted cells and fill.
-        target.set_item(mask, nv)?;
+        // Empty valid selections still carry the source dtype: NumPy resolves
+        // generic time units and flexible widths without reading any NA payload.
+        let converted = values.call_method1("astype", (dtype,))?;
+        let mut resolved = converted.getattr("dtype")?;
         if infer_text_width {
-            return target.call_method1("astype", (dtype,));
+            // Keep the width NumPy chose for valid values, widening for the fill.
+            let fill_kwargs = PyDict::new(native.py());
+            fill_kwargs.set_item("dtype", dtype)?;
+            let fill = np.call_method("asarray", (nv,), Some(&fill_kwargs))?;
+            resolved = np.call_method1("result_type", (&resolved, fill.getattr("dtype")?))?;
         }
+        let kwargs = PyDict::new(native.py());
+        kwargs.set_item("dtype", resolved)?;
+        // astype expands subarray dtypes into trailing dimensions. Boolean
+        // selection flattened the source axes, so retain only those new axes.
+        let mut shape = native.getattr("shape")?.extract::<Vec<usize>>()?;
+        let converted_shape = converted.getattr("shape")?.extract::<Vec<usize>>()?;
+        shape.extend_from_slice(&converted_shape[1..]);
+        let target = np.call_method("empty", (PyTuple::new(native.py(), shape)?,), Some(&kwargs))?;
+        target.set_item(valid, converted)?;
+        target.set_item(mask, nv)?;
         Ok(target)
     } else {
         native.call_method1("astype", (dtype,))
@@ -479,7 +487,9 @@ pub(crate) enum ExportTarget {
     Object,
     /// `kind` `U` / `S` with zero itemsize: text sized from the exported cells.
     UnsizedText,
-    /// Any other kind (fixed-width text, `V` void).
+    /// Raw `V` void (not a record or subarray): preserve native source bytes.
+    Void,
+    /// Any other kind (fixed-width text, records, subarrays).
     Other,
 }
 
@@ -493,6 +503,7 @@ impl ExportTarget {
             "b" => ExportTarget::Bool,
             "M" | "m" => ExportTarget::Temporal,
             "O" => ExportTarget::Object,
+            "V" if dt.getattr("fields")?.is_none() && dt.getattr("subdtype")?.is_none() => ExportTarget::Void,
             "U" | "S" if dt.getattr("itemsize")?.extract::<usize>()? == 0 => ExportTarget::UnsizedText,
             _ => ExportTarget::Other,
         })

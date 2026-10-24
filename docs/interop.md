@@ -10,7 +10,7 @@ from volas import DataFrame
 
 df = DataFrame.from_pandas(pandas_df)  # numeric / bool / str / datetime native; a (tz-aware) DatetimeIndex round-trips;
                                    # a nullable Int64 / boolean / string column reads back as int / bool / str + volas.NA
-pdf = df.to_pandas()               # -> pandas.DataFrame ('numpy' backend: an int/bool column with NA becomes float64 + NaN)
+pdf = df.to_pandas()               # -> pandas.DataFrame ('numpy' backend: int with NA becomes float64 + NaN; bool with NA becomes nullable boolean + pd.NA)
 pdf = df.to_pandas(dtype_backend='numpy_nullable')  # faithful masked Int64 / boolean (a lossless NA round-trip)
 df.to_csv('out.csv', index=True)   # subset of pandas to_csv; returns a str if path=None
 ```
@@ -166,8 +166,12 @@ returns `[1.0, 0.5]`. Integer exports cast directly from native integer values;
 `dtype='int64', na_value=0` preserves values beyond 2⁵³ exactly. Python errors
 from NumPy conversion or scalar boxing propagate to the caller.
 For Frame, Series and `exec`, unsized text dtypes (`'U'`, `'str'`, `'S'`) infer
-their width from valid values and the fill together; explicit widths such as
-`'U2'` keep the requested width, including NumPy's truncation behavior.
+their width from NumPy's valid-slot conversion, widened to fit the fill.
+The resolved dtype is retained before allocation: generic `datetime64` / `M`
+and `timedelta64` / `m` keep a datetime source's unit, and `V` / `V0` keep
+its native itemsize. All-missing columns resolve from an empty array of the
+source dtype without reading missing payloads. Explicit widths such as `'U2'`
+keep the requested width, including NumPy's truncation behavior.
 
 
 **Timezone.** Arrow tables have no *index*, so the frame's index — and its timezone — is

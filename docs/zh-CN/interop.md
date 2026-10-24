@@ -2,7 +2,7 @@
 
 本指南说明 DataFrame / Series 的构造和导出，以及 Row 的边界表示。选择和写入时会校验布尔 Series 键的索引；MaskedArray 的未知布尔信号会抛错。相等检查包含索引，并拒绝混合无时区与有时区的 datetime 索引。返回[中文 README](../../README.zh-CN.md)。
 
-显式指定 NumPy dtype 时，仅转换有效槽，`na_value` 在目标数组中填充；缺失载荷不触发转换错误或警告，全缺失列也如此。例如 `DataFrame({'qty': [1, None]})['qty'].to_numpy(dtype='float64', na_value=0.5)` 返回 `[1.0, 0.5]`。原生整数直接转换，`dtype='int64', na_value=0` 保留超过 2⁵³ 的整数精度；NumPy 调用失败会把原异常传播给调用方。Frame、Series 和 `exec` 的未定宽文本 dtype（`U` / `str` / `S`）由有效值与填充值共同推断宽度；`U2` 等显式宽度保留用户指定宽度，遵循 NumPy 的截断行为。
+显式指定 NumPy dtype 时，仅转换有效槽，`na_value` 在目标数组中填充；缺失载荷不触发转换错误或警告，全缺失列也如此。例如 `DataFrame({'qty': [1, None]})['qty'].to_numpy(dtype='float64', na_value=0.5)` 返回 `[1.0, 0.5]`。原生整数直接转换，`dtype='int64', na_value=0` 保留超过 2⁵³ 的整数精度；NumPy 调用失败会把原异常传播给调用方。Frame、Series 和 `exec` 的未定宽文本 dtype（`U` / `str` / `S`）保留 NumPy 对有效槽解析的宽度，并按填充值需要扩宽；`U2` 等显式宽度保留用户指定宽度，遵循 NumPy 的截断行为。分配前保留转换所得的实际 dtype：通用 `datetime64` / `M`、`timedelta64` / `m` 保留 datetime 源的单位，`V` / `V0` 保留原生 itemsize；全缺失列通过源 dtype 的空数组交给 NumPy 解析，不读取缺失载荷。
 
 ### DataFrame.from_pandas(pdf) -> DataFrame
 
@@ -225,7 +225,7 @@ from volas import DataFrame
 
 df = DataFrame.from_pandas(pandas_df)  # numeric / bool / str / datetime 原生；带时区 DatetimeIndex 可无损往返；
                                    # nullable Int64 / boolean / string 列会读回为 int / bool / str + volas.NA
-pdf = df.to_pandas()               # -> pandas.DataFrame（'numpy' 后端：带 NA 的 int/bool 列变成 float64 + NaN）
+pdf = df.to_pandas()               # -> pandas.DataFrame（'numpy' 后端：带 NA 的 int 列变成 float64 + NaN；带 NA 的 bool 列变成 nullable boolean + pd.NA）
 pdf = df.to_pandas(dtype_backend='numpy_nullable')  # 忠实的 masked Int64 / boolean（一次无损的 NA 往返）
 df.to_csv('out.csv', index=True)   # pandas to_csv 的一个子集；path=None 时返回一个 str
 ```

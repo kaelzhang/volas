@@ -38,8 +38,13 @@ def test_missing_payload_never_casts(entry, error_mode, values, dtype, fill, exp
     with warnings.catch_warnings(), np.errstate(all=error_mode):
         warnings.simplefilter('error')
         got = export(frame, entry, dtype, fill)
-    np.testing.assert_array_equal(got, np.array(expected, dtype=dtype))
-    assert got.dtype == np.array(expected, dtype=dtype).dtype
+    expected = np.array(expected, dtype=dtype)
+    if dtype in ('S', 'U') and entry != 'frame':
+        source = frame['x'].dtype
+        resolved = np.empty(0, dtype='object' if source == 'str' else source).astype(dtype).dtype
+        expected = expected.astype(np.result_type(resolved, expected.dtype))
+    np.testing.assert_array_equal(got, expected)
+    assert got.dtype == expected.dtype
 
 
 @pytest.mark.parametrize('entry', ['frame', 'series', 'exec'])
@@ -64,6 +69,10 @@ def test_all_missing_converts_only_fill(entry, values, dtype, fill):
         warnings.simplefilter('error')
         got = export(frame, entry, dtype, fill)
     expected = np.array([fill, fill], dtype=dtype)
+    if dtype in ('S', 'U') and entry != 'frame':
+        source = frame['x'].dtype
+        resolved = np.empty(0, dtype='object' if source == 'str' else source).astype(dtype).dtype
+        expected = expected.astype(np.result_type(resolved, expected.dtype))
     np.testing.assert_array_equal(got, expected)
     assert got.dtype == expected.dtype
 

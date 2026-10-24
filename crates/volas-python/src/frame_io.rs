@@ -169,8 +169,8 @@ impl PyDataFrame {
     pub(crate) fn to_pandas<'py>(&self, py: Python<'py>, dtype_backend: &str) -> PyResult<Bound<'py, PyAny>> {
         let view = self.read()?;
         let df = view.as_ref();
-        // 'numpy' (default): an int/bool column with NA exports as float64+NaN, the
-        // most ecosystem-compatible form. 'numpy_nullable': a faithful, lossless
+        // 'numpy' (default): int with NA exports as float64+NaN; bool with NA
+        // stays masked boolean+pd.NA. 'numpy_nullable': a faithful, lossless
         // masked Int64 / boolean. Mirrors pandas' own `dtype_backend`.
         let nullable = match dtype_backend {
             "numpy" => false,
@@ -364,6 +364,13 @@ impl PyDataFrame {
             // text / other target formats those same typed cells.
             match target {
                 ExportTarget::Object => return fill_na_2d(object_array(py, df)?, mask, nv),
+                ExportTarget::Void if !cols.is_empty() => {
+                    // Convert each column through the shared owner before
+                    // stacking: numeric promotion would change its native bytes.
+                    let arrays = cols.iter().map(|c| column_to_numpy_with(py, c, Some(dt), nv))
+                        .collect::<PyResult<Vec<_>>>()?;
+                    return py.import("numpy")?.call_method1("column_stack", (PyList::new(py, arrays)?,));
+                }
                 ExportTarget::UnsizedText | ExportTarget::Other => {
                     return astype_filled(object_array(py, df)?, dt, mask, nv,
                         target == ExportTarget::UnsizedText)
@@ -410,6 +417,15 @@ impl PyDataFrame {
                     .map_err(|e| PyValueError::new_err(e.to_string()))?
                     .into_pyarray(py)
                     .into_any()
+            };
+            // A datetime source's unit is part of its dtype. Keep it through
+            // generic datetime / timedelta resolution instead of casting raw ints.
+            let arr = if target == ExportTarget::Temporal
+                && !cols.is_empty() && cols.iter().all(|c| matches!(c, Column::Datetime(_)))
+            {
+                arr.call_method1("astype", ("datetime64[ns]",))?
+            } else {
+                arr
             };
             return astype_filled(arr, dt, mask, nv, false);
         }

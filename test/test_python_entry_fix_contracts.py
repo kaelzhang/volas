@@ -20,6 +20,10 @@ def test_unsized_text_export_sizes_valid_values_and_fill(entry, dtype, values, f
     expected = np.array([str(fill) if v is None else str(v) for v in values], dtype=dtype)
     if entry == 'frame':
         expected = expected.reshape(-1, 1)
+    else:
+        source = df['x'].dtype
+        resolved = np.empty(0, dtype='object' if source == 'str' else source).astype(dtype).dtype
+        expected = expected.astype(np.result_type(resolved, expected.dtype))
     np.testing.assert_array_equal(got, expected)
     assert got.dtype == expected.dtype
 
