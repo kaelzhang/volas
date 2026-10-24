@@ -7,8 +7,8 @@
 //! copied), and records it, so the record is exactly the columns the command read: the
 //! missing-row rule (`crate::complete`) decides from it, and reruns the arm over the
 //! complete rows of those same columns, without a second lookup, evaluation or
-//! conversion. A boolean operand is read and recorded the same way (its truths as
-//! `1` / `0`, a missing truth as NaN).
+//! conversion. A boolean operand records its numeric values too (bool as `1` / `0`,
+//! NA as NaN), converting to truths only when handed to its boolean kernel.
 //!
 //! `Operands` is the one owner of the kernels' shared precondition — every series a
 //! command's arm receives has the same length: the frame's height, the rows of the
@@ -312,15 +312,13 @@ impl<'a> Operands<'a> {
                         .ok_or_else(|| VolasError::Value("a boolean series argument is required".into()))?;
                     let col = execute_node(self.operand_frame(), node)?;
                     require_numeric(&col)?;
-                    let truths = (0..col.len()).map(|i| match col.truth_at(i) {
-                        Some(t) => f64::from(u8::from(t)),
-                        None => f64::NAN,
-                    });
-                    Ok(Read { values: Cow::Owned(truths.collect()), column: None, known_missing: Cell::new(None) })
+                    // Truth only distinguishes zero from nonzero, so even an int64
+                    // outside the arithmetic f64 domain converts without losing truth.
+                    Ok(Read { values: Cow::Owned(col.to_f64_vec()), column: None, known_missing: Cell::new(None) })
                 })?;
                 self.hand_out(read)?
         };
-        Ok(values.iter().map(|&v| (!volas_compute::missing::is_missing(v)).then_some(v != 0.0)).collect())
+        Ok(values.iter().map(|&v| crate::element::Value::Float(v).truth()).collect())
     }
 
     /// Decide once from the input columns' remembered all-finite facts, scanning
