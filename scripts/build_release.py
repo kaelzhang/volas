@@ -279,7 +279,7 @@ def build(root, artifacts, mode, target, ident, profile=None):
         "native": str(lib),
         "native_sha256": digest(lib),
     }
-    build_install.publish(stage / "site", manifest)
+    # Intermediate records are not authorization for performance consumption.
     write(stage / "build.json", manifest)
     return stage, manifest
 

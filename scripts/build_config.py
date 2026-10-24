@@ -278,6 +278,8 @@ def reject_response_files(flags):
 def validate_flags(flags, mode, feedback=None, owned_codegen=()):
     reject_response_files(flags)
     parsed = codegen_flags(flags)
+    if any(f.split("=", 1)[0] == "instrument-coverage" for f in parsed):
+        raise ValueError("coverage instrumentation is forbidden in release builds")
     actual = [
         f for f in parsed if f.split("=", 1)[0] in ("profile-generate", "profile-use")
     ]

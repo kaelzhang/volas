@@ -216,7 +216,8 @@ profile path. One argument parser accepts `-Cx`, `-C x`, `--codegen=x`, and
 `--codegen x`, normalizing underscores in option names only. The same parser
 checks mode, duplicate feedback options, paths, and forbidden overrides at
 configuration preflight and on recorded compiler invocations. Host crates cannot
-receive feedback flags. Rustc `@response-file` arguments are rejected by the same
+receive feedback flags. Coverage instrumentation is rejected in every release mode.
+Rustc `@response-file` arguments are rejected by the same
 validator at configuration preflight, resolved flags and actual argv; response-file
 contents are not supported as build inputs. Cargo resolves ISA
 flags; the owner forwards those resolved flags to maturin so macOS link arguments
@@ -240,6 +241,10 @@ not a performance adoption verdict.
 
 `make test` first runs the functional suite against an installed owner-built wheel,
 then measures coverage with separate instrumentation and restores that exact wheel.
+Build stages retain intermediate records in `build.json`. Only final normal/use
+sites receive a consumable `volas-build.json`, after provenance, smoke and
+uninstrumented checks all succeed; generate sites have no consumable identity.
+Failed final checks leave a site that both performance entry points reject.
 The installation identity owner registers `volas-build.json` in the installed
 distribution RECORD, so replacing a release with `make build-ext` or direct
 `maturin develop` removes the old identity. Coverage validates and saves its own
@@ -269,6 +274,11 @@ function must contain instructions. Address references use defined symbols,
 section-relative locations (distinguishing same-named sections) and relocation records; unresolved references are
 explicitly marked, rather than trusting LLVM nearest-symbol annotations. Comparison
 reports list added, removed and modified functions across both inventories.
+The reference owner resolves ARM64 ADRP plus ADD/LDR page offsets and x86
+RIP-relative displacements to their reached symbol and offset. Page definitions
+are tracked within basic blocks until register writes or control transfers.
+Address-only moves compare equal; target changes and non-address immediates
+remain visible.
 The integration tests require the active Rust sysroot LLVM tools
 (`rustup component add llvm-tools-preview`) and clang; their Cargo fixtures use
 the host architecture and symbol ABI on both ELF and Mach-O. PGO differences
