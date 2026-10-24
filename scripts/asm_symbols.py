@@ -11,15 +11,24 @@ import sys
 def parse(text):
     functions = {}
     current = None
+    section = None
     for line in text.splitlines():
+        heading = re.match(r"Disassembly of section (.+):", line)
+        if heading:
+            section = heading[1].split(",")[-1]
+            current = None
         header = re.match(r"^([0-9a-f]+) <(.+)>:$", line)
         if header:
             address, symbol = header.groups()
-            current = {"address": int(address, 16), "instructions": []}
+            current = {
+                "address": int(address, 16),
+                "section": section,
+                "instructions": [],
+            }
             functions[symbol] = current
         elif current is not None:
             inst = re.match(r"^\s*([0-9a-f]+):\s+(.*)$", line)
-            if inst:
+            if inst and not re.match(r"(?:R_|\w+_RELOC_)", inst[2]):
                 current["instructions"].append(
                     {"address": int(inst[1], 16), "text": inst[2]}
                 )

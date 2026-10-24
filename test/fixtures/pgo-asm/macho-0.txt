@@ -1,0 +1,51 @@
+
+linked.dylib:	file format mach-o arm64
+
+Sections:
+Idx Name            Size     VMA              Type
+  0 __text          00000018 00000000000004c0 TEXT
+  1 __stubs         0000000c 00000000000004d8 TEXT
+  2 __stub_helper   00000024 00000000000004e4 TEXT
+  3 __got           00000008 0000000000004000 DATA
+  4 __la_symbol_ptr 00000008 0000000000008000 DATA
+  5 __data          00005018 0000000000008008 DATA
+
+SYMBOL TABLE:
+0000000005614542      d  *UND* .hidden radr://5614542
+0000000000008010 g     O __DATA,__data _named
+00000000000004d4 g     F __TEXT,__text _volas_core::frame::dispatch::closure
+00000000000004c0 g     F __TEXT,__text _volas_core::frame::execute
+0000000000000000         *UND* _foreign
+0000000000000000         *UND* dyld_stub_binder
+
+Disassembly of section __TEXT,__text:
+
+00000000000004c0 <_volas_core::frame::execute>:
+     4c0:      	adrp	x0, 0x8000 <dyld_stub_binder+0x8000>
+     4c4:      	add	x0, x0, #0x10
+     4c8:      	adrp	x1, 0xd000 <_named+0x4ff0>
+     4cc:      	bl	0x4d8 <dyld_stub_binder+0x4d8>
+     4d0:      	ret
+
+00000000000004d4 <_volas_core::frame::dispatch::closure>:
+     4d4:      	ret
+
+Disassembly of section __TEXT,__stubs:
+
+00000000000004d8 <__stubs>:
+     4d8:      	adrp	x16, 0x8000 <dyld_stub_binder+0x8000>
+     4dc:      	ldr	x16, [x16]
+     4e0:      	br	x16
+
+Disassembly of section __TEXT,__stub_helper:
+
+00000000000004e4 <__stub_helper>:
+     4e4:      	adrp	x17, 0x8000 <dyld_stub_binder+0x8000>
+     4e8:      	add	x17, x17, #0x8
+     4ec:      	stp	x16, x17, [sp, #-0x10]!
+     4f0:      	adrp	x16, 0x4000 <dyld_stub_binder+0x4000>
+     4f4:      	ldr	x16, [x16]
+     4f8:      	br	x16
+     4fc:      	ldr	w16, 0x504 <__stub_helper+0x20>
+     500:      	b	0x4e4 <__stub_helper>
+     504:      	udf	#0x0

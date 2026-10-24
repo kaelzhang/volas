@@ -11,6 +11,7 @@ from build_release import output
 
 
 from asm_symbols import is_branch, is_call, parse, target_operand
+from asm_references import References
 
 
 def main():
@@ -33,11 +34,22 @@ def main():
     )
     lib = next(args.site.rglob("volas_rs*.so"))
     text = output(
-        [str(objdump), "--disassemble", "--demangle", "--no-show-raw-insn", str(lib)]
+        [
+            str(objdump),
+            "--disassemble",
+            "--demangle",
+            "--no-show-raw-insn",
+            "--section-headers",
+            "--private-headers",
+            "--syms",
+            "--reloc",
+            str(lib),
+        ]
     )
     args.output.mkdir(parents=True, exist_ok=True)
     (args.output / "final-library.asm").write_text(text + "\n")
     functions = parse(text)
+    references = References(text, functions)
     inventory = [
         line.split("|")[1]
         for line in Path(__file__)
@@ -57,21 +69,22 @@ def main():
             missing.append(name)
         for symbol, f in hits.items():
             ins = f["instructions"]
+            if not ins:
+                raise ValueError(f"empty instruction body in final library: {symbol}")
             addresses = {i["address"]: n for n, i in enumerate(ins)}
             normalized, edges, calls, spills = [], [], [], []
             for n, i in enumerate(ins):
                 body = i["text"]
                 target = target_operand(body)
-                if target and int(target[1], 16) in addresses:
+                if (
+                    target
+                    and int(target[1], 16) in addresses
+                    and not references.instruction_relocations(i, f)
+                ):
                     dest = addresses[int(target[1], 16)]
                     if is_branch(body):
                         edges.append([n, dest])
-                    body = (
-                        body[: target.start()]
-                        + f"@instruction{dest}"
-                        + body[target.end() :]
-                    )
-                body = re.sub(r"0x[0-9a-f]+ <([^>]+)>", r"<\1>", body)
+                body = references.normalize(i, f, addresses)
                 normalized.append(body)
                 if is_call(body):
                     calls.append(body)
@@ -96,11 +109,16 @@ def main():
     }
     if args.base_report:
         base = json.loads((args.base_report / "report.json").read_text())["functions"]
-        report["changed"] = [
+        report["added"] = sorted(selected.keys() - base.keys())
+        report["removed"] = sorted(base.keys() - selected.keys())
+        report["modified"] = sorted(
             s
-            for s, f in selected.items()
-            if s not in base or f["normalized"] != base[s]["normalized"]
-        ]
+            for s in selected.keys() & base.keys()
+            if selected[s]["normalized"] != base[s]["normalized"]
+        )
+        report["changed"] = sorted(
+            report["added"] + report["removed"] + report["modified"]
+        )
     (args.output / "report.json").write_text(json.dumps(report, indent=2) + "\n")
     if missing:
         raise ValueError(
