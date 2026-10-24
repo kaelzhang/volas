@@ -640,8 +640,8 @@ pub fn rci(close: &[f64], period: usize) -> Vec<f64> {
 /// `p` is a pivot when its `source` value is the STRICT extremum of the window
 /// `[p-left, p+right]` (every other bar strictly lower for a high / strictly
 /// higher for a low — a tie disqualifies it, matching Pine). The pivot's value
-/// is emitted at the CONFIRMATION bar `p+right` (non-causal: it needs `right`
-/// future bars), `NaN` everywhere else. A `NaN` anywhere in the window
+/// is emitted at the CONFIRMATION bar `p+right`: causal, using only bars observed
+/// through that row, never back-filled to `p`. It is `NaN` everywhere else. A missing input anywhere in the window
 /// disqualifies the pivot. Lookback `left+right`. O(n·(left+right)).
 pub fn pivot(source: &[f64], left: usize, right: usize, high: bool) -> Vec<f64> {
     pivot_with(source, left, right, high, false)
