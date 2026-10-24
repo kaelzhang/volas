@@ -639,14 +639,14 @@ integer or bool array) — give `na_value` to fill instead.
   - `'object'` (or `'O'`) — a lossless 2-D array of typed cells (number / `str` /
     `Timestamp` / `volas.NA`); the only dtype that keeps a `str` or datetime column intact.
   - `'int64'`, `'int32'`, `'int16'`, `'int8'` (and the unsigned `'uint*'`) — the **exact**
-    `i64` channel (a large int and a datetime's epoch-ns survive without a `float` round
-    trip). Over a frame with missing values this **raises** unless `na_value` is given.
-  - `'float64'`, `'float32'`, `'float16'` — the (lossy) `float` channel: a missing cell
+    per-column native cast (large ints and datetime epoch-ns never pass through
+    a common float matrix). Over a frame with missing values this **raises** unless `na_value` is given.
+  - `'float64'`, `'float32'`, `'float16'` — a per-column (lossy) float cast: a missing cell
     is `NaN`, a datetime past 2⁵³ ns quantises.
   - `'bool'` — boolean: each value's truth (`0.5` → `True`). Over a frame with missing
     values this **raises** unless `na_value` is given.
   - `'datetime64[ns]'` — datetime nanoseconds; a `NaT` cell is preserved.
-  - a text dtype (`'U'` / `'S'`) — each typed cell formatted (`1.5` → `'1.5'`).
+  - a text dtype (`'U'` / `'S'`) — NumPy formats each source column (`1.5` → `'1.5'`).
   - A `str` column rejects every numeric / temporal dtype — use `'object'`.
 - **na_value** `Any` — the value substituted for each missing cell. Default: the
   NA-model representation (`NaN` / `NaT` / `volas.NA`).

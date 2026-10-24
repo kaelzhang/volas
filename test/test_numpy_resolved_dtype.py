@@ -68,8 +68,8 @@ def test_unsized_void_retains_source_itemsize_and_bits(entry, all_missing, sourc
 def test_unsized_text_retains_resolved_width_and_fits_fill(entry, all_missing, dtype, fill):
     source = np.array([1, 0], dtype='int64')
     mask = np.array([all_missing, True])
-    # Frame text uses typed object cells; Series / exec use the native int buffer.
-    native = source.astype(object) if entry == 'frame' else source
+    # All explicit entry points retain the same native source array.
+    native = source
     converted = native[~mask].astype(dtype)
     resolved = np.result_type(converted.dtype, np.asarray(fill, dtype=dtype).dtype)
     expected = np.empty(2, dtype=resolved)
@@ -95,10 +95,6 @@ def test_numpy_target_kind_resolution_sweep(entry, all_missing, dtype):
     mask = np.array([all_missing, True])
     kind = np.dtype(dtype).kind
     native = source
-    if entry == 'frame' and kind in 'SU':
-        native = source.astype(object)
-    elif entry == 'frame' and kind in 'fc':
-        native = source.astype('float64')
     # The independent oracle performs only valid-slot conversion, then allocates
     # using its resolved dtype. NumPy rejects some source/target combinations.
     try:

@@ -445,6 +445,8 @@ raw = [c for c in df.columns if not df.is_computed(c)]  # ['open', 'high', 'low'
 
 [DataFrame / Series / Row 导出与互操作](docs/zh-CN/interop.md#dfto_numpydtypenone-na_value---npndarray)。
 
+显式 NumPy 导出在解析共同目标 dtype 前保留每列的源表示和时间单位，逐列转换有效槽并在目标中填充缺失值；规则和示例见[互操作指南](docs/zh-CN/interop.md#numpy-逐列目标转换)。
+
 ### 实时累积——一个 tf-aware DataFrame
 
 在**实时**流式场景中，给 DataFrame 指定一个 `time_frame`，再把更细的 bar `append` 进去，而不是每个 tick 都重新累积整段历史。

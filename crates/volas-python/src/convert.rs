@@ -6,7 +6,7 @@ use numpy::IntoPyArray;
 use pyo3::exceptions::{PyIndexError, PyKeyError, PyTypeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::sync::GILOnceCell;
-use pyo3::types::{PyDict, PyList, PyTuple};
+use pyo3::types::{PyDict, PyList, PySlice, PyTuple};
 use volas_core::{
     datetime, Column, DataFrame, DType, Index,
     IndexKind, Scalar, Tz, Validity,
@@ -319,36 +319,14 @@ pub(crate) fn column_to_numpy_with<'py>(
     dtype: Option<&str>,
     na_value: Option<&Bound<'py, PyAny>>,
 ) -> PyResult<Bound<'py, PyAny>> {
-    // `object` is the lossless export: each cell its own typed value (a UTC
-    // `Timestamp`, an exact int, `volas.NA` — or `na_value` — for a missing cell),
-    // exactly like a frame's `to_numpy(dtype="object")`.
-    let target = dtype.map(|dt| ExportTarget::of(py, dt)).transpose()?;
-    if target == Some(ExportTarget::Object) {
-        let cells = (0..col.len()).map(|i| match na_value {
-            Some(nv) if !col.is_valid(i) => Ok(nv.clone().unbind()),
-            _ => scalar_to_py(py, col, i),
-        });
-        let list = PyList::new(py, cells.map(ExportCell))?;
-        let kwargs = PyDict::new(py);
-        kwargs.set_item("dtype", "object")?;
-        return py.import("numpy")?.call_method("array", (list,), Some(&kwargs));
+    if let Some(dt) = dtype {
+        return columns_to_numpy_with(py, std::slice::from_ref(col), col.len(), dt, na_value, false);
     }
-    let Some(nv) = na_value else {
-        return match dtype {
-            None => column_to_numpy(py, col),
-            Some(dt) => astype_checked(py, col, dt),
-        };
+    let Some(nv) = na_value.filter(|_| col.has_missing()) else {
+        return column_to_numpy(py, col);
     };
-    if !col.has_missing() {
-        // `na_value` is irrelevant with no missing cell — a plain typed export.
-        let arr = column_to_numpy(py, col)?;
-        return match dtype {
-            Some(dt) => arr.call_method1("astype", (dt,)),
-            None => Ok(arr),
-        };
-    }
-    // Without a target dtype, a bool fill keeps bool; other fills need object.
-    if let (Column::Bool(v, val), None) = (col, dtype) {
+    // The default NA model is independent of explicit target conversion.
+    if let Column::Bool(v, val) = col {
         let cells = bool_cells(py, v, val, nv)?;
         return if nv.is_instance_of::<pyo3::types::PyBool>() || type_is_numpy_bool(nv) {
             cells.call_method1("astype", ("bool",))
@@ -356,63 +334,140 @@ pub(crate) fn column_to_numpy_with<'py>(
             Ok(cells)
         };
     }
-    let mask = na_mask(py, col);
-    match dtype {
-        Some(dt) => {
-            astype_filled(column_values_native(py, col)?, dt, Some(&mask), Some(nv),
-                target == Some(ExportTarget::UnsizedText))
-        },
-        // The NA-model array keeps its default dtype; only the holes change.
-        None => {
-            let base = column_to_numpy(py, col)?;
-            base.set_item(mask, nv)?;
-            Ok(base)
-        }
-    }
+    let base = column_to_numpy(py, col)?;
+    base.set_item(na_mask(py, col), nv)?;
+    Ok(base)
 }
 
-/// One explicit-dtype fill transaction for both Series and Frame exports. Native
-/// values cast directly (no float funnel); the user fill lands in the target dtype.
-/// Unspecified missing payloads must not fail or warn during the intervening cast.
-pub(crate) fn astype_filled<'py>(
-    native: Bound<'py, PyAny>,
+/// A prepared column retains its source representation until the common target
+/// descriptor is known. A fill selects valid slots before any value conversion.
+struct ExportColumn<'py> {
+    values: Bound<'py, PyAny>,
+    missing: Option<Bound<'py, PyAny>>,
+    converted: Option<Bound<'py, PyAny>>,
+}
+
+/// The explicit-dtype conversion owner for Frame, Series and exec. Resolve one
+/// common NumPy target (including units and flexible itemsize), cast each column
+/// from its own source, then fill and assemble directly into the final array.
+/// Never promote source columns to a bare numeric or object matrix first.
+pub(crate) fn columns_to_numpy_with<'py>(
+    py: Python<'py>,
+    cols: &[Column],
+    height: usize,
     dtype: &str,
-    mask: Option<&Bound<'py, PyAny>>,
     na_value: Option<&Bound<'py, PyAny>>,
-    infer_text_width: bool,
+    frame: bool,
 ) -> PyResult<Bound<'py, PyAny>> {
-    if let (Some(mask), Some(nv)) = (mask, na_value) {
-        // Select before casting: even integers / NaT can overflow a narrow
-        // float, and no placeholder is convertible to every NumPy dtype.
-        // Boolean indexing keeps the native dtype and exact integer bits.
-        let valid = mask.call_method0("__invert__")?;
-        let values = native.get_item(&valid)?;
-        let np = native.py().import("numpy")?;
-        // Empty valid selections still carry the source dtype: NumPy resolves
-        // generic time units and flexible widths without reading any NA payload.
-        let converted = values.call_method1("astype", (dtype,))?;
-        let mut resolved = converted.getattr("dtype")?;
-        if infer_text_width {
-            // Keep the width NumPy chose for valid values, widening for the fill.
-            let fill_kwargs = PyDict::new(native.py());
-            fill_kwargs.set_item("dtype", dtype)?;
-            let fill = np.call_method("asarray", (nv,), Some(&fill_kwargs))?;
-            resolved = np.call_method1("result_type", (&resolved, fill.getattr("dtype")?))?;
-        }
-        let kwargs = PyDict::new(native.py());
-        kwargs.set_item("dtype", resolved)?;
-        // astype expands subarray dtypes into trailing dimensions. Boolean
-        // selection flattened the source axes, so retain only those new axes.
-        let mut shape = native.getattr("shape")?.extract::<Vec<usize>>()?;
-        let converted_shape = converted.getattr("shape")?.extract::<Vec<usize>>()?;
-        shape.extend_from_slice(&converted_shape[1..]);
-        let target = np.call_method("empty", (PyTuple::new(native.py(), shape)?,), Some(&kwargs))?;
-        target.set_item(valid, converted)?;
-        target.set_item(mask, nv)?;
-        Ok(target)
-    } else {
-        native.call_method1("astype", (dtype,))
+    let np = py.import("numpy")?;
+    let requested = np.call_method1("dtype", (dtype,))?;
+    let target = ExportTarget::of(&requested)?;
+    if frame && matches!(target, ExportTarget::Float | ExportTarget::Integer | ExportTarget::Bool | ExportTarget::Temporal)
+        && cols.iter().any(|c| matches!(c, Column::Str(..)))
+    {
+        return Err(PyValueError::new_err(format!(
+            "cannot convert a string column to {dtype}; use dtype='object' to keep strings"
+        )));
     }
+    let mut prepared = Vec::with_capacity(cols.len());
+    for col in cols {
+        let missing = col.has_missing();
+        if na_value.is_none() && missing && target.has_no_na()
+            && !(frame && matches!(col, Column::Datetime(_)))
+        {
+            return Err(no_na_target_err(if frame { "a frame" } else { "a column" }, dtype));
+        }
+        let values = if target == ExportTarget::Object {
+            let cells = (0..col.len()).map(|i| ExportCell(scalar_to_py(py, col, i)));
+            let kwargs = PyDict::new(py);
+            kwargs.set_item("dtype", &requested)?;
+            np.call_method("array", (PyList::new(py, cells)?,), Some(&kwargs))?
+        } else if na_value.is_some() {
+            column_values_native(py, col)?
+        } else if missing && matches!(col, Column::Bool(..)) {
+            // An unknown truth has no non-float representation without a fill.
+            if target != ExportTarget::Float {
+                return Err(bool_na_err());
+            }
+            col.to_f64_vec().into_pyarray(py).into_any()
+        } else if frame && target == ExportTarget::Float && matches!(col, Column::Datetime(_)) {
+            // The documented frame float export maps NaT to NaN.
+            col.to_f64_vec().into_pyarray(py).into_any()
+        } else {
+            column_to_numpy(py, col)?
+        };
+        let mask = (na_value.is_some() && missing).then(|| na_mask(py, col));
+        let values = match &mask {
+            Some(mask) => values.get_item(mask.call_method0("__invert__")?)?,
+            None => values,
+        };
+        prepared.push(ExportColumn { values, missing: mask, converted: None });
+    }
+    // A fully specified descriptor already is the common target. Promotion
+    // would normalize explicit byte order (notably unit datetime / timedelta).
+    let infer = requested.getattr("itemsize")?.extract::<usize>()? == 0
+        || (target == ExportTarget::Temporal
+            && np.call_method1("datetime_data", (&requested,))?.get_item(0)?.extract::<String>()? == "generic");
+    let resolved = if infer && !prepared.is_empty() {
+        let descriptors = PyList::empty(py);
+        for column in &mut prepared {
+            // Empty native arrays resolve units / itemsize without converting
+            // data twice. Object -> unsized text or generic time needs valid values
+            // to resolve width / units; retain that conversion for the final write.
+            let value_dependent = matches!(target, ExportTarget::UnsizedText | ExportTarget::Temporal)
+                && column.values.getattr("dtype")?.getattr("kind")?.extract::<String>()? == "O";
+            let probe = if value_dependent {
+                column.values.clone()
+            } else {
+                column.values.get_item(PySlice::new(py, 0, 0, 1))?
+            };
+            let converted = probe.call_method1("astype", (&requested,))?;
+            descriptors.append(converted.getattr("dtype")?)?;
+            if value_dependent {
+                column.converted = Some(converted);
+            }
+        }
+        if target == ExportTarget::UnsizedText && prepared.iter().any(|c| c.missing.is_some()) {
+            let kwargs = PyDict::new(py);
+            kwargs.set_item("dtype", &requested)?;
+            descriptors.append(np.call_method("asarray", (na_value,), Some(&kwargs))?.getattr("dtype")?)?;
+        }
+        np.call_method1("result_type", PyTuple::new(py, descriptors.iter())?)?
+    } else {
+        requested
+    };
+    let cast_kwargs = PyDict::new(py);
+    cast_kwargs.set_item("copy", false)?;
+    if !frame && prepared[0].missing.is_none() {
+        // A complete 1-D result already is the output; avoid allocating and
+        // copying it again merely to assemble a single column.
+        let column = prepared.remove(0);
+        let values = column.converted.unwrap_or(column.values);
+        return values.call_method("astype", (&resolved,), Some(&cast_kwargs));
+    }
+    let kwargs = PyDict::new(py);
+    kwargs.set_item("dtype", &resolved)?;
+    let shape = if frame { vec![height, cols.len()] } else { vec![height] };
+    // NumPy expands subarray target dimensions itself; retain that descriptor.
+    let output = np.call_method("empty", (PyTuple::new(py, shape)?,), Some(&kwargs))?;
+    for (j, column) in prepared.into_iter().enumerate() {
+        let destination = if frame {
+            output.get_item((PySlice::new(py, 0, height as isize, 1), j))?
+        } else {
+            output.clone()
+        };
+        let converted = match column.converted {
+            Some(converted) => converted,
+            None => column.values.call_method("astype", (&resolved,), Some(&cast_kwargs))?,
+        };
+        if let (Some(mask), Some(nv)) = (column.missing, na_value) {
+            destination.set_item(mask.call_method0("__invert__")?, converted)?;
+            destination.set_item(mask, nv)?;
+        } else {
+            destination.set_item(PySlice::new(py, 0, height as isize, 1), converted)?;
+        }
+    }
+    Ok(output)
 }
 
 /// Whether `v` is a NumPy bool scalar (`numpy.bool_`).
@@ -443,25 +498,6 @@ fn column_values_native<'py>(py: Python<'py>, col: &Column) -> PyResult<Bound<'p
     })
 }
 
-/// Cast an exported NumPy array to `dtype`, but **raise** (pandas-aligned) when the
-/// column holds missing values and `dtype` cannot represent one (integer / bool) —
-/// NumPy would silently write garbage (or `True` for a NaN) instead.
-/// A float target reads a bool column's missing cell as `NaN` (the float channel);
-/// any other target of a bool column holding NA has no form for it.
-pub(crate) fn astype_checked<'py>(py: Python<'py>, col: &Column, dtype: &str) -> PyResult<Bound<'py, PyAny>> {
-    let target = ExportTarget::of(py, dtype)?;
-    if col.has_missing() && target.has_no_na() {
-        return Err(no_na_target_err("a column", dtype));
-    }
-    match col {
-        Column::Bool(_, val) if val.has_nulls() => match target {
-            ExportTarget::Float => col.to_f64_vec().into_pyarray(py).call_method1("astype", (dtype,)),
-            _ => Err(bool_na_err()),
-        },
-        _ => column_to_numpy(py, col)?.call_method1("astype", (dtype,)),
-    }
-}
-
 /// The error for an NA-holding export into a dtype that cannot represent NA.
 pub(crate) fn no_na_target_err(what: &str, dtype: &str) -> PyErr {
     PyValueError::new_err(format!(
@@ -487,15 +523,12 @@ pub(crate) enum ExportTarget {
     Object,
     /// `kind` `U` / `S` with zero itemsize: text sized from the exported cells.
     UnsizedText,
-    /// Raw `V` void (not a record or subarray): preserve native source bytes.
-    Void,
     /// Any other kind (fixed-width text, records, subarrays).
     Other,
 }
 
 impl ExportTarget {
-    pub(crate) fn of(py: Python<'_>, dtype: &str) -> PyResult<ExportTarget> {
-        let dt = py.import("numpy")?.call_method1("dtype", (dtype,))?;
+    fn of(dt: &Bound<'_, PyAny>) -> PyResult<ExportTarget> {
         let kind = dt.getattr("kind")?.extract::<String>()?;
         Ok(match kind.as_str() {
             "f" | "c" => ExportTarget::Float,
@@ -503,7 +536,6 @@ impl ExportTarget {
             "b" => ExportTarget::Bool,
             "M" | "m" => ExportTarget::Temporal,
             "O" => ExportTarget::Object,
-            "V" if dt.getattr("fields")?.is_none() && dt.getattr("subdtype")?.is_none() => ExportTarget::Void,
             "U" | "S" if dt.getattr("itemsize")?.extract::<usize>()? == 0 => ExportTarget::UnsizedText,
             _ => ExportTarget::Other,
         })

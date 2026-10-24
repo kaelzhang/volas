@@ -329,8 +329,8 @@ impl PyDataFrame {
     /// | contains str   | object (typed cells)    | str kept            | **error**           | **error**             |
     ///
     /// So `dtype="object"` is always lossless (each cell its own typed value —
-    /// `Timestamp` / `volas.NA` / str / number), an integer dtype takes the exact
-    /// `i64` channel (datetime never round-trips through `f64`), a float dtype is
+    /// `Timestamp` / `volas.NA` / str / number). Explicit targets convert each
+    /// native column separately (datetime never round-trips through `f64`); a float dtype is
     /// the caller's opt-in lossy export, and a `str` column rejects any numeric
     /// dtype (no numeric meaning) pointing at `dtype="object"`.
     #[pyo3(signature = (dtype = None, na_value = None))]
@@ -345,7 +345,9 @@ impl PyDataFrame {
         let view = self.read()?;
         let df = view.as_ref();
         let cols = df.columns();
-        let has_str = cols.iter().any(|c| matches!(c, Column::Str(..)));
+        if let Some(dt) = dtype {
+            return columns_to_numpy_with(py, cols, df.height(), dt, na_value.as_ref(), true);
+        }
 
         // `na_value` fill plumbing: with a value AND any missing cell, build the 2-D NA
         // mask once and substitute `na_value` into the holes of whichever array is built.
@@ -354,81 +356,6 @@ impl PyDataFrame {
             .then(|| frame_na_mask(py, df))
             .transpose()?;
         let mask = mask.as_ref();
-
-        if let Some(dt) = dtype {
-            // The target family comes from NumPy's resolution of `dt`, never its
-            // spelling ('f8' / 'd' / '<f8' are float64 too).
-            let target = ExportTarget::of(py, dt)?;
-            // `object`: a lossless typed-cell array (never the f64 channel) — the
-            // inspection / interop export that keeps datetime, str and NA intact. A
-            // text / other target formats those same typed cells.
-            match target {
-                ExportTarget::Object => return fill_na_2d(object_array(py, df)?, mask, nv),
-                ExportTarget::Void if !cols.is_empty() => {
-                    // Convert each column through the shared owner before
-                    // stacking: numeric promotion would change its native bytes.
-                    let arrays = cols.iter().map(|c| column_to_numpy_with(py, c, Some(dt), nv))
-                        .collect::<PyResult<Vec<_>>>()?;
-                    return py.import("numpy")?.call_method1("column_stack", (PyList::new(py, arrays)?,));
-                }
-                ExportTarget::UnsizedText | ExportTarget::Other => {
-                    return astype_filled(object_array(py, df)?, dt, mask, nv,
-                        target == ExportTarget::UnsizedText)
-                }
-                _ => {}
-            }
-            // Any numeric / temporal target: a str column has no numeric value
-            // (pandas raises here too), so reject it and point at the object route.
-            if has_str {
-                return Err(PyValueError::new_err(format!(
-                    "cannot convert a string column to {dt}; use dtype='object' to keep strings"
-                )));
-            }
-            // An integer / bool target cannot hold an NA: raise (pandas-aligned) unless
-            // `na_value` gives an explicit fill, exempting datetime columns' NaT sentinel.
-            if nv.is_none()
-                && target.has_no_na()
-                && cols
-                    .iter()
-                    .any(|c| !matches!(c, Column::Datetime(..)) && c.has_missing())
-            {
-                return Err(no_na_target_err("a frame", dt));
-            }
-            // A float / bool target rides the f64 channel — the caller opted into
-            // float (a datetime epoch-ns past 2⁵³ quantises, a NaT becomes NaN), and a
-            // bool tests the true value (0.5 is True), never a truncated integer. An
-            // integer / datetime target takes the EXACT i64 channel so a datetime
-            // exports its true epoch-ns (NaT→i64::MIN) and a large i64 column
-            // survives, instead of an f64 round-trip.
-            let via_f64 = matches!(target, ExportTarget::Float | ExportTarget::Bool);
-            // The two channels carry different Vec element types, so each builds its
-            // own (type-erased) NumPy matrix; target conversion + fill is shared.
-            let arr = if via_f64 {
-                let (data, h, w) = df.to_row_major_f64();
-                ndarray::Array2::from_shape_vec((h, w), data)
-                    .map_err(|e| PyValueError::new_err(e.to_string()))?
-                    .into_pyarray(py)
-                    .into_any()
-            } else {
-                // The i64 channel serves both integer and `datetime64` targets (a
-                // datetime NaT → `i64::MIN` is its documented exact export).
-                let (data, h, w) = df.to_row_major_i64();
-                ndarray::Array2::from_shape_vec((h, w), data)
-                    .map_err(|e| PyValueError::new_err(e.to_string()))?
-                    .into_pyarray(py)
-                    .into_any()
-            };
-            // A datetime source's unit is part of its dtype. Keep it through
-            // generic datetime / timedelta resolution instead of casting raw ints.
-            let arr = if target == ExportTarget::Temporal
-                && !cols.is_empty() && cols.iter().all(|c| matches!(c, Column::Datetime(_)))
-            {
-                arr.call_method1("astype", ("datetime64[ns]",))?
-            } else {
-                arr
-            };
-            return astype_filled(arr, dt, mask, nv, false);
-        }
 
         // Default (no dtype) — the honest representation chosen by the dtypes.
         // Fast path: an entirely numeric/bool frame is exactly the f64 matrix (an
