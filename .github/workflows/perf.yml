@@ -32,8 +32,15 @@ jobs:
         with:
           python-version: "3.12"
 
+      - name: Read build tool versions
+        id: toolchain
+        run: python scripts/check_toolchain.py --versions >> "$GITHUB_OUTPUT"
+
       - name: Set up Rust
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ steps.toolchain.outputs.rust }}
+          components: ${{ steps.toolchain.outputs.components }}
 
       - name: Cache cargo build
         uses: Swatinem/rust-cache@v2
@@ -46,11 +53,14 @@ jobs:
 
       - name: Install dependencies
         run: |
-          python -m pip install --upgrade pip maturin
+          python -m pip install --upgrade pip "maturin==${{ steps.toolchain.outputs.maturin }}"
           # The benchmark module imports the comparison libraries (pandas / polars / TA-Lib)
           # at collection time; the full gate measures every volas section
           # and the release-only cost bounds.
-          pip install -e .[dev,benchmark]
+          python -m pip install --no-build-isolation -e '.[dev,benchmark]'
+
+      - name: Check build prerequisites
+        run: python scripts/check_toolchain.py
 
       - name: Resolve the base commit
         run: |

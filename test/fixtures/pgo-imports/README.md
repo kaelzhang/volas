@@ -1,7 +1,9 @@
-These are unedited dumps of real linked ARM64/x86_64 Mach-O and ELF libraries,
+These are dumps of real linked ARM64/x86_64 Mach-O and ELF libraries,
 using Rust 1.96.0's LLVM 22.1.2 objdump. They include numeric instructions,
 section/symbol tables, relocations, ELF dynamic relocations and Mach-O
-indirect/bind/dyld information. No binary or instruction text was patched.
+indirect/bind/dyld information. Physical trailing whitespace is removed from text captures; tabs inside
+instructions and all decoded data are preserved. No binary or instruction text
+was patched.
 
 `test/pgo_linked_imports.py` contains the assembly source generator and exact
 compiler, linker and objdump commands. `base` imports `foreign`, `target` imports

@@ -14,6 +14,7 @@ import sys
 import sysconfig
 import tempfile
 import time
+import tomllib
 import zipfile
 
 DRIVER = Path(__file__).resolve().parent.parent
@@ -207,6 +208,23 @@ def install(wheel, site, root, log):
     return libs[0]
 
 
+def prepare_runtime(root, artifacts):
+    """Smoke uses project runtime requirements, independent of caller packages."""
+    requirements = tomllib.loads((root / "pyproject.toml").read_text())["project"].get(
+        "dependencies", []
+    )
+    destination = artifacts / "runtime-dependencies"
+    destination.mkdir()
+    if requirements:
+        run(
+            [sys.executable, "-m", "pip", "install", "--no-compile",
+             "--target", destination, *requirements],
+            artifacts / "runtime-dependencies.log",
+            root,
+        )
+    return destination
+
+
 def build(root, artifacts, mode, target, ident, profile=None):
     stage = artifacts / mode
     stage.mkdir(parents=True, exist_ok=False)
@@ -255,7 +273,7 @@ def build(root, artifacts, mode, target, ident, profile=None):
     run(cmd, stage / "build.log", root, env)
     build_log = (stage / "build.log").read_text()
     validate_argv(
-        stage / "build.log", mode, target, feedback, config, stage / "rustc-argv.jsonl"
+        stage / "rustc-argv.jsonl", mode, target, feedback, config
     )
     trained = (
         json.loads(profile.with_suffix(".json").read_text())["coverage"]
@@ -351,12 +369,11 @@ def main():
                 Path(manifest["native"]), stage / "site", manifest["native_sha256"]
             )
             validate_argv(
-                stage / "build.log",
+                stage / "rustc-argv.jsonl",
                 "generate",
                 target,
                 stage / "raw",
                 ident["configuration"],
-                stage / "rustc-argv.jsonl",
             )
             write(artifacts / "generated.json", manifest)
         else:
@@ -439,17 +456,19 @@ def main():
         stage, manifest = build(root, artifacts, "normal", target, ident)
     if identity(root, target)[0] != ident:
         raise ValueError("provenance changed during final build")
+    runtime = prepare_runtime(root, artifacts)
     # A fresh process proves both library identity and absence of instrumentation.
     probe = artifacts / "final-probe"
     probe.mkdir()
     env = dict(
         os.environ,
-        PYTHONPATH=str(stage / "site"),
+        PYTHONPATH=os.pathsep.join(map(str, [stage / "site", runtime])),
         LLVM_PROFILE_FILE=str(probe / "%m-%p.profraw"),
     )
     run(
         [
             sys.executable,
+            "-S",
             DRIVER / "scripts/release_smoke.py",
         ],
         artifacts / "smoke.log",

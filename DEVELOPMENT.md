@@ -35,6 +35,16 @@ installation (`--no-build-isolation`), and runs the full prerequisite check.
 Neither target updates a floating stable toolchain. Continue passing the same
 `PYTHON` to each make command, or export `VOLAS_PYTHON` once.
 
+The release build owner reads runtime requirements from `pyproject.toml` and
+installs them into a fresh artifact-local directory before the final native
+computation smoke. The smoke runs with `-S` against that directory and the staged
+wheel, so it also works in a virtual environment containing only build tools.
+Final wheel installation resolves its runtime dependencies through pip first,
+then reinstalls only the wheel itself, preserving compatible dependency versions. The
+benchmark target prepares its dev and comparison libraries after this build.
+The perf and Pages workflows provision and check the same pinned tools before
+building or considering a skippable BASE comparison.
+
 `make coverage` delegates to `scripts/coverage.sh`. `make benchmark`
 compares pandas, stock-pandas, polars, TA-Lib, and volas where those
 benchmark-only dependencies are installed.

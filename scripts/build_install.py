@@ -72,6 +72,13 @@ def install(data):
     if digest(data["wheel"]) != data["wheel_sha256"]:
         raise ValueError("release wheel hash mismatch")
     subprocess.run(
+        [sys.executable, "-m", "pip", "install", data["wheel"]],
+        check=True,
+    )
+    # Resolve missing dependencies first, keeping compatible installed versions.
+    # Reinstall only this wheel so debug/coverage bytes cannot survive pip's
+    # same-version shortcut, without forcing unrelated dependency replacements.
+    subprocess.run(
         [
             sys.executable,
             "-m",

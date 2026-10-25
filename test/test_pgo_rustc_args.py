@@ -152,7 +152,7 @@ def test_rustc_accepted_spelling_cannot_bypass_policy(
             C.check_cargo_config(tmp_path)
     else:
         with pytest.raises(ValueError, match="feedback|codegen override"):
-            C.validate_argv(None, "normal", target, trace=trace)
+            C.validate_argv(trace, "normal", target)
 
 
 @pytest.mark.parametrize("kind", SPELLINGS)
@@ -180,15 +180,14 @@ def test_real_feedback_trace_mode_count_and_path(
         real_trace(tmp_path, flags, target, host=True)
     expected = str(tmp_path / "other") if damage == "wrong-path" else path
     if damage == "valid":
-        C.validate_argv(None, mode, target, expected, trace=trace)
+        C.validate_argv(trace, mode, target, expected)
     else:
         with pytest.raises(ValueError, match="feedback"):
             C.validate_argv(
-                None,
+                trace,
                 mode,
                 target,
                 expected,
-                trace=trace,
             )
 
 
@@ -196,7 +195,7 @@ def test_real_feedback_trace_mode_count_and_path(
 def test_real_bare_generate_is_rejected_without_explicit_path(tmp_path, kind, target):
     trace = real_trace(tmp_path, spell(kind, "profile_generate"), target)
     with pytest.raises(ValueError, match="feedback"):
-        C.validate_argv(None, "generate", target, str(tmp_path / "raw"), trace=trace)
+        C.validate_argv(trace, "generate", target, str(tmp_path / "raw"))
 
 
 @pytest.mark.parametrize("entry", ["config", "resolved", "trace"])
@@ -216,7 +215,7 @@ def test_real_response_file_rejected_by_every_entry(
     trace = real_trace(tmp_path, flags, target)
     if entry == "trace":
         with pytest.raises(ValueError, match="response.file"):
-            C.validate_argv(None, "normal", target, trace=trace)
+            C.validate_argv(trace, "normal", target)
     elif entry == "resolved":
         with pytest.raises(ValueError, match="response.file"):
             C.resolved_flags(tmp_path, target, flags, tmp_path / "resolve.log")
@@ -248,4 +247,4 @@ def test_real_response_file_cannot_hide_an_invocation_from_trace_filter(
     )
     assert result.returncode == 0, result.stderr
     with pytest.raises(ValueError, match="response.file"):
-        C.validate_argv(None, "normal", target, trace=trace)
+        C.validate_argv(trace, "normal", target)

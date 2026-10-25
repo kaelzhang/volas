@@ -69,6 +69,8 @@ def linked_dump(directory, target, variant="base", metadata=True, chains=False, 
              "--lazy-bind", "--weak-bind", "--dyld-info", "linked.so"],
             cwd=directory, text=True,
         )
+    # Keep decoded instructions/tables intact while making captures diff-clean.
+    text = "\n".join(line.rstrip(" \t") for line in text.splitlines()) + "\n"
     (directory / "objdump.txt").write_text(text)
     return text
 

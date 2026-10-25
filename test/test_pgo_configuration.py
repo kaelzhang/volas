@@ -9,7 +9,21 @@ import pytest
 
 from scripts import build_release as B
 
-from test.pgo_toolchain import ROOT, HOST, extension_link_flags
+from test.pgo_toolchain import ROOT, HOST, clean_env, extension_link_flags
+
+
+def test_argv_validator_has_one_required_trace_protocol():
+    import inspect
+
+    signature = inspect.signature(B.validate_argv)
+    assert "log" not in signature.parameters
+    assert signature.parameters["trace"].default is inspect.Parameter.empty
+
+
+def test_llvm_text_captures_have_no_physical_trailing_whitespace():
+    for path in (ROOT / "test/fixtures/pgo-imports").glob("*.txt"):
+        for number, line in enumerate(path.read_text().splitlines(), 1):
+            assert line == line.rstrip(" \t"), f"{path.name}:{number}"
 
 
 @pytest.mark.parametrize(
@@ -59,7 +73,7 @@ def test_real_resolver_preserves_concrete_target_prefix_and_order(
     "target", list(dict.fromkeys([HOST, "x86_64-unknown-linux-gnu"]))
 )
 def test_real_argv_rejects_wrong_feedback_mode(tmp_path, mode, flags, target):
-    log = tmp_path / "argv.log"
+    trace = tmp_path / "argv.jsonl"
     args = [
         subprocess.check_output(["rustc", "--print", "sysroot"], text=True).strip()
         + "/bin/rustc",
@@ -70,11 +84,15 @@ def test_real_argv_rejects_wrong_feedback_mode(tmp_path, mode, flags, target):
         *flags,
         *extension_link_flags(target),
     ]
-    import shlex
-
-    log.write_text("     Running `" + shlex.join(args) + "`\n")
+    subprocess.run(
+        [sys.executable, str(ROOT / "scripts/rustc_record.py"), *args,
+         "--print", "cfg"],
+        env=clean_env(VOLAS_RUSTC_TRACE=str(trace)),
+        capture_output=True, text=True,
+    )
+    assert trace.is_file(), "the actual wrapper must record rejected compiler argv"
     with pytest.raises(ValueError, match="feedback"):
-        B.validate_argv(log, mode, target)
+        B.validate_argv(trace, mode, target)
 
 
 def test_real_profile_rejects_ordered_configuration_mismatch(tmp_path):
@@ -171,7 +189,7 @@ def test_build_blocks_missing_trained_function_diagnostic(
             trace.write_text(json.dumps(a) + "\n")
             # Prove the platform's argv precondition independently of the
             # missing-trained-function diagnostic this test is about.
-            B.validate_argv(log, "use", target, profile, config, trace)
+            B.validate_argv(trace, "use", target, profile, config)
         wheels = tmp_path / "use/wheels"
         wheels.mkdir(exist_ok=True)
         with zipfile.ZipFile(wheels / "test.whl", "w") as z:
@@ -223,11 +241,10 @@ def test_argv_rejects_actual_compiler_substitution(tmp_path):
     )
     with pytest.raises(ValueError, match="executable mismatch"):
         validate_argv(
-            None,
+            trace,
             "normal",
             HOST,
             config={"tools": {"rustc": {"path": "/bin/rustc"}}},
-            trace=trace,
         )
 
 

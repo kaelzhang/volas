@@ -5,7 +5,6 @@ import hashlib
 import json
 import os
 from pathlib import Path
-import shlex
 import shutil
 import subprocess
 import sys
@@ -364,16 +363,8 @@ def configuration(root, target, log):
     }
 
 
-def validate_argv(log, mode, target, feedback=None, config=None, trace=None):
-    commands = (
-        [json.loads(line) for line in Path(trace).read_text().splitlines()]
-        if trace
-        else [
-            shlex.split(line.strip()[9:-1])
-            for line in Path(log).read_text().splitlines()
-            if line.strip().startswith("Running `") and "--crate-name" in line
-        ]
-    )
+def validate_argv(trace, mode, target, feedback=None, config=None):
+    commands = [json.loads(line) for line in Path(trace).read_text().splitlines()]
     for command in commands:
         reject_response_files(command)
     commands = [
