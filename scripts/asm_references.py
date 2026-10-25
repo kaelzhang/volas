@@ -1,7 +1,9 @@
 """Stable references from LLVM symbols, sections and instruction relocations."""
 
 from collections import Counter
+from bisect import bisect_left
 import re
+from urllib.parse import quote
 
 from asm_symbols import is_branch, is_call, opcode, target_operand, written_registers
 
@@ -13,16 +15,35 @@ def disassemble(objdump, library, output):
     nearest-symbol guesses for Mach-O imports. Its indirect/bind/dyld tables and
     ELF dynamic relocations/PLT labels supply the actual import identities.
     """
-    text = output([
-        str(objdump), "--disassemble", "--demangle", "--no-show-raw-insn",
-        "--section-headers", "--private-headers", "--syms", "--reloc",
-        "--dynamic-reloc", str(library),
-    ])
+    text = output(
+        [
+            str(objdump),
+            "--disassemble",
+            "--demangle",
+            "--no-show-raw-insn",
+            "--section-headers",
+            "--private-headers",
+            "--syms",
+            "--reloc",
+            "--dynamic-reloc",
+            str(library),
+        ]
+    )
     if "file format mach-o" in text:
-        text += "\n" + output([
-            str(objdump), "--macho", "--indirect-symbols", "--bind",
-            "--lazy-bind", "--weak-bind", "--dyld-info", str(library),
-        ])
+        text += "\n" + output(
+            [
+                str(objdump),
+                "--macho",
+                "--indirect-symbols",
+                "--bind",
+                "--lazy-bind",
+                "--weak-bind",
+                "--dyld-info",
+                str(library),
+            ]
+        )
+    elif "file format elf" in text:
+        text += "\n" + output([str(objdump), "--dynamic-syms", str(library)])
     return text
 
 
@@ -110,32 +131,129 @@ class References:
 
         self.imports = {}
         self.import_sections = {
-            "__stubs", "__auth_stubs", "__got", "__auth_got", "__auth_ptr",
-            "__la_symbol_ptr", "__nl_symbol_ptr", ".plt", ".plt.sec", ".plt.got",
-            ".iplt", ".got", ".got.plt", ".igot.plt",
+            "__stubs",
+            "__auth_stubs",
+            "__got",
+            "__auth_got",
+            "__auth_ptr",
+            "__la_symbol_ptr",
+            "__nl_symbol_ptr",
+            ".plt",
+            ".plt.sec",
+            ".plt.got",
+            ".iplt",
+            ".got",
+            ".got.plt",
+            ".igot.plt",
         }
+        self.stub_sections = {"__stubs", "__auth_stubs"}
         # LLVM decodes Mach-O section types too, including renamed stub/pointer
         # sections. Conventional names above also identify incomplete captures.
         for block in text.split("Section\n")[1:]:
             name = re.match(r"\s+sectname (\S+)", block)
             if name and re.search(
                 r"^\s+type S_(?:SYMBOL_STUBS|(?:NON_LAZY|LAZY|LAZY_DYLIB)_SYMBOL_POINTERS)\b",
-                block, re.M,
+                block,
+                re.M,
             ):
                 self.import_sections.add(name[1])
+                if re.search(r"^\s+type S_SYMBOL_STUBS\b", block, re.M):
+                    self.stub_sections.add(name[1])
         self.read_imports(text, functions)
         self.resolved = {}
+        self.memory_targets = {}
+        for function in functions.values():
+            if function.get("section") in self.stub_sections:
+                self.resolve_pages(function)
+        self.resolve_stubs(functions)
+        # Re-evaluate consumers that reach a now-resolved stub address.
+        self.resolved.clear()
+        self.memory_targets.clear()
         for function in functions.values():
             self.resolve_pages(function)
 
     def read_imports(self, text, functions):
-        """Consume LLVM's decoded identities, never infer an import from a slot.
+        """Bind slots to complete loader identities; incomplete facts never equal.
 
-        Keep conflicting facts unresolved. LOCAL/ABSENT indirect entries are not
-        symbols. Bind/dyld records also cover pointers outside named GOT sections.
+        LLVM's Mach-O tables abbreviate dylibs. Resolve a short name only against
+        a unique load command, retaining its two-level ordinal and install name.
+        Indirect entries are names, never complete bindings. Stub identities come
+        from their actual pointer targets. ELF dynamic symbols supply versions
+        missing in relocation displays; PLT labels inherit the qualified binding.
         """
+        macho = "file format mach-o" in text
+        libraries = []
+        for block in re.split(r"Load command \d+\n", text)[1:]:
+            if re.search(
+                r"cmd LC_(?:LOAD|LOAD_WEAK|REEXPORT|LAZY_LOAD|LOAD_UPWARD)_DYLIB\b",
+                block,
+            ):
+                name = re.search(r"^\s+name (.+) \(offset \d+\)", block, re.M)
+                if name:
+                    libraries.append(name[1])
+
+        def namespace(short):
+            if short in (
+                "flat-namespace",
+                "main-executable",
+                "weak-lookup",
+                "this-image",
+            ):
+                return short
+            candidates = [
+                (n, name)
+                for n, name in enumerate(libraries, 1)
+                if re.sub(r"(?:\.[^.]+)?\.dylib$", "", name.rsplit("/", 1)[-1]) == short
+            ]
+            if len(candidates) != 1 or "TWOLEVEL" not in text:
+                return None
+            ordinal, install = candidates[0]
+            return f"two-level:{ordinal}:{install}"
+
+        versions = {}
+        dynamic_symbols = False
+        versioned = bool(re.search(r"\bVERSYM\b|\.gnu.version\b", text))
+        for line in text.splitlines():
+            if line == "DYNAMIC SYMBOL TABLE:":
+                dynamic_symbols = True
+                continue
+            if not line:
+                dynamic_symbols = False
+            if dynamic_symbols and (
+                row := re.match(
+                    r"^[0-9a-f]+\s+.*?\*UND\*\s+[0-9a-f]+\s+(?:\(([^)]+)\)\s+)?(\S+)$",
+                    line,
+                )
+            ):
+                version, name = row.groups()
+                versions.setdefault(name, set()).add(version or "")
+        # Bind the ELF version's dependency as well when LLVM supplies VERNEED.
+        version_libraries, provider = {}, None
+        for line in text.splitlines():
+            required = re.match(r"\s+required from (.+):$", line)
+            if required:
+                provider = required[1]
+            elif provider and (
+                row := re.match(r"\s+0x[0-9a-f]+ 0x[0-9a-f]+ \S+ (\S+)$", line)
+            ):
+                version_libraries.setdefault(row[1], set()).add(provider)
+
+        def elf_identity(value):
+            match = re.fullmatch(r"(.+?)([+-]0x[0-9a-f]+)?", value)
+            name, addend = match.groups()
+            choices = versions.get(name, {""} if not versioned else set())
+            if len(choices) != 1:
+                return None
+            version = next(iter(choices))
+            providers = version_libraries.get(version, set())
+            if version and len(providers) != 1:
+                return None
+            scope = "elf-global" + (":" + next(iter(providers)) if version else "")
+            symbol = name + ("@" + version if version else "")
+            return (scope, symbol, int(addend, 0) if addend else 0)
+
         indirect, table = False, None
-        bindings = {}
+        bindings, names = {}, {}
         headings = {
             "dyld information:": "dyld",
             "Bind table:": "bind",
@@ -152,43 +270,127 @@ class References:
                 continue
             slot = re.fullmatch(r"0x([0-9a-fA-F]+)\s+\d+\s+(\S+)", line)
             if indirect and slot:
-                self.imports.setdefault(int(slot[1], 16), set()).add(slot[2])
+                names.setdefault(int(slot[1], 16), set()).add(slot[2])
             elif line and not line.startswith(("address", "0x")):
                 indirect = False
-            # Decoded dynamic relocations, not section-relative instruction
-            # relocations (whose offset has a colon). RELATIVE has no import.
             dynamic = re.fullmatch(r"([0-9a-fA-F]+)\s+(R_\S+)\s+(\S+)", line)
             if dynamic and not dynamic[2].endswith("RELATIVE"):
-                self.imports.setdefault(int(dynamic[1], 16), set()).add(dynamic[3])
+                bindings.setdefault(int(dynamic[1], 16), set()).add(
+                    elf_identity(dynamic[3])
+                )
             bind = re.match(r"^\S+\s+\S+\s+0x([0-9a-fA-F]+)\s+(.+)$", line)
             if not table or not bind:
                 continue
             fields = bind[2].split()
             if table == "dyld":
-                if len(fields) < 5 or fields[1] != "bind":
-                    continue  # rebases describe internal pointers, not imports
-                addend = int(fields[2], 0)
+                if len(fields) != 5 or fields[1] != "bind":
+                    continue
+                addend, provider = int(fields[2], 0), fields[3]
             elif table == "lazy":
                 if len(fields) != 2:
                     continue
-                addend = 0
-            else:
-                if len(fields) < 3 or fields[0] != "pointer":
+                addend, provider = 0, fields[0]
+            elif table == "weak":
+                if len(fields) != 3 or fields[0] != "pointer":
                     continue
-                addend = int(fields[1], 0)
-            bindings.setdefault(int(bind[1], 16), set()).add((fields[-1], addend))
-        for address, values in bindings.items():
-            # Indirect symbols name the symbol, bindings additionally supply its
-            # addend. Matching records refine that identity; disagreements remain
-            # a conflict instead of silently selecting a different import.
-            names = self.imports.setdefault(address, set())
-            names.difference_update(name for name, _ in values)
-            names.update(name + (f",{addend:+d}" if addend else "") for name, addend in values)
-        # LLVM synthesizes ELF PLT labels from dynamic relocations. Unlike a
-        # nearest-symbol annotation, the label names the exact stub entry.
+                addend, provider = int(fields[1], 0), "weak-lookup"
+            else:
+                if len(fields) != 4 or fields[0] != "pointer":
+                    continue
+                addend, provider = int(fields[1], 0), fields[2]
+            scope = namespace(provider)
+            bindings.setdefault(int(bind[1], 16), set()).add(
+                (scope, fields[-1], addend) if scope else None
+            )
+        self.indirect_stubs = {}
+        self.imports.update(bindings)
+        for address, symbols in names.items():
+            section = self.section(address)
+            if section and section[0] in self.stub_sections:
+                self.indirect_stubs[address] = symbols
+            if address in bindings:
+                if any(b is None or b[1] not in symbols for b in bindings[address]):
+                    self.imports[address].add(None)
+            else:
+                self.imports[address] = {None}
         for name, function in functions.items():
-            if name.endswith("@plt") and function.get("section") in self.import_sections:
-                self.imports.setdefault(function["address"], set()).add(name[:-4])
+            if (
+                name.endswith("@plt")
+                and function.get("section") in self.import_sections
+            ):
+                binding = elf_identity(name[:-4]) if not macho else None
+                self.imports.setdefault(function["address"], set()).add(binding)
+
+    def rip_target(self, instruction, function):
+        """One owner for LLVM's x86 RIP comments / next-instruction arithmetic."""
+        body = instruction["text"]
+        rip = re.search(r"(?:-?0x[0-9a-f]+|-?[0-9]+)?(?=\(%rip\))", body)
+        if not rip:
+            return None
+        annotation = re.search(r"#+\s*0x([0-9a-f]+)(?: <.*>)?", body)
+        end = self.next_addresses.get((function.get("section"), instruction["address"]))
+        if annotation or end is not None:
+            dest = int(annotation[1], 16) if annotation else end + int(rip[0] or "0", 0)
+            return rip, dest
+        return None
+
+    def literal_operand(self, body):
+        """LLVM's ARM literal load names the reached address directly."""
+        return re.fullmatch(
+            r"(?:ldr|ldrsw)\s+\w+,\s*(0x[0-9a-f]+)(?: <[^>]+>)?", body
+        )
+
+    def resolve_stubs(self, functions):
+        """Use decoded entry boundaries and existing address resolution, not names.
+
+        LLVM's indirect table supplies exact stub entry addresses. Its load must
+        reach a complete matching binding; multiple or unknown targets stay
+        unresolved. This also retains nonzero addends in custom linked stubs.
+        """
+        locations = {}
+        for function in functions.values():
+            if function.get("section") not in self.stub_sections:
+                continue
+            for instruction in function["instructions"]:
+                locations.setdefault(function.get("section"), []).append(
+                    (instruction["address"], function, instruction)
+                )
+        for rows in locations.values():
+            rows.sort(key=lambda row: row[0])
+        addresses = {
+            section: [row[0] for row in rows] for section, rows in locations.items()
+        }
+        grouped = {}
+        for address in self.indirect_stubs:
+            grouped.setdefault(self.section(address), []).append(address)
+        ends = {}
+        for section, entries in grouped.items():
+            entries.sort()
+            ends.update(zip(entries, [*entries[1:], section[1] + section[2]]))
+        for address, names in self.indirect_stubs.items():
+            section = self.section(address)
+            end = ends[address]
+            candidates = set()
+            rows = locations.get(section[0], [])
+            positions = addresses.get(section[0], [])
+            for _, function, instruction in rows[
+                bisect_left(positions, address) : bisect_left(positions, end)
+            ]:
+                key = (function.get("section"), instruction["address"])
+                target = self.memory_targets.get(key)
+                rip = self.rip_target(instruction, function)
+                if rip:
+                    target = rip[1]
+                literal = self.literal_operand(instruction["text"])
+                if literal:
+                    target = int(literal[1], 16)
+                if target in self.imports:
+                    candidates.update(self.imports[target])
+            if not candidates or any(
+                b is None or b[1] not in names for b in candidates
+            ):
+                candidates.add(None)
+            self.imports[address] = candidates
 
     def resolve_pages(self, function):
         """Track ADRP definitions to their ADD/LDR consumers within a basic block.
@@ -225,7 +427,10 @@ class References:
                 and not self.instruction_relocations(instruction, function)
             ):
                 definition, address, original, refs = pages[consumer[1]]
-                ref = self.reference(address + int(consumer[2] or "0", 0), function)
+                reached = address + int(consumer[2] or "0", 0)
+                if load:
+                    self.memory_targets[key] = reached
+                ref = self.reference(reached, function)
                 refs.append(ref)
                 self.resolved[key] = (
                     body[: consumer.start(2)] + ref + body[consumer.end(2) :]
@@ -262,8 +467,10 @@ class References:
             return "@unresolved(import-page)"
         imports = self.imports.get(address)
         if imports:
-            if len(imports) == 1:
-                return f"@import({next(iter(imports))})"
+            if len(imports) == 1 and None not in imports:
+                scope, symbol, addend = next(iter(imports))
+                symbol, scope = (quote(v, safe="/:@+$._-") for v in (symbol, scope))
+                return f"@import({symbol},{scope},{addend:+d})"
             return "@unresolved(import-conflict)"
         section = self.section(address)
         if section:
@@ -338,20 +545,16 @@ class References:
         key = (function.get("section"), instruction["address"])
         if key in self.resolved:
             return self.resolved[key]
-        rip = re.search(r"(?:-?0x[0-9a-f]+|-?[0-9]+)?(?=\(%rip\))", body)
+        literal = self.literal_operand(body)
+        if literal:
+            return body[: literal.start(1)] + self.reference(
+                int(literal[1], 16), function
+            )
+        rip = self.rip_target(instruction, function)
         if rip:
-            annotation = re.search(r"#+\s*0x([0-9a-f]+)(?: <.*>)?", body)
-            end = self.next_addresses.get(key)
-            # LLVM gives an exact resolved address in its comment, even for the
-            # last instruction. Otherwise use the next instruction's address.
-            if annotation or end is not None:
-                dest = (
-                    int(annotation[1], 16)
-                    if annotation
-                    else end + int(rip[0] or "0", 0)
-                )
-                ref = self.reference(dest, function)
-                body = body[: rip.start()] + ref + body[rip.end() :]
+            operand, dest = rip
+            ref = self.reference(dest, function)
+            body = body[: operand.start()] + ref + body[operand.end() :]
         if target:
             dest = int(target[1], 16)
             ref = (

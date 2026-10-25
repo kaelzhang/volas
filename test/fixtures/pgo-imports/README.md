@@ -48,3 +48,22 @@ Without a reaching page fact the page must stay unresolved, including when its
 first slot is itself bound (for example to dyld_stub_binder). It cannot stand in
 for the import reached by a later load. The capture command above produces these
 ARM64 Mach-O/ELF cases too.
+
+`bindings.json` preserves complete LLVM dumps as JSON strings, including original
+whitespace. Regenerate it on macOS with LLVM and `ld.lld` available:
+
+```sh
+python -m test.pgo_binding_libraries /absolute/fresh/captures
+```
+
+The checked-in generator links each architecture against a provider library,
+changes only its install name, or moves the same bindings (stub, GOT and data).
+ELF variants also change the required symbol version. Portable tests replay all
+captures; native variants are linked again on the running host.
+
+The ARM64 `custom` variants supply a symbol stub in the input object. Apple
+classic ld rewrites it to a literal lazy-pointer load (traditional bindings) or
+an ADRP/GOT pair (chained bindings). Both reach a zero-addend binding, while the
+separate data pointer retains +8. The literal-load test also varies decoded
+binding metadata in memory to verify a nonzero addend; that supplemental case
+is explicitly synthetic, not a separately linked binary.
