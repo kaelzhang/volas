@@ -62,12 +62,28 @@ asm_of() { ls -t "target/release/deps/${1//-/_}"-*.s 2>/dev/null | head -1; }
 count_fn() { # $1 keep|nokeep  $2 crate  $3 fn  $4 max|loop32|-
   local asm body
   asm="$(asm_of "$2")"
-  [ -z "$asm" ] && { if [ "${4:-max}" = loop32 ]; then echo 999999; else echo 0; fi; return; }
+  [ -z "$asm" ] && { echo 999999; return; }
   body="$(awk -v pat="$3" '
-    $0 ~ ("[_A-Za-z].*" pat "1[0-9]h[0-9a-f]+E:$") && !f { f = 1 }
+    # Decode complete legacy Rust path components. Substring matching also
+    # selects refold_forming_row when fold_forming_row was inlined away.
+    function is_target(symbol, n, component, previous) {
+      sub(/:$/, "", symbol)
+      sub(/^_+ZN/, "", symbol)
+      while (match(symbol, /^[0-9]+/)) {
+        n = substr(symbol, 1, RLENGTH) + 0
+        symbol = substr(symbol, RLENGTH + 1)
+        component = substr(symbol, 1, n)
+        symbol = substr(symbol, n + 1)
+        if (symbol == "E" && component ~ /^h[0-9a-f]+$/) return previous == pat
+        previous = component
+      }
+      return 0
+    }
+    !f && /^[A-Za-z_$].*:$/ && is_target($0) { f = 1 }
     f { print }
     f && /\.cfi_endproc/ { exit }
   ' "$asm")"
+  [ -z "$body" ] && { echo 999999; return; }
   if [ "$1" = keep ]; then mkdir -p "$OUT"; printf '%s\n' "$body" > "$OUT/$3.s"; fi
   if [ "${4:-max}" = loop32 ]; then
     # Count the whole back-edge loop, including its length test. Fail closed if
