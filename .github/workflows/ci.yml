@@ -68,9 +68,14 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
 
+      - name: Read build tool versions
+        id: toolchain
+        run: python scripts/check_toolchain.py --versions >> "$GITHUB_OUTPUT"
+
       - name: Set up Rust
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@master
         with:
+          toolchain: ${{ steps.toolchain.outputs.rust }}
           components: llvm-tools-preview
 
       - name: Cache cargo build
@@ -84,13 +89,16 @@ jobs:
 
       - name: Install dependencies
         run: |
-          python -m pip install --upgrade pip maturin
+          python -m pip install --upgrade pip "maturin==${{ steps.toolchain.outputs.maturin }}"
           # `.[dev]` only -- the benchmark comparison libraries (polars / TA-Lib /
           # DuckDB, in the `benchmark` extra) are NOT needed to run the tests;
           # they are installed only by `make benchmark`.
           # The oracles (pandas, TA-Lib) are exact `==` pins in the `dev` extra.
           pip install -e .[dev]
           python -c "import sys, numpy as np, pandas as pd, talib; print(sys.version); print('numpy', np.__version__); print('oracles: pandas', pd.__version__, 'TA-Lib', talib.__version__)"
+
+      - name: Check build prerequisites
+        run: python scripts/check_toolchain.py
 
       - name: Rust unit tests
         run: cargo test --workspace --exclude volas-python
@@ -116,9 +124,14 @@ jobs:
         with:
           python-version: "3.12"
 
+      - name: Read build tool versions
+        id: toolchain
+        run: python scripts/check_toolchain.py --versions >> "$GITHUB_OUTPUT"
+
       - name: Set up Rust
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@master
         with:
+          toolchain: ${{ steps.toolchain.outputs.rust }}
           components: llvm-tools-preview
 
       - name: Cache cargo build
@@ -137,8 +150,11 @@ jobs:
 
       - name: Install dependencies
         run: |
-          python -m pip install --upgrade pip maturin
+          python -m pip install --upgrade pip "maturin==${{ steps.toolchain.outputs.maturin }}"
           pip install -e .[dev]
+
+      - name: Check build prerequisites
+        run: python scripts/check_toolchain.py
 
       # Runs the cargo unit tests and the pytest suite (against the instrumented
       # extension) and writes their per-line union to target/volas-cov/union.lcov.
@@ -217,8 +233,26 @@ jobs:
     steps:
       - uses: actions/checkout@v5
 
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Read build tool versions
+        id: toolchain
+        run: python scripts/check_toolchain.py --versions >> "$GITHUB_OUTPUT"
+
       - name: Set up Rust
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ steps.toolchain.outputs.rust }}
+          components: llvm-tools-preview
+
+      - name: Install build tool
+        run: python -m pip install "maturin==${{ steps.toolchain.outputs.maturin }}"
+
+      - name: Check build prerequisites
+        run: python scripts/check_toolchain.py
 
       - name: Cache cargo build
         uses: Swatinem/rust-cache@v2
