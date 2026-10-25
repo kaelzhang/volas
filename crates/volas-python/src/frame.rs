@@ -3,6 +3,7 @@
 //! across `frame_construct` / `frame_reduce` / `frame_transform` / `frame_reshape`
 //! / `frame_io` / `frame_repr` / `frame_access` / `frame_index` / `frame_window`.
 
+use volas_core::ColumnView;
 use std::sync::Arc;
 
 use pyo3::exceptions::{PyTypeError, PyValueError};
@@ -263,17 +264,17 @@ impl PyDataFrame {
     /// Present a full-length column as a Series sliced to the logical M view (with
     /// the matching sliced index) — identity (a plain `wrap_series`) when unbounded.
     /// Backs windowed `df[name]` so a column read never exposes the hidden margin.
-    pub(crate) fn present_series(&self, name: String, col: Column) -> PySeries {
+    pub(crate) fn present_series(&self, name: String, col: Column) -> PyResult<PySeries> {
         match &self.window {
             Some(_) => {
                 let (start, len) = self.logical_range();
-                PySeries {
+                Ok(PySeries {
                     inner: Series::new(
                         Some(name),
                         col.slice(start, start + len),
                         Arc::new(self.inner.index().slice(start, start + len)),
-                    ),
-                }
+                    ).map_err(pyerr)?,
+                })
             }
             None => self.wrap_series(name, col),
         }
@@ -342,9 +343,9 @@ impl PyDataFrame {
             .zip(df.columns())
             .map(|(name, col)| {
                 let s = PySeries {
-                    inner: Series::new(Some(name.clone()), col.clone(), Arc::clone(idx)),
+                    inner: Series::new(Some(name.clone()), col.clone(), Arc::clone(idx)).map_err(pyerr)?,
                 };
-                Ok(op(&s)?.inner.data)
+                Ok(op(&s)?.inner.into_data())
             })
             .collect::<PyResult<Vec<_>>>()?;
         cells(df, cols)
@@ -364,7 +365,7 @@ impl PyDataFrame {
             vals.push(op(&col.to_f64_domain(op_name).map_err(pyerr)?));
         }
         Ok(PySeries {
-            inner: Series::new(None, Column::f64(vals), Arc::new(Index::str(names))),
+            inner: Series::new(None, Column::f64(vals), Arc::new(Index::new(None, volas_core::IndexKind::Str(names)).map_err(pyerr)?)).map_err(pyerr)?,
         })
     }
 
@@ -395,7 +396,7 @@ impl PyDataFrame {
             .iter()
             .map(|(_, cj)| Column::f64(numeric.iter().map(|(_, ci)| op(ci, cj)).collect()))
             .collect();
-        DataFrame::new(names.clone(), cols, Some(Index::str(names)))
+        DataFrame::new(names.clone(), cols, Some(Index::new(None, volas_core::IndexKind::Str(names)).map_err(pyerr)?))
             .map(PyDataFrame::plain)
             .map_err(pyerr)
     }
@@ -447,7 +448,7 @@ impl PyDataFrame {
             .inner
             .columns()
             .iter()
-            .find(|c| !matches!(c, Column::Bool(..)))
+            .find(|c| !matches!(c.view(), ColumnView::Bool(..)))
         {
             return Err(PyTypeError::new_err(format!(
                 "where/mask: `cond` must be a boolean frame, got a {} column",
@@ -577,7 +578,7 @@ impl PyDataFrame {
             cview.select(self.inner.names()).map_err(pyerr)?
         };
         self.meta().labels().index().require_aligned(cond_df.index()).map_err(pyerr)?;
-        if let Some(cc) = cond_df.columns().iter().find(|c| !matches!(c, Column::Bool(..))) {
+        if let Some(cc) = cond_df.columns().iter().find(|c| !matches!(c.view(), ColumnView::Bool(..))) {
             return Err(PyTypeError::new_err(format!(
                 "df[mask] = v: `mask` must be a boolean frame, got a {} column",
                 cc.dtype()
@@ -660,7 +661,7 @@ impl PyDataFrame {
                             crate::convert::Zone::Unzoned => frame_tz.clone(),
                         };
                         let ns = crate::convert::parse_ts_in_tz(&ts, &tz)?;
-                        Index::datetime(vec![ns], tz)
+                        Index::new(None, volas_core::IndexKind::Datetime(vec![ns], tz)).map_err(pyerr)?
                     }
                     IndexKind::Int64(_) => {
                         Index::from_column(&crate::coerce::bar_scalar_to_column(&ts, DType::I64)?)
@@ -678,9 +679,9 @@ impl PyDataFrame {
     }
 
 
-    pub(crate) fn wrap_series(&self, name: String, col: Column) -> PySeries {
-        PySeries {
-            inner: Series::new(Some(name), col, Arc::clone(self.inner.index())),
-        }
+    pub(crate) fn wrap_series(&self, name: String, col: Column) -> PyResult<PySeries> {
+        Ok(PySeries {
+            inner: Series::new(Some(name), col, Arc::clone(self.inner.index())).map_err(pyerr)?,
+        })
     }
 }

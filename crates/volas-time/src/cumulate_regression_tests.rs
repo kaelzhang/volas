@@ -1,3 +1,4 @@
+use volas_core::ColumnView;
 use crate::{aggregate_period, cumulate, Agg, AggSpec, Cumulator, TimeFrame};
 use volas_core::{Column, DataFrame, Index, Tz, Validity, VolasError};
 
@@ -6,7 +7,7 @@ const MINUTE: i64 = 60_000_000_000;
 fn frame(stamps: &[i64], columns: Vec<Column>) -> DataFrame {
     DataFrame::new(
         (0..columns.len()).map(|i| format!("v{i}")).collect(), columns,
-        Some(Index::datetime(stamps.to_vec(), Tz::Utc).with_name(Some("time".into()))),
+        Some(Index::new(None, volas_core::IndexKind::Datetime(stamps.to_vec(), Tz::Utc)).unwrap().with_name(Some("time".into()))),
     ).unwrap()
 }
 
@@ -22,9 +23,9 @@ fn same_bits(got: &DataFrame, want: &DataFrame) {
     for (got, want) in got.columns().iter().zip(want.columns()) {
         assert_eq!(got.dtype(), want.dtype());
         assert!(got.equals(want), "{got:?} != {want:?}");
-        match (got, want) {
-            (Column::F64(a), Column::F64(b)) => assert_eq!(a.iter().map(|x| x.to_bits()).collect::<Vec<_>>(), b.iter().map(|x| x.to_bits()).collect::<Vec<_>>()),
-            (Column::F32(a), Column::F32(b)) => assert_eq!(a.iter().map(|x| x.to_bits()).collect::<Vec<_>>(), b.iter().map(|x| x.to_bits()).collect::<Vec<_>>()),
+        match (got.view(), want.view()) {
+            (ColumnView::F64(a), ColumnView::F64(b)) => assert_eq!(a.iter().map(|x| x.to_bits()).collect::<Vec<_>>(), b.iter().map(|x| x.to_bits()).collect::<Vec<_>>()),
+            (ColumnView::F32(a), ColumnView::F32(b)) => assert_eq!(a.iter().map(|x| x.to_bits()).collect::<Vec<_>>(), b.iter().map(|x| x.to_bits()).collect::<Vec<_>>()),
             _ => {}
         }
     }
@@ -47,19 +48,21 @@ fn columns() -> Vec<Column> {
 fn column_builders_match_the_period_fold_for_every_dtype_and_aggregator() {
     for agg in [Agg::First, Agg::Last, Agg::Max, Agg::Min, Agg::Sum] {
         for col in columns() {
-            let df = frame(&[0, 0, MINUTE, MINUTE, 5 * MINUTE, 6 * MINUTE, 7 * MINUTE, 10 * MINUTE], vec![col]);
+            let raw = crate::RawFineInput::new(vec!["v0".into()], vec![col],
+                vec![0, 0, MINUTE, MINUTE, 5 * MINUTE, 6 * MINUTE, 7 * MINUTE, 10 * MINUTE], Tz::Utc, Some("time".into())).unwrap();
+            let df = &raw.frame;
             let spec = spec(agg, 1);
             if !agg.as_combine_op().supports(df.columns()[0].dtype()) {
-                assert!(cumulate(&df, TimeFrame::Min5, &spec).is_err());
+                assert!(cumulate(df, TimeFrame::Min5, &spec).is_err());
                 continue;
             }
-            let mut want = aggregate_period(&df.slice_data(0, 4), &spec, TimeFrame::Min5, &Tz::Utc).unwrap();
-            for (a, b) in [(4, 7), (7, 8)] {
+            let mut want = aggregate_period(&df.slice_data(0, 2), &spec, TimeFrame::Min5, &Tz::Utc).unwrap();
+            for (a, b) in [(2, 5), (5, 6)] {
                 want.append(&aggregate_period(&df.slice_data(a, b), &spec, TimeFrame::Min5, &Tz::Utc).unwrap()).unwrap();
             }
-            same_bits(&cumulate(&df, TimeFrame::Min5, &spec).unwrap(), &want);
+            same_bits(&cumulate(df, TimeFrame::Min5, &spec).unwrap(), &want);
             let mut live = Cumulator::new(TimeFrame::Min5, spec.clone());
-            live.append(&df).unwrap();
+            live.append_raw(&raw).unwrap();
             let snapshot = live.frame().unwrap();
             let (owned, open, aggregate) = live.into_parts().unwrap();
             same_bits(&owned, &snapshot);

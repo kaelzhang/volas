@@ -599,7 +599,8 @@ raises (in both cases the frame is left unchanged). pandas keeps both rows — `
 happily builds a duplicate or out-of-order label — while volas treats a repeated label
 as the same bar sent again, which is what a live feed means by it. A frame built with
 repeated labels (`index=`, `set_index`, `read_csv(index_col=...)`, `from_pandas`) raises
-(pandas builds a duplicate-label index).
+(pandas builds a duplicate-label index). Datetime labels must also strictly
+increase and contain no NaT at all construction and import entries.
 
 On a `time_frame` frame the appended bars are *folded* into the forming period, so
 the live feed must be well-ordered: a `NaT`-timestamped bar (no period — symmetric
@@ -629,6 +630,12 @@ to pandas, volas does **not** support:
   equal (the same instants; the index name and display zone are ignored), and a
   tz-naive index never pairs with a tz-aware one.
 - **Duplicate labels** — a label names one row (see the append rule above).
+  Construction and row derivation reject repeated labels, including a gather that
+  selects the same row twice.
+- **Unordered datetime labels or NaT index labels** — datetime indexes strictly
+  increase and contain no NaT. Reverse slices, descending index sorting and value
+  sorting that reverses datetime labels raise `ValueError`, leaving the source
+  unchanged. Integer and string indexes permit arbitrary order if unique.
 
 ---
 

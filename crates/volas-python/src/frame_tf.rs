@@ -148,30 +148,11 @@ impl TfState {
     /// into it (it must not already hold the finer bars appended after it). Every data
     /// column's aggregator is checked against its dtype first.
     pub(crate) fn seeded(time_frame: TimeFrame, cumulators: AggSpec, frame: &DataFrame) -> PyResult<TfState> {
-        match frame.index().kind() {
-            IndexKind::Datetime(v, _) => {
-                // The last row becomes the open period's first bar, so the live-fold
-                // invariants must hold from the start: a present, non-decreasing
-                // timeline — symmetric with the append-fold and batch-cumulate guards.
-                if v.contains(&i64::MIN) {
-                    return Err(PyValueError::new_err(
-                        "time_frame requires a DatetimeIndex without NaT; drop or \
-                         fill the missing index timestamps first",
-                    ));
-                }
-                if v.windows(2).any(|w| w[1] < w[0]) {
-                    return Err(PyValueError::new_err(
-                        "time_frame requires a monotonic (time-sorted) \
-                         DatetimeIndex; sort the bars by time first",
-                    ));
-                }
-            }
-            _ => {
-                return Err(PyValueError::new_err(
-                    "time_frame requires a DatetimeIndex \
-                     (build one with to_datetime(df[col]) then df.set_index(col))",
-                ));
-            }
+        if !frame.index().is_strict_datetime() {
+            return Err(PyValueError::new_err(
+                "time_frame requires a DatetimeIndex \
+                 (build one with to_datetime(df[col]) then df.set_index(col))",
+            ));
         }
         let data = frame.select(&data_columns(frame)).map_err(pyerr)?;
         cumulators.check(&data).map_err(pyerr)?; // dtype x aggregator, before the state exists
@@ -209,7 +190,7 @@ impl TfState {
     /// without `NaT`, in time order — else none (a plain frame).
     pub(crate) fn relabelled(&self, frame: &DataFrame) -> PyResult<Option<TfState>> {
         match frame.index().kind() {
-            IndexKind::Datetime(v, _) if !v.contains(&i64::MIN) && v.windows(2).all(|w| w[0] < w[1]) => {
+            IndexKind::Datetime(..) if frame.index().is_strict_datetime() => {
                 self.reseeded(frame).map(Some)
             }
             _ => Ok(None),
@@ -410,34 +391,27 @@ impl PyDataFrame {
         // or disordered feed data must be handled explicitly by the caller, never
         // silently corrupt the OHLCV.
         let tfs = self.tf.as_ref().expect("fold_append on a plain frame");
-        let mut prev_ts: Option<i64> = match tfs.open.as_ref() {
+        let prev_ts: Option<i64> = match tfs.open.as_ref() {
             Some(o) => Some(o.last_ts()),
             None => match self.inner.index().kind() {
                 IndexKind::Datetime(v, _) if !v.is_empty() => Some(v[v.len() - 1]),
                 _ => None,
             },
         };
-        if fine_ts.contains(&i64::MIN) {
-            return Err(PyValueError::new_err(
-                "cannot append a NaT-timestamped bar to a time_frame DataFrame; a \
-                 missing instant has no period (drop it or supply a real timestamp)",
-            ));
-        }
         // Admitted before the order is judged: an instant and a wall clock do not compare.
         let bars = self.inner.admit_data_rows(fine).map_err(pyerr)?;
         let bars = bars.as_ref();
-        for &ts in fine_ts {
-            if let Some(p) = prev_ts {
-                if ts < p {
-                    return Err(PyValueError::new_err(
-                        "cannot append an out-of-order bar to a time_frame DataFrame \
-                         (its timestamp precedes the forming period's latest bar); handle \
-                         late / re-ordered feed data before folding so the OHLCV stays \
-                         monotonic",
-                    ));
-                }
+        // The incoming Index already proves strict order and present timestamps;
+        // only its boundary against the latest folded bar remains to check.
+        if let (Some(&first), Some(previous)) = (fine_ts.first(), prev_ts) {
+            if first < previous {
+                return Err(PyValueError::new_err(
+                    "cannot append an out-of-order bar to a time_frame DataFrame \
+                     (its timestamp precedes the forming period's latest bar); handle \
+                     late / re-ordered feed data before folding so the OHLCV stays \
+                     monotonic",
+                ));
             }
-            prev_ts = Some(ts);
         }
         if bars.height() > 1 {
             // the forming row's data columns only: what the fold reads and writes

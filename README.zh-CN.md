@@ -15,6 +15,8 @@
 
 **volas** 同时也是一个 Rust [crate](crates/volas/README.zh-CN.md)。
 
+索引在构造及行选择后统一受检：datetime 标签必须严格递增且不能包含 NaT，整数和字符串标签必须唯一。Rust 数据模型通过受检构造器和只读 Column / Series 访问器使用，详见 [Rust 数据模型](crates/volas/README.zh-CN.md#数据模型)。
+
 ```python
 from volas import read_csv
 
@@ -224,6 +226,7 @@ df['ma:2']
   - 另一个 volas **`DataFrame`**，此时会被拷贝（如同 `pandas.DataFrame(df)`）。
 
   构造函数**不接受** `pandas.DataFrame` 或 Arrow 对象——请改用专门的 [`DataFrame.from_pandas`](docs/zh-CN/interop.md#dataframefrom_pandaspdf---dataframe) / [`DataFrame.from_arrow`](docs/zh-CN/interop.md#dataframefrom_arrowdata-copyfalse---dataframe) 桥接。如果要附加 [`DatetimeIndex`](https://pandas.pydata.org/docs/reference/api/pandas.DatetimeIndex.html)，用 `to_datetime` 解析某一列，用 `set_index` 把它提升为索引，再用 `tz_localize` / `tz_convert` 打上时区标记。参见[时区](#时区)。
+- **index** `Optional[list | np.ndarray] = None` 每行一个标签；datetime 标签必须严格递增且不含 NaT，整数和字符串标签必须唯一但不限制顺序。无效标签在构造、`set_index`、`read_csv(index_col=...)` 或 `from_pandas` 的最早入口抛出 `ValueError`。
 - **columns** `Optional[list[str]] = None` 选择并排列要保留的列。DataFrame 源与 `df[[...]]` 共用投影事务：有效指令在首次请求时计算，结果保留为普通数据列；任一条目无效时源不变，异常也与投影相同。dict 源只接受已存在的键，缺失键抛 `KeyError`。空 list 保留零列；重复身份会被拒绝，缺失列绝不会被静默填充。
 - **time_frame** `Optional[str | TimeFrame] = None` 若设置，则把它变成一个在该 bar 间隔上**支持 tf 累积**的 DataFrame：给定的各行是该 frame 下的 bar，每行以所在周期的**起点**为标签，最后一行是**正在形成**的 bar——之后 `append` 进来、落在它所在周期内的更细 bar 会折叠进这一行（这一行不能已经包含那根 bar）。
   需要一个 `DatetimeIndex`。参见[实时累积](#实时累积--一个-tf-aware-dataframe)。
@@ -589,8 +592,7 @@ directive_lookback('repeat:5@(close > boll.upper)')
 
 ### 其余与 pandas 一致的 API
 
-下面列出的接口都与对应的 `pandas` 行为一致——如果你在 pandas 里会用它，在 volas 里用法也相同，除了列表之后特别说明的
-[NA 模型差异](#已知的-pandas-差异volasna-模型)。
+下面列出的接口沿用对应的 `pandas` 用法；需要遵守[索引与选择](#索引与选择)中的严格标签约束，以及列表之后说明的 [NA 模型差异](#已知的-pandas-差异volasna-模型)。
 
 ```py
 # --- DataFrame：元数据 ----------------------------------------------------
@@ -790,7 +792,9 @@ df.loc[0:1, 'x'] = 99  # 只写这两行：x == [20, 99, 99]
 df.loc[0:5]            # KeyError：5 不是这个无序索引中的标签
 ```
 
-含 `NaT` 的 datetime 索引视为无序，与 pandas 一致。在非递增（递减、无序或含 `NaT`）的 datetime 索引上，以**字符串**写出的边界会抛出 `KeyError`：pandas 把它当作部分日期的值来读，可能选出不连续的行，volas 不复现这一行为，宁可报错也不选出不同的行。这种索引请用 `Timestamp` 作边界，或先排序。边界的标签类型与索引不符（整数索引配字符串边界、字符串索引配整数边界）时抛出 `TypeError`。
+datetime 索引在所有构造入口都必须严格递增且不能含 NaT；重复、倒序或缺失的标签立即抛出 `ValueError`，不能先构造无效索引再靠 `Timestamp` 边界或排序修复。日期字符串可作为部分日期边界，按完整日期范围选择行。边界的标签类型与索引不符（整数索引配字符串边界、字符串索引配整数边界）时抛出 `TypeError`。
+
+DataFrame 与 Series 的派生结果也遵守同一规则：重复选取同一行会抛出 `ValueError`；逆序切片、`sort_index(ascending=False)` 或按值排序若导致 datetime 标签不再严格递增，也会抛错，源对象保持不变。整数和字符串索引允许倒序及任意顺序，只要标签仍然唯一。
 
 ### 与 pandas 的差异（vs pandas）
 
@@ -804,7 +808,7 @@ pandas 类型系统的问题在哪里，以及迁移时需要注意什么。**
 - **任意标签 dtype**——索引只能是 range、datetime（`datetime64[ns]`）、整数或字符串之一。没有 float、categorical、interval、period、timedelta，也没有混合类型
   `object` 索引。
 - **索引代数**——重索引（reindex）、索引集合运算（并 / 交），以及在合并 frame 时的自动按索引对齐。
-- **重复标签**的查找（标签访问假定标签唯一）。
+- **重复标签**——不支持构造或派生重复标签索引，标签访问始终对应唯一一行。
 
 如果你的工作流依赖以上能力，请继续使用 pandas；volas 面向的是 K 线数据里常见的单层 OHLCV 索引形态。
 

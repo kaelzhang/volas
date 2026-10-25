@@ -60,8 +60,11 @@ def test_non_epoch_tokens_raise(token):
 
 
 def test_missing_epoch_token_is_nat():
-    df = _read("ts,x\n1,1\nNA,2\n", index_col="ts", date_unit="s")
-    assert _ns(df)[1] == -(2**63)
+    text = "ts,x\n1,1\nNA,2\n"
+    column = volas.to_datetime(_read(text)["ts"], unit="s")
+    assert column.to_numpy().view("i8").tolist() == [10**9, -(2**63)]
+    with pytest.raises(ValueError, match="without NaT"):
+        _read(text, index_col="ts", date_unit="s")
 
 
 def test_index_column_also_in_parse_dates_is_read_in_tz():

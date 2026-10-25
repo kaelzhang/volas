@@ -29,7 +29,7 @@ fn homogeneous_arithmetic_keeps_every_float_bit() {
         let want = binary_kernel(&af, &bf, op, &Validity::dense()).unwrap();
         let out = Column::f32(af.clone()).binary(&Column::f32(bf.clone()), op).unwrap();
         assert_eq!(out.dtype(), DType::F32);
-        assert_eq!(match &out { Column::F32(v) => v.iter(), _ => unreachable!() }.map(|v| v.to_bits()).collect::<Vec<_>>(), want.iter().map(|v| v.to_bits()).collect::<Vec<_>>());
+        assert_eq!(match &out { Column { data: ColumnData::F32(v) } => v.iter(), _ => unreachable!() }.map(|v| v.to_bits()).collect::<Vec<_>>(), want.iter().map(|v| v.to_bits()).collect::<Vec<_>>());
     }
     for (a, b) in [(Column::f64(a), Column::f64(b)), (Column::f32(af), Column::f32(bf))] {
         let av = a.to_f64_vec(); let bv = b.to_f64_vec();

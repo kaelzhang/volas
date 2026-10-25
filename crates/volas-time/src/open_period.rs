@@ -16,23 +16,13 @@ pub struct OpenPeriod {
 }
 
 impl OpenPeriod {
-    /// The open period of one period's fine `bars`, given in non-decreasing time
-    /// order: a run of bars with the same timestamp (a re-sent bar) keeps only its
-    /// last bar — the re-send rule of [`crate::cumulate()`] (consecutive equal
-    /// timestamps, last wins). Errors on an empty frame, a non-datetime index or bars
-    /// out of order.
+    /// The open period of already checked datetime bars. Raw re-sends enter
+    /// through [`crate::RawFineInput`], before an ordinary frame is built.
     pub fn new(bars: DataFrame) -> Result<OpenPeriod> {
         let ts = timestamps(&bars)?;
         if ts.is_empty() {
             return Err(VolasError::Value("an open period needs at least one bar".into()));
         }
-        if ts.windows(2).any(|w| w[1] < w[0]) {
-            return Err(VolasError::Value(
-                "an open period's bars must be in time order".into(),
-            ));
-        }
-        let kept = dedup_keep_last(ts);
-        let bars = if kept.len() == ts.len() { bars } else { bars.take(&kept) };
         Ok(OpenPeriod { bars })
     }
 
@@ -84,17 +74,6 @@ fn stamps(bars: &DataFrame) -> &[i64] {
         IndexKind::Datetime(v, _) => v,
         _ => unreachable!("an open period has a DatetimeIndex"), // LCOV_EXCL_LINE
     }
-}
-
-/// Positions to keep when consecutive same-timestamp rows are deduped (keep the
-/// last of each run — a re-sent / corrected tick updates rather than accumulates).
-/// The one re-send rule of cumulation: the batch aggregate and the open period both
-/// reduce exactly these rows.
-pub(crate) fn dedup_keep_last(ts: &[i64]) -> Vec<usize> {
-    let n = ts.len();
-    (0..n)
-        .filter(|&i| i + 1 == n || ts[i + 1] != ts[i])
-        .collect()
 }
 
 #[cfg(test)]

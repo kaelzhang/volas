@@ -1,6 +1,7 @@
 //! Element operations shared by batch evaluation and single-row continuation.
 //! `None` from an operation means it cannot be evaluated; a missing truth is
 //! represented independently as `Value::Bool(None)`.
+use volas_core::ColumnView;
 use std::cmp::Ordering;
 use volas_core::{Column, Result, VolasError};
 use volas_core::missing::is_missing;
@@ -90,11 +91,11 @@ fn binary_with<const COMPLETE: bool>(op: Op, a: Value, b: Value, previous: Optio
 pub(crate) fn at(col: &Column, row: usize) -> Option<Value> {
     if row >= col.len() { return None; }
     if !col.is_valid(row) { return Some(Value::Bool(None)); }
-    Some(match col {
-        Column::I64(v, _) => Value::Int(v[row]),
-        Column::I32(v, _) => Value::Int(v[row] as i64),
-        Column::Bool(v, _) => Value::Bool(Some(v[row])),
-        Column::F64(_) | Column::F32(_) => Value::Float(col.get_f64(row)),
+    Some(match col.view() {
+        ColumnView::I64(v, _) => Value::Int(v[row]),
+        ColumnView::I32(v, _) => Value::Int(v[row] as i64),
+        ColumnView::Bool(v, _) => Value::Bool(Some(v[row])),
+        ColumnView::F64(_) | ColumnView::F32(_) => Value::Float(col.get_f64(row)),
         _ => return None,
     })
 }

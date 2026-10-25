@@ -5,7 +5,8 @@ use std::borrow::Cow;
 use volas_core::{DataFrame, Index, IndexKind, Result, Tz, VolasError};
 
 use crate::agg::AggSpec;
-use crate::open_period::{dedup_keep_last, OpenPeriod};
+use crate::open_period::OpenPeriod;
+use crate::RawFineInput;
 use crate::PeriodAggregate;
 use crate::time_frame::TimeFrame;
 
@@ -56,6 +57,17 @@ impl Cumulator {
         Ok(cumulator)
     }
 
+    /// Construct from a raw feed admitted through the cumulation re-send boundary.
+    pub fn from_raw(fine: &RawFineInput, tf: TimeFrame, spec: AggSpec) -> Result<Self> {
+        Self::from_frame(&fine.frame, tf, spec)
+    }
+
+    /// Feed validated raw fine bars; equal consecutive timestamps were collapsed
+    /// at raw admission, before any ordinary frame exists.
+    pub fn append_raw(&mut self, fine: &RawFineInput) -> Result<()> {
+        self.append(&fine.frame)
+    }
+
     /// Feed fine bars (must have a `DatetimeIndex`). Periods that close are
     /// finalized; the trailing period stays open for the next call. All or nothing:
     /// the closed rows and the next open period are built aside, and the cumulator
@@ -97,7 +109,7 @@ impl Cumulator {
         };
 
         let (ts, tz): (&[i64], &Tz) = match raw.index().kind() {
-            IndexKind::Datetime(v, tz) => (v, tz),
+            IndexKind::Datetime(v, tz) if raw.index().is_strict_datetime() => (v, tz),
             _ => {
                 return Err(VolasError::Value(
                     "cumulation target must have a DatetimeIndex".into(),
@@ -105,33 +117,8 @@ impl Cumulator {
             }
         };
 
-        // A NaT (i64::MIN) index row has no timestamp to bucket; without this guard
-        // it falls into its own period (silently splitting same-period bars and
-        // emitting a NaT-labelled coarse row). A live ingest with a timeless bar is
-        // a data-quality problem that must be handled explicitly, not aggregated.
-        if ts.contains(&i64::MIN) {
-            return Err(VolasError::Value(
-                "cannot cumulate over a DatetimeIndex containing NaT; drop or fill \
-                 the missing index timestamps first"
-                    .into(),
-            ));
-        }
-
-        // The consecutive-run grouping below (and the open/close aggregation,
-        // which is position-ordered) assumes a non-decreasing timeline. An
-        // out-of-order input would silently split a period into duplicate coarse
-        // rows and pick open/close by row position instead of time — reject it,
-        // symmetric with the live fold path's out-of-order-bar guard. Sorting is
-        // deliberately NOT done here: OHLCV open/close and the live cursor are
-        // position-sensitive, so reordering must be an explicit caller action.
-        if ts.windows(2).any(|w| w[1] < w[0]) {
-            return Err(VolasError::Value(
-                "cannot cumulate over a non-monotonic DatetimeIndex (bars out of \
-                 order); sort the input by time first"
-                    .into(),
-            ));
-        }
-
+        // Index admission owns the no-NaT / strict-order proof. Cumulation
+        // consumes that stored fact instead of rescanning the timeline.
         let runs = PeriodRuns::new(ts, self.tf, tz)?;
         let last = runs.keys.len() - 1;
 
@@ -168,7 +155,7 @@ impl Cumulator {
             _ => unreachable!("an aggregate has a datetime index"), // LCOV_EXCL_LINE
         };
         if key != open_key {
-            let index = Index::datetime(ts.to_vec(), tz.clone()).with_name(open.bars().index().name().map(String::from));
+            let index = Index::new(None, IndexKind::Datetime(ts.to_vec(), tz.clone()))?.with_name(open.bars().index().name().map(String::from));
             let columns = bars.columns().iter().map(|c| c.slice(0, 1)).collect();
             let next = OpenPeriod::new(DataFrame::new(bars.names().to_vec(), columns, Some(index))?)?;
             let next_aggregate = PeriodAggregate::new(&next, &self.spec, self.tf, &tz).ok();
@@ -278,9 +265,7 @@ impl PeriodRuns {
                 runs.starts.push(i);
                 runs.offsets.push(runs.kept.len());
             }
-            if i + 1 == ts.len() || ts[i + 1] != stamp {
-                runs.kept.push(i);
-            }
+            runs.kept.push(i);
         }
         runs.offsets.push(runs.kept.len());
         Ok(runs)
@@ -298,8 +283,8 @@ impl PeriodRuns {
             // growth capacity. Ordinary incremental builders keep their old budget.
             // The maximum open string cell bounds the forming endpoint's bytes.
             let spare = if materializing { count } else { 0 };
-            let bytes = match col {
-                volas_core::Column::Str(v, _) if materializing => (self.starts[count]..raw.height()).map(|i| v.get(i).len()).max().unwrap_or(0),
+            let bytes = match col.view() {
+                volas_core::ColumnView::Str(v, _) if materializing => (self.starts[count]..raw.height()).map(|i| v.get(i).len()).max().unwrap_or(0),
                 _ => 0,
             };
             match col.reduce_groups_with_spare(spec.agg_for(name).as_combine_op(), groups, spare, bytes) {
@@ -312,7 +297,7 @@ impl PeriodRuns {
         let capacity = if materializing { (count * 2).max(4) } else { count };
         let mut keys = Vec::with_capacity(capacity);
         keys.extend_from_slice(&self.keys[..count]);
-        let index = Index::datetime(keys, tz.clone()).with_name(raw.index().name().map(String::from));
+        let index = Index::new(None, IndexKind::Datetime(keys, tz.clone()))?.with_name(raw.index().name().map(String::from));
         DataFrame::new(raw.names().to_vec(), columns, Some(index))
     }
 }
@@ -336,13 +321,7 @@ pub fn aggregate_period(period: &DataFrame, spec: &AggSpec, tf: TimeFrame, tz: &
             ))
         }
     };
-    if ts.contains(&i64::MIN) {
-        return Err(VolasError::Value("cumulation period cannot contain NaT".into()));
-    }
-    if ts.windows(2).any(|w| w[0] > w[1]) {
-        return Err(VolasError::Value("cumulation period bars must be ordered".into()));
-    }
-    let kept = dedup_keep_last(ts);
+    let kept: Vec<usize> = (0..ts.len()).collect();
     let mut cursor = tf.period_cursor(tz);
     let start_ns = cursor.period_start(ts[0])?;
     for &ns in &ts[1..] {
@@ -357,7 +336,7 @@ pub fn aggregate_period(period: &DataFrame, spec: &AggSpec, tf: TimeFrame, tz: &
         columns.push(spec.agg_for(name).reduce(col, &kept)?);
     }
     // The aggregated index keeps the source index's name (pandas resample parity).
-    let index = Index::datetime(vec![start_ns], tz.clone()).with_name(period.index().name().map(String::from));
+    let index = Index::new(None, IndexKind::Datetime(vec![start_ns], tz.clone()))?.with_name(period.index().name().map(String::from));
     DataFrame::new(names, columns, Some(index))
 }
 
@@ -369,7 +348,7 @@ mod tests {
     #[test]
     fn consumption_keeps_closed_buffers_and_snapshot_isolation() {
         let fine = DataFrame::new(vec!["volume".into()], vec![Column::f64(vec![1., 2., 3.])],
-            Some(Index::datetime(vec![0, 60_000_000_000, 120_000_000_000], Tz::Utc))).unwrap();
+            Some(Index::new(None, IndexKind::Datetime(vec![0, 60_000_000_000, 120_000_000_000], Tz::Utc)).unwrap())).unwrap();
         let cum = Cumulator::from_frame(&fine, TimeFrame::Min1, AggSpec::ohlcv()).unwrap();
         let closed = cum.closed.as_ref().unwrap();
         let values = closed.columns()[0].as_f64().unwrap().as_ptr();
@@ -383,7 +362,7 @@ mod tests {
         assert!(aggregate.is_some());
         let mut changed = out;
         let next = DataFrame::new(vec!["volume".into()], vec![Column::f64(vec![4.])],
-            Some(Index::datetime(vec![180_000_000_000], Tz::Utc))).unwrap();
+            Some(Index::new(None, IndexKind::Datetime(vec![180_000_000_000], Tz::Utc)).unwrap())).unwrap();
         changed.append(&next).unwrap();
         assert!(snapshot.equals(&fine));
         assert_eq!(changed.height(), 4);
@@ -398,7 +377,7 @@ mod tests {
     #[test]
     fn empty_batch_keeps_its_schema_and_grid_without_an_open_period() {
         let empty = DataFrame::new(vec!["volume".into()], vec![Column::i64(vec![])],
-            Some(Index::datetime(vec![], Tz::Utc).with_name(Some("time".into())))).unwrap();
+            Some(Index::new(None, IndexKind::Datetime(vec![], Tz::Utc)).unwrap().with_name(Some("time".into())))).unwrap();
         let mut cum = Cumulator::from_frame(&empty, TimeFrame::Min5, AggSpec::ohlcv()).unwrap();
         assert!(cum.frame().unwrap().equals(&empty));
         assert!(cum.last().unwrap().is_none());
@@ -406,13 +385,13 @@ mod tests {
         assert!(cum.period_aggregate().is_none());
         assert!(cum.append(&empty).is_err());
         let next = DataFrame::new(vec!["volume".into()], vec![Column::i64(vec![2])],
-            Some(Index::datetime(vec![0], Tz::Utc).with_name(Some("time".into())))).unwrap();
+            Some(Index::new(None, IndexKind::Datetime(vec![0], Tz::Utc)).unwrap().with_name(Some("time".into())))).unwrap();
         cum.append(&next).unwrap();
         assert!(cum.period_aggregate().unwrap().current().equals(&next));
         // The public snapshot accessor and consuming output expose the same revised
         // forming value, without adding a re-sent timestamp to the period's sum.
         let revised = DataFrame::new(vec!["volume".into()], vec![Column::i64(vec![3])],
-            Some(Index::datetime(vec![0], Tz::Utc).with_name(Some("time".into())))).unwrap();
+            Some(Index::new(None, IndexKind::Datetime(vec![0], Tz::Utc)).unwrap().with_name(Some("time".into())))).unwrap();
         cum.append(&revised).unwrap();
         assert!(cum.period_aggregate().unwrap().current().equals(&revised));
         assert!(cum.into_frame().unwrap().equals(&revised));
@@ -420,17 +399,17 @@ mod tests {
         let plain = DataFrame::new(vec!["volume".into()], vec![Column::i64(vec![])], None).unwrap();
         assert!(Cumulator::from_frame(&plain, TimeFrame::Min5, AggSpec::ohlcv()).is_err());
         let text = DataFrame::new(vec!["volume".into()], vec![Column::str(vec![])],
-            Some(Index::datetime(vec![], Tz::Utc))).unwrap();
+            Some(Index::new(None, IndexKind::Datetime(vec![], Tz::Utc)).unwrap())).unwrap();
         assert!(Cumulator::from_frame(&text, TimeFrame::Min5, AggSpec::ohlcv()).is_err());
     }
 
     #[test]
     fn an_empty_cumulator_uses_its_seed_timezone_for_the_first_bucket() {
         let empty = DataFrame::new(vec!["volume".into()], vec![Column::i64(vec![])],
-            Some(Index::datetime(vec![], Tz::Utc))).unwrap();
+            Some(Index::new(None, IndexKind::Datetime(vec![], Tz::Utc)).unwrap())).unwrap();
         let mut cum = Cumulator::from_frame(&empty, TimeFrame::Hour1, AggSpec::ohlcv()).unwrap();
         let next = DataFrame::new(vec!["volume".into()], vec![Column::i64(vec![2])],
-            Some(Index::datetime(vec![600_000_000_000], Tz::fixed(1800).unwrap()))).unwrap();
+            Some(Index::new(None, IndexKind::Datetime(vec![600_000_000_000], Tz::fixed(1800).unwrap())).unwrap())).unwrap();
         cum.append(&next).unwrap();
         let out = cum.into_frame().unwrap();
         match out.index().kind() {
@@ -469,9 +448,20 @@ mod tests {
                 Column::f64(close.to_vec()),
                 Column::f64(vol.to_vec()),
             ],
-            Some(Index::datetime(idx, Tz::Utc)),
+            Some(Index::new(None, IndexKind::Datetime(idx, Tz::Utc)).unwrap()),
         )
         .unwrap()
+    }
+
+    fn raw(
+        times: &[&str], open: &[f64], high: &[f64], low: &[f64], close: &[f64], vol: &[f64],
+    ) -> RawFineInput {
+        RawFineInput::new(
+            vec!["open".into(), "high".into(), "low".into(), "close".into(), "volume".into()],
+            vec![Column::f64(open.to_vec()), Column::f64(high.to_vec()), Column::f64(low.to_vec()), Column::f64(close.to_vec()), Column::f64(vol.to_vec())],
+            times.iter().map(|t| datetime::parse_ns(t).unwrap()).collect(),
+            Tz::Utc, None,
+        ).unwrap()
     }
 
     // Five 1-minute bars in one 5-minute period, plus one in the next.
@@ -552,7 +542,7 @@ mod tests {
     #[test]
     fn dedup_keeps_last_same_timestamp() {
         // two bars share 00:00:00 — the later one (volume 7) overrides the first.
-        let df = frame(
+        let df = raw(
             &[
                 "2020-01-01 00:00:00",
                 "2020-01-01 00:00:00",
@@ -564,7 +554,7 @@ mod tests {
             &[11.0, 99.0, 13.0],
             &[100.0, 7.0, 100.0],
         );
-        let out = cumulate(&df, TimeFrame::Min5, &AggSpec::ohlcv()).unwrap();
+        let out = Cumulator::from_raw(&df, TimeFrame::Min5, AggSpec::ohlcv()).unwrap().into_frame().unwrap();
         assert_eq!(out.height(), 1);
         // volume = 7 (dup kept) + 100 = 107, not 100 + 7 + 100
         assert_eq!(out.column("volume").unwrap().as_f64().unwrap()[0], 107.0);
@@ -577,7 +567,7 @@ mod tests {
     /// period reduces to the batch aggregate of the same feed.
     #[test]
     fn the_open_period_keeps_no_superseded_bar() {
-        let df = frame(
+        let df = raw(
             &["2020-01-01 00:00:00", "2020-01-01 00:01:00", "2020-01-01 00:01:00"],
             &[10.0, 11.0, 12.0],
             &[12.0, 30.0, 13.0],
@@ -586,11 +576,11 @@ mod tests {
             &[10.0, 5.0, 7.0],
         );
         let mut cum = Cumulator::new(TimeFrame::Min5, AggSpec::ohlcv());
-        cum.append(&df).unwrap();
+        cum.append_raw(&df).unwrap();
         let open = cum.open_period().unwrap();
         assert_eq!(open.bars().height(), 2);
         assert_eq!(open.bars().column("high").unwrap().as_f64().unwrap(), &[12.0, 13.0][..]);
-        let batch = cumulate(&df, TimeFrame::Min5, &AggSpec::ohlcv()).unwrap();
+        let batch = Cumulator::from_raw(&df, TimeFrame::Min5, AggSpec::ohlcv()).unwrap().into_frame().unwrap();
         assert!(cum.frame().unwrap().equals(&batch));
         // the next call re-sends 00:01 again: the result is the batch of the last-wins feed
         let resend = frame(&["2020-01-01 00:01:00"], &[12.0], &[13.5], &[9.5], &[12.9], &[8.0]);
@@ -620,7 +610,7 @@ mod tests {
             DataFrame::new(
                 vec!["volume".into()],
                 vec![Column::i64(v.to_vec())],
-                Some(Index::datetime(ts.to_vec(), Tz::Utc)),
+                Some(Index::new(None, IndexKind::Datetime(ts.to_vec(), Tz::Utc)).unwrap()),
             )
             .unwrap()
         };
@@ -631,7 +621,7 @@ mod tests {
         let overflow = vol(&[at("2020-01-01 00:01:00"), at("2020-01-01 00:05:00")], &[1, 1]);
         assert!(matches!(cum.append(&overflow).unwrap_err(), VolasError::Overflow(_)));
         // a NaT bar, judged after the open period is extended
-        assert!(cum.append(&vol(&[i64::MIN], &[1])).is_err());
+        assert!(Index::new(None, IndexKind::Datetime(vec![i64::MIN], Tz::Utc)).is_err());
         assert!(cum.frame().unwrap().equals(&before));
         cum.append(&vol(&[at("2020-01-01 00:06:00")], &[2])).unwrap();
         let out = cum.frame().unwrap();
@@ -644,7 +634,7 @@ mod tests {
         let empty = DataFrame::new(
             vec!["open".into()],
             vec![Column::f64(vec![])],
-            Some(Index::datetime(vec![], Tz::Utc)),
+            Some(Index::new(None, IndexKind::Datetime(vec![], Tz::Utc)).unwrap()),
         )
         .unwrap();
         assert!(cum.append(&empty).is_err());
@@ -706,7 +696,7 @@ mod tests {
         let df = DataFrame::new(
             vec!["volume".into()],
             vec![Column::f64(vec![1.0; n])],
-            Some(Index::datetime(times, ny)),
+            Some(Index::new(None, IndexKind::Datetime(times, ny)).unwrap()),
         )
         .unwrap();
         let spec = AggSpec::ohlcv();
@@ -729,7 +719,7 @@ mod tests {
         let df = DataFrame::new(
             vec!["volume".into()],
             vec![Column::f64(vec![1.0])],
-            Some(Index::datetime(vec![i64::MIN + 1], Tz::Utc)),
+            Some(Index::new(None, IndexKind::Datetime(vec![i64::MIN + 1], Tz::Utc)).unwrap()),
         )
         .unwrap();
         let err = cumulate(&df, TimeFrame::Week1, &AggSpec::ohlcv()).unwrap_err();

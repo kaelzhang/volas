@@ -1,12 +1,13 @@
 //! `Series` accessors and construction-adjacent surface (name / dtype / index /
 //! timezone / shape / the `.iloc`/`.loc`/`.iat`/`.at` accessors / `.dt`).
 
+use volas_core::ColumnView;
 use std::sync::Arc;
 
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use volas_core::{
-    Column, Series, Tz,
+    Series, Tz,
 };
 
 #[allow(unused_imports)]
@@ -20,7 +21,7 @@ impl PySeries {
     ///     str | None
     #[getter]
     pub(crate) fn name(&self) -> Option<String> {
-        self.inner.name.clone()
+        self.inner.name().map(str::to_owned)
     }
 
     /// The dtype name (``'float64'``, ``'float32'``, ``'int64'``, ``'int32'``,
@@ -42,14 +43,14 @@ impl PySeries {
     ///     numpy.ndarray
     #[getter]
     pub(crate) fn index<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
-        index_values(py, &self.inner.index)
+        index_values(py, self.inner.index())
     }
 
     /// The DatetimeIndex timezone name, or `None` for a tz-naive / non-datetime
     /// index (mirrors `df.tz`).
     #[getter]
     pub(crate) fn tz(&self) -> Option<String> {
-        match self.inner.index.tz() {
+        match self.inner.index().tz() {
             Tz::Naive => None,
             other => Some(other.name()),
         }
@@ -100,7 +101,7 @@ impl PySeries {
     pub(crate) fn __bool__(&self) -> PyResult<bool> {
         match self.inner.len() {
             // a missing single value has no truth value (pandas: `bool(pd.NA)`)
-            1 => self.inner.data.truth_at(0).ok_or_else(|| {
+            1 => self.inner.data().truth_at(0).ok_or_else(|| {
                 pyo3::exceptions::PyTypeError::new_err("boolean value of NA is ambiguous")
             }),
             _ => Err(PyValueError::new_err(
@@ -114,19 +115,19 @@ impl PySeries {
     pub(crate) fn tz_localize(&self, py: Python<'_>, tz: &str) -> PyResult<PySeries> {
         let tzv = crate::timezone::parse(py, tz)?;
         let df = volas_core::DataFrame::new(
-            vec![self.inner.name.clone().unwrap_or_else(|| "x".to_string())],
-            vec![self.inner.data.clone()],
-            Some((*self.inner.index).clone()),
+            vec![self.inner.name().map(str::to_owned).unwrap_or_else(|| "x".to_string())],
+            vec![self.inner.data().clone()],
+            Some(self.inner.index().as_ref().clone()),
         )
         .map_err(pyerr)?
         .tz_localize(tzv)
         .map_err(pyerr)?;
         Ok(PySeries {
             inner: Series::new(
-                self.inner.name.clone(),
+                self.inner.name().map(str::to_owned),
                 df.columns()[0].clone(),
                 Arc::clone(df.index()),
-            ),
+            ).map_err(pyerr)?,
         })
     }
 
@@ -135,19 +136,19 @@ impl PySeries {
     pub(crate) fn tz_convert(&self, py: Python<'_>, tz: &str) -> PyResult<PySeries> {
         let tzv = crate::timezone::parse(py, tz)?;
         let df = volas_core::DataFrame::new(
-            vec![self.inner.name.clone().unwrap_or_else(|| "x".to_string())],
-            vec![self.inner.data.clone()],
-            Some((*self.inner.index).clone()),
+            vec![self.inner.name().map(str::to_owned).unwrap_or_else(|| "x".to_string())],
+            vec![self.inner.data().clone()],
+            Some(self.inner.index().as_ref().clone()),
         )
         .map_err(pyerr)?
         .tz_convert(tzv)
         .map_err(pyerr)?;
         Ok(PySeries {
             inner: Series::new(
-                self.inner.name.clone(),
+                self.inner.name().map(str::to_owned),
                 df.columns()[0].clone(),
                 Arc::clone(df.index()),
-            ),
+            ).map_err(pyerr)?,
         })
     }
 
@@ -168,7 +169,7 @@ impl PySeries {
     /// `datetime64[ns]` Series only.
     #[getter]
     pub(crate) fn dt(&self) -> PyResult<crate::dt::PyDt> {
-        if !matches!(self.inner.data, Column::Datetime(_)) {
+        if !matches!(self.inner.data().view(), ColumnView::Datetime(_)) {
             return Err(pyo3::exceptions::PyAttributeError::new_err(
                 "Can only use .dt accessor with datetimelike values",
             ));

@@ -11,6 +11,7 @@
 //! - warm-up is counted on the column's processed history (`since` to the last valid
 //!   row, absolute positions), never on a slice's local row numbers.
 
+use crate::column::ColumnData;
 use std::sync::Arc;
 
 use crate::column::Column;
@@ -101,12 +102,12 @@ fn write_cached_at(
 
 fn write_scalar_value(name: &str, col: &mut Column, row: usize, value: f64) -> Result<()> {
     match col {
-        Column::F64(buf) => {
+        Column { data: ColumnData::F64(buf) } => {
             buf.set(row, value);
             Ok(())
         }
-        Column::Bool(buf, valid) => {
-            valid.set(row, buf.len(), !value.is_nan());
+        Column { data: ColumnData::Bool(buf, valid) } => {
+            valid.set_in_bounds(row, buf.len(), !value.is_nan());
             buf.make_mut()[row] = value != 0.0;
             Ok(())
         }

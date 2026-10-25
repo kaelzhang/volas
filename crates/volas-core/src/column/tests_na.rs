@@ -393,7 +393,7 @@ fn scatter_preserves_validity() {
 #[test]
 fn na_of_and_select_edge_arms() {
     // `na_of` (the where/mask default `other`) for the remaining dtypes
-    assert!(matches!(Column::na_of(DType::F32, 2), Column::F32(_)));
+    assert!(matches!(Column::na_of(DType::F32, 2), Column { data: ColumnData::F32(_) }));
     let i32na = Column::na_of(DType::I32, 2);
     assert!(i32na.dtype() == DType::I32 && !i32na.is_valid(0) && !i32na.is_valid(1));
     let bna = Column::na_of(DType::Bool, 2);

@@ -1,6 +1,7 @@
 //! DataFrame: ordered, named columns sharing a single row index.
 
 
+use crate::column::ColumnData;
 use std::sync::Arc;
 
 use crate::column::Column;
@@ -246,6 +247,7 @@ impl DataFrame {
         }
         let index = match index {
             Some(ix) => {
+                ix.validate()?;
                 if ix.len() != height {
                     return Err(VolasError::Shape(format!(
                         "index length {} != frame height {}",
@@ -255,7 +257,7 @@ impl DataFrame {
                 }
                 ix
             }
-            None => Index::range(height),
+            None => Index::new(None, crate::IndexKind::Range { start: 0, len: height })?,
         };
         let mut name_to_idx = FxHashMap::with_capacity_and_hasher(names.len(), Default::default());
         for (i, n) in names.iter().enumerate() {
@@ -387,11 +389,11 @@ impl DataFrame {
     /// Extract a column as a [`Series`] sharing this frame's index.
     pub fn series(&self, name: &str) -> Result<Series> {
         let col = self.column(name)?.clone();
-        Ok(Series::new(
+        Series::new(
             Some(name.to_string()),
             col,
             Arc::clone(&self.index),
-        ))
+        )
     }
 
     /// Add a new column or replace an existing one (must match `height`, unless
@@ -402,7 +404,7 @@ impl DataFrame {
         if self.columns.is_empty() {
             self.height = col.len();
             if self.index.len() != self.height {
-                self.index = Arc::new(Index::range(self.height));
+                self.index = Arc::new(Index::new(None, crate::IndexKind::Range { start: 0, len: self.height })?);
             }
         } else if col.len() != self.height {
             return Err(VolasError::Shape(format!(
@@ -459,7 +461,7 @@ impl DataFrame {
         let mut out = vec![0.0f64; h * w];
         for (j, c) in self.columns.iter().enumerate() {
             let col = match c {
-                Column::F64(v) => std::borrow::Cow::Borrowed(v.as_slice()),
+                Column { data: ColumnData::F64(v) } => std::borrow::Cow::Borrowed(v.as_slice()),
                 _ => std::borrow::Cow::Owned(c.to_f64_vec()),
             };
             for i in 0..h {
@@ -484,13 +486,13 @@ impl DataFrame {
         for (j, c) in self.columns.iter().enumerate() {
             for i in 0..h {
                 out[i * w + j] = match c {
-                    Column::Datetime(v) => v[i],
-                    Column::I64(v, _) => v[i],
-                    Column::I32(v, _) => v[i] as i64,
-                    Column::Bool(v, _) => v[i] as i64,
-                    Column::F64(v) => v[i] as i64,
-                    Column::F32(v) => v[i] as i64,
-                    Column::Str(..) => 0,
+                    Column { data: ColumnData::Datetime(v) } => v[i],
+                    Column { data: ColumnData::I64(v, _) } => v[i],
+                    Column { data: ColumnData::I32(v, _) } => v[i] as i64,
+                    Column { data: ColumnData::Bool(v, _) } => v[i] as i64,
+                    Column { data: ColumnData::F64(v) } => v[i] as i64,
+                    Column { data: ColumnData::F32(v) } => v[i] as i64,
+                    Column { data: ColumnData::Str(..) } => 0,
                 };
             }
         }
@@ -515,6 +517,9 @@ mod history;
 pub use history::{Anchors, Checkpoint, CheckpointRef, History, ANCHOR_SPACING};
 #[doc(hidden)]
 pub use history::ANCHOR_CHUNK_POINTS;
+
+#[cfg(test)]
+pub(crate) use derive::NoReplay;
 
 #[cfg(test)]
 mod tests;

@@ -8,6 +8,11 @@ pandas-compatible: arithmetic / comparison / logical operators, `.sum()` /
 for the full list. There is no public `Series` constructor — a `Series` is
 always obtained by indexing a `DataFrame`.
 
+Derived Series preserve checked index labels: selecting a row twice raises
+`ValueError`; a reverse slice or sort raises if its resulting datetime labels
+no longer strictly increase. Datetime labels always strictly increase without NaT. Integer and
+string labels may be reordered while they remain unique; the source is unchanged.
+
 ```py
 s = df['close']
 s.name                 # 'close'

@@ -6,7 +6,7 @@
 
 ### DataFrame.from_pandas(pdf) -> DataFrame
 
-**volas 独有的静态方法**——从 `pandas.DataFrame`（`pdf`）构造 volas `DataFrame`，是 `df.to_pandas()` 的逆操作。pandas 仅在此处惰性 import（所以 `import volas` 保持 pandas-free）。nullable 列保留其 dtype + `volas.NA`，`DatetimeIndex`（含带时区）可往返。索引始终作为索引、保留自己的名字（无名索引保持无名），与列相互独立——与索引同名的列照样作为列保留。参见[与 pandas 互操作](#与-pandas-互操作)。
+**volas 独有的静态方法**——从 `pandas.DataFrame`（`pdf`）构造 volas `DataFrame`，是 `df.to_pandas()` 的逆操作。pandas 仅在此处惰性 import（所以 `import volas` 保持 pandas-free）。nullable 列保留其 dtype + `volas.NA`，合法的 `DatetimeIndex`（含带时区）可往返；导入时检查 datetime 标签严格递增且不含 NaT，整数和字符串标签唯一，无效标签立即抛出 `ValueError`。索引始终作为索引、保留自己的名字（无名索引保持无名），与列相互独立——与索引同名的列照样作为列保留。参见[与 pandas 互操作](#与-pandas-互操作)。
 
 ```py
 df = DataFrame.from_pandas(pandas_df)   # pandas.DataFrame -> volas DataFrame

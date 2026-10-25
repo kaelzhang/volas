@@ -10,9 +10,9 @@ impl Column {
     /// An integer overflow is an error (contract #25).
     pub fn cumsum(&self) -> Result<Column> {
         match self {
-            Column::Bool(v, val) => cum(&widen_i64(v), val, stats::cumsum, i64::checked_add, "cumsum"),
-            Column::I64(v, val) => cum(v, val, stats::cumsum, i64::checked_add, "cumsum"),
-            Column::I32(v, val) => cum(v, val, stats::cumsum, i32::checked_add, "cumsum"),
+            Column { data: ColumnData::Bool(v, val) } => cum(&widen_i64(v), val, stats::cumsum, i64::checked_add, "cumsum"),
+            Column { data: ColumnData::I64(v, val) } => cum(v, val, stats::cumsum, i64::checked_add, "cumsum"),
+            Column { data: ColumnData::I32(v, val) } => cum(v, val, stats::cumsum, i32::checked_add, "cumsum"),
             _ => numeric_dispatch!(self, v => Numeric::into_column(stats::cumsum(v)?)),
         }
     }
@@ -21,7 +21,7 @@ impl Column {
     /// Missing values are skipped and stay missing.
     pub fn cummax(&self) -> Result<Column> {
         match self {
-            Column::Bool(v, val) => {
+            Column { data: ColumnData::Bool(v, val) } => {
                 let out = if val.has_nulls() {
                     cum_valid(v, val, false, |a, b| Some(a || b)).expect("OR never fails")
                 } else {
@@ -29,11 +29,11 @@ impl Column {
                 };
                 Ok(Column::bool_masked(out, val.clone()))
             }
-            Column::I64(v, val) => cum(v, val, |v| Ok(stats::cummax(v)), |a, x| Some(if x > a { x } else { a }), "cummax"),
-            Column::I32(v, val) => cum(v, val, |v| Ok(stats::cummax(v)), |a, x| Some(if x > a { x } else { a }), "cummax"),
+            Column { data: ColumnData::I64(v, val) } => cum(v, val, |v| Ok(stats::cummax(v)), |a, x| Some(if x > a { x } else { a }), "cummax"),
+            Column { data: ColumnData::I32(v, val) } => cum(v, val, |v| Ok(stats::cummax(v)), |a, x| Some(if x > a { x } else { a }), "cummax"),
             // running extreme is order-based, so str (lexical) / datetime (instant)
             // are valid, like min/max — not a numeric-only op.
-            Column::Str(..) | Column::Datetime(..) => self.cum_extreme(true),
+            Column { data: ColumnData::Str(..) } | Column { data: ColumnData::Datetime(..) } => self.cum_extreme(true),
             _ => numeric_dispatch!(self, v => Numeric::into_column(stats::cummax(v))),
         }
     }
@@ -42,7 +42,7 @@ impl Column {
     /// Missing values are skipped and stay missing.
     pub fn cummin(&self) -> Result<Column> {
         match self {
-            Column::Bool(v, val) => {
+            Column { data: ColumnData::Bool(v, val) } => {
                 let out = if val.has_nulls() {
                     cum_valid(v, val, true, |a, b| Some(a && b)).expect("AND never fails")
                 } else {
@@ -50,9 +50,9 @@ impl Column {
                 };
                 Ok(Column::bool_masked(out, val.clone()))
             }
-            Column::I64(v, val) => cum(v, val, |v| Ok(stats::cummin(v)), |a, x| Some(if x < a { x } else { a }), "cummin"),
-            Column::I32(v, val) => cum(v, val, |v| Ok(stats::cummin(v)), |a, x| Some(if x < a { x } else { a }), "cummin"),
-            Column::Str(..) | Column::Datetime(..) => self.cum_extreme(false),
+            Column { data: ColumnData::I64(v, val) } => cum(v, val, |v| Ok(stats::cummin(v)), |a, x| Some(if x < a { x } else { a }), "cummin"),
+            Column { data: ColumnData::I32(v, val) } => cum(v, val, |v| Ok(stats::cummin(v)), |a, x| Some(if x < a { x } else { a }), "cummin"),
+            Column { data: ColumnData::Str(..) } | Column { data: ColumnData::Datetime(..) } => self.cum_extreme(false),
             _ => numeric_dispatch!(self, v => Numeric::into_column(stats::cummin(v))),
         }
     }
@@ -61,9 +61,9 @@ impl Column {
     /// Missing values are skipped and stay missing. An integer overflow is an error.
     pub fn cumprod(&self) -> Result<Column> {
         match self {
-            Column::Bool(v, val) => cum(&widen_i64(v), val, stats::cumprod, i64::checked_mul, "cumprod"),
-            Column::I64(v, val) => cum(v, val, stats::cumprod, i64::checked_mul, "cumprod"),
-            Column::I32(v, val) => cum(v, val, stats::cumprod, i32::checked_mul, "cumprod"),
+            Column { data: ColumnData::Bool(v, val) } => cum(&widen_i64(v), val, stats::cumprod, i64::checked_mul, "cumprod"),
+            Column { data: ColumnData::I64(v, val) } => cum(v, val, stats::cumprod, i64::checked_mul, "cumprod"),
+            Column { data: ColumnData::I32(v, val) } => cum(v, val, stats::cumprod, i32::checked_mul, "cumprod"),
             _ => numeric_dispatch!(self, v => Numeric::into_column(stats::cumprod(v)?)),
         }
     }
@@ -74,12 +74,12 @@ impl Column {
     /// unchanged (`abs(bool) == bool`).
     pub fn abs(&self) -> Result<Column> {
         match self {
-            Column::Bool(_, _) => Ok(self.clone()),
-            Column::I64(v, val) => Ok(Column::i64_masked(
+            Column { data: ColumnData::Bool(_, _) } => Ok(self.clone()),
+            Column { data: ColumnData::I64(v, val) } => Ok(Column::i64_masked(
                 map_present(v, val, i64::checked_abs, "abs")?,
                 val.clone(),
             )),
-            Column::I32(v, val) => Ok(Column::i32_masked(
+            Column { data: ColumnData::I32(v, val) } => Ok(Column::i32_masked(
                 map_present(v, val, i32::checked_abs, "abs")?,
                 val.clone(),
             )),
@@ -94,14 +94,14 @@ impl Column {
     /// dtype's range is an overflow.
     pub fn round(&self, decimals: i32) -> Result<Column> {
         match self {
-            Column::F64(v) => Ok(Column::f64(round_floats(v, decimals)?)),
-            Column::F32(v) => Ok(Column::f32(round_floats(v, decimals)?)),
+            Column { data: ColumnData::F64(v) } => Ok(Column::f64(round_floats(v, decimals)?)),
+            Column { data: ColumnData::F32(v) } => Ok(Column::f32(round_floats(v, decimals)?)),
             // a power-of-ten multiple past the dtype's range is an overflow (#25)
-            Column::I64(v, val) => Ok(Column::i64_masked(
+            Column { data: ColumnData::I64(v, val) } => Ok(Column::i64_masked(
                 map_present(v, val, |x| decimal::round_i64(x, decimals), "round")?,
                 val.clone(),
             )),
-            Column::I32(v, val) => Ok(Column::i32_masked(
+            Column { data: ColumnData::I32(v, val) } => Ok(Column::i32_masked(
                 map_present(
                     v,
                     val,
@@ -110,7 +110,7 @@ impl Column {
                 )?,
                 val.clone(),
             )),
-            Column::Bool(_, _) => Ok(self.clone()), // round(bool) == bool (pandas no-op)
+            Column { data: ColumnData::Bool(_, _) } => Ok(self.clone()), // round(bool) == bool (pandas no-op)
             other => Err(VolasError::DType(format!(
                 "cannot round a {} column",
                 other.dtype()
@@ -125,10 +125,10 @@ impl Column {
         match self {
             // bool stays bool (pandas): a True lower bound forces all true, a
             // False upper bound forces all false, otherwise unchanged.
-            Column::Bool(v, val) => {
+            Column { data: ColumnData::Bool(v, val) } => {
                 return Ok(Column::bool_masked(clip_bool(v, lower, upper), val.clone()))
             }
-            Column::F64(_) | Column::F32(_) | Column::I64(_, _) | Column::I32(_, _) => {}
+            Column { data: ColumnData::F64(_) } | Column { data: ColumnData::F32(_) } | Column { data: ColumnData::I64(_, _) } | Column { data: ColumnData::I32(_, _) } => {}
             other => {
                 return Err(VolasError::DType(format!(
                     "cannot clip a {} column",
@@ -169,13 +169,13 @@ impl Column {
             )
         };
         match self {
-            Column::F64(v) => Column::f64(shift_fill(v, n, f64::NAN)),
-            Column::F32(v) => Column::f32(shift_fill(v, n, f32::NAN)),
-            Column::I64(v, _) => Column::i64_masked(shift_fill(v, n, 0), nulls()),
-            Column::I32(v, _) => Column::i32_masked(shift_fill(v, n, 0), nulls()),
-            Column::Bool(v, _) => Column::bool_masked(shift_fill(v, n, false), nulls()),
-            Column::Datetime(v) => Column::datetime(shift_fill(v, n, i64::MIN)),
-            Column::Str(v, _) => {
+            Column { data: ColumnData::F64(v) } => Column::f64(shift_fill(v, n, f64::NAN)),
+            Column { data: ColumnData::F32(v) } => Column::f32(shift_fill(v, n, f32::NAN)),
+            Column { data: ColumnData::I64(v, _) } => Column::i64_masked(shift_fill(v, n, 0), nulls()),
+            Column { data: ColumnData::I32(v, _) } => Column::i32_masked(shift_fill(v, n, 0), nulls()),
+            Column { data: ColumnData::Bool(v, _) } => Column::bool_masked(shift_fill(v, n, false), nulls()),
+            Column { data: ColumnData::Datetime(v) } => Column::datetime(shift_fill(v, n, i64::MIN)),
+            Column { data: ColumnData::Str(v, _) } => {
                 let shifted = (0..len)
                     .map(|i| {
                         let s = i as isize - n;
@@ -186,7 +186,7 @@ impl Column {
                         }
                     })
                     .collect();
-                Column::Str(shifted, nulls())
+                Column { data: ColumnData::Str(shifted, nulls()) }
             }
         }
     }
@@ -198,8 +198,8 @@ impl Column {
     /// difference is a `timedelta64`, the open `O3` decision, not a float64-of-ns.
     pub fn diff(&self, n: isize) -> Result<Column> {
         match self {
-            Column::F64(v) => Ok(Column::f64(diff_kernel(v, n, f64::NAN))),
-            Column::F32(v) => Ok(Column::f32(diff_kernel(v, n, f32::NAN))),
+            Column { data: ColumnData::F64(v) } => Ok(Column::f64(diff_kernel(v, n, f64::NAN))),
+            Column { data: ColumnData::F32(v) } => Ok(Column::f32(diff_kernel(v, n, f32::NAN))),
             // int -> int diff; bool -> "bool subtraction unsupported"; str/datetime
             // -> require_numeric error (all enforced by `binary`).
             _ => self.binary(&self.shift(n), BinOp::Sub),
@@ -215,17 +215,17 @@ impl Column {
         }
         let len = self.len();
         Ok(match self {
-            Column::F64(v) => Column::f64(
+            Column { data: ColumnData::F64(v) } => Column::f64(
                 v.iter()
                     .map(|&x| if x.is_nan() { value } else { x })
                     .collect(),
             ),
-            Column::F32(v) => Column::f32(
+            Column { data: ColumnData::F32(v) } => Column::f32(
                 v.iter()
                     .map(|&x| if x.is_nan() { value as f32 } else { x })
                     .collect(),
             ),
-            Column::I64(v, val) => match i64::try_from_f64(value) {
+            Column { data: ColumnData::I64(v, val) } => match i64::try_from_f64(value) {
                 Some(iv) => Column::i64(
                     (0..len)
                         .map(|i| if val.is_valid(i) { v[i] } else { iv })
@@ -235,7 +235,7 @@ impl Column {
                 // 2^53 raises rather than rounding (contract #20)
                 None => return self.convert_lossless(DType::F64)?.fillna(value),
             },
-            Column::I32(v, val) => match i32::try_from_f64(value) {
+            Column { data: ColumnData::I32(v, val) } => match i32::try_from_f64(value) {
                 Some(iv) => Column::i32(
                     (0..len)
                         .map(|i| if val.is_valid(i) { v[i] } else { iv })
@@ -249,12 +249,12 @@ impl Column {
             },
             // a 0/1 fill keeps bool; a non-0/1 fill promotes the (numeric-family)
             // bool column to float.
-            Column::Bool(v, val) if value == 0.0 || value == 1.0 => Column::bool(
+            Column { data: ColumnData::Bool(v, val) } if value == 0.0 || value == 1.0 => Column::bool(
                 (0..len)
                     .map(|i| if val.is_valid(i) { v[i] } else { value != 0.0 })
                     .collect(),
             ),
-            Column::Bool(..) => Column::f64(
+            Column { data: ColumnData::Bool(..) } => Column::f64(
                 self.to_f64_vec()
                     .iter()
                     .map(|&x| if x.is_nan() { value } else { x })
@@ -264,7 +264,7 @@ impl Column {
             // `object` dtype to hold a mixed string/number or datetime/number
             // column, and the old f64 funnel silently turned valid strings into the
             // fill and lost the datetime dtype. Reject it.
-            Column::Str(..) | Column::Datetime(..) => {
+            Column { data: ColumnData::Str(..) } | Column { data: ColumnData::Datetime(..) } => {
                 return Err(VolasError::DType(format!(
                     "cannot fill a {} column with the numeric value {value} (volas has \
                      no object dtype); drop or select the missing rows instead",
@@ -294,33 +294,33 @@ impl Column {
         }
         let validity = Validity::from_valid_iter(len, src.iter().map(|s| s.is_some()));
         match self {
-            Column::F64(v) => {
+            Column { data: ColumnData::F64(v) } => {
                 Column::f64(src.iter().map(|s| s.map_or(f64::NAN, |j| v[j])).collect())
             }
-            Column::F32(v) => {
+            Column { data: ColumnData::F32(v) } => {
                 Column::f32(src.iter().map(|s| s.map_or(f32::NAN, |j| v[j])).collect())
             }
-            Column::I64(v, _) => Column::i64_masked(
+            Column { data: ColumnData::I64(v, _) } => Column::i64_masked(
                 src.iter().map(|s| s.map_or(0, |j| v[j])).collect(),
                 validity,
             ),
-            Column::I32(v, _) => Column::i32_masked(
+            Column { data: ColumnData::I32(v, _) } => Column::i32_masked(
                 src.iter().map(|s| s.map_or(0, |j| v[j])).collect(),
                 validity,
             ),
-            Column::Bool(v, _) => Column::bool_masked(
+            Column { data: ColumnData::Bool(v, _) } => Column::bool_masked(
                 src.iter().map(|s| s.is_some_and(|j| v[j])).collect(),
                 validity,
             ),
-            Column::Datetime(v) => {
+            Column { data: ColumnData::Datetime(v) } => {
                 Column::datetime(src.iter().map(|s| s.map_or(i64::MIN, |j| v[j])).collect())
             }
             // str carries missing too: gather the carried value (empty placeholder
             // for an unfilled cell, which `validity` then marks NA), like int/bool.
-            Column::Str(v, _) => Column::Str(
+            Column { data: ColumnData::Str(v, _) } => Column { data: ColumnData::Str(
                 src.iter().map(|s| s.map_or("", |j| v.get(j))).collect(),
                 validity,
-            ),
+            ) },
         }
     }
 
@@ -340,10 +340,10 @@ impl Column {
         // Homogeneous floats already carry missing values in-band. Pick their
         // bytes directly: no masked copies or conversions of either input.
         match (self, other, target) {
-            (Column::F64(a), Column::F64(b), DType::F64) => {
+            (Column { data: ColumnData::F64(a) }, Column { data: ColumnData::F64(b) }, DType::F64) => {
                 return Ok(Column::f64(stats::select(cond, a, b)));
             }
-            (Column::F32(a), Column::F32(b), DType::F32) => {
+            (Column { data: ColumnData::F32(a) }, Column { data: ColumnData::F32(b) }, DType::F32) => {
                 return Ok(Column::f32(stats::select(cond, a, b)));
             }
             _ => {}
@@ -419,13 +419,13 @@ impl Column {
         let n = self.len();
         let and = |val: &Validity| Validity::from_valid_iter(n, (0..n).map(|i| keep(i) && val.is_valid(i)));
         match self {
-            Column::F64(v) => Column::f64((0..n).map(|i| if keep(i) { v[i] } else { f64::NAN }).collect()),
-            Column::F32(v) => Column::f32((0..n).map(|i| if keep(i) { v[i] } else { f32::NAN }).collect()),
-            Column::I64(v, val) => Column::I64(v.clone(), and(val)),
-            Column::I32(v, val) => Column::I32(v.clone(), and(val)),
-            Column::Bool(v, val) => Column::Bool(v.clone(), and(val)),
-            Column::Str(v, val) => Column::Str(v.clone(), and(val)),
-            Column::Datetime(v) => {
+            Column { data: ColumnData::F64(v) } => Column::f64((0..n).map(|i| if keep(i) { v[i] } else { f64::NAN }).collect()),
+            Column { data: ColumnData::F32(v) } => Column::f32((0..n).map(|i| if keep(i) { v[i] } else { f32::NAN }).collect()),
+            Column { data: ColumnData::I64(v, val) } => Column { data: ColumnData::I64(v.clone(), and(val)) },
+            Column { data: ColumnData::I32(v, val) } => Column { data: ColumnData::I32(v.clone(), and(val)) },
+            Column { data: ColumnData::Bool(v, val) } => Column { data: ColumnData::Bool(v.clone(), and(val)) },
+            Column { data: ColumnData::Str(v, val) } => Column { data: ColumnData::Str(v.clone(), and(val)) },
+            Column { data: ColumnData::Datetime(v) } => {
                 Column::datetime((0..n).map(|i| if keep(i) { v[i] } else { i64::MIN }).collect())
             }
         }

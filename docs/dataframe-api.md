@@ -89,7 +89,7 @@ Which gets the 2-period simple moving average on column `"close"`.
   of its cached directive columns is stale.
 - **index** `Optional[list | np.ndarray] = None` Row labels (int64, string or datetime),
   one per row. A label names one row: a repeated label raises `ValueError`, consecutive
-  or not (`NaT` is no label); `set_index`, `read_csv(index_col=...)` and
+  or not. Datetime labels must strictly increase and cannot contain NaT; missing or out-of-order labels raise `ValueError` at construction. `set_index`, `read_csv(index_col=...)` and
   `DataFrame.from_pandas` label a frame the same way. Bars sent again (the same
   timestamp twice) are fed to a frame with `append`, where a row labelled like the last
   one replaces it, or to a time-frame frame, whose fold keeps the last of them.
@@ -297,7 +297,7 @@ A **volas-specific static method** that builds a `DataFrame` from a `pandas.Data
 stays pandas-free at import). A nullable column keeps its dtype + `volas.NA`, and a
 `DatetimeIndex` (tz-aware too) round-trips. The index stays the index under its own
 name (an unnamed index stays unnamed), independent of the columns — a column that
-shares the index's name is kept as a column. See [pandas interop](interop.md#pandas-interop).
+shares the index's name is kept as a column. Invalid labels raise at import: datetime must strictly increase without NaT, and integer/string labels must be unique. See [pandas interop](interop.md#pandas-interop).
 
 ```py
 df = DataFrame.from_pandas(pandas_df)   # pandas.DataFrame -> volas DataFrame
@@ -602,7 +602,7 @@ A frame derived from another either **continues its series** or **starts a new o
   else as it is: the remaining cached columns stay cached and continue, and the rows only
   the removed ones read before the first row are released.
 - **Every other derivation is a new series**: a selection of rows that are not consecutive
-  or not in order (a mask with gaps, `iloc[[0, 2, 5]]`, `sort_index(ascending=False)`,
+  or not in order (a mask with gaps, `iloc[[0, 2, 5]]`, a valid descending integer/string index,
   `nlargest`), `astype`, `rename`, `set_index` / `reset_index`, a new `index=` or `dtype=`,
   `tz_localize` / `tz_convert`, and every **value transform** that builds a frame from
   the cells (`fillna`, `ffill` / `bfill`, `isna` / `notna`, `round`, `abs`, `clip`,
@@ -616,7 +616,7 @@ A frame derived from another either **continues its series** or **starts a new o
   the new frame's own rows. A 2-D
   selection of rows that are not consecutive (`df.loc[mask, cols]`) naming a cached column
   raises `KeyError` — read its values as a Series, `df.loc[mask, 'ma:5']`.
-- `copy()` / `DataFrame(df)` copy everything.
+- Every derivation checks its resulting labels: repeated rows raise `ValueError`; reverse slicing or sorting that leaves a DatetimeIndex out of order raises too. Integer/string labels may be reordered if unique. The source stays unchanged. `copy()` / `DataFrame(df)` copy everything.
 
 A derivation of a frame whose cached columns are stale raises, like any bulk read (call
 `fulfill()` first); `copy()` proceeds. A derived frame of a bounded window is an unbounded
@@ -834,8 +834,8 @@ its last row is their cumulation. On a tf-aware frame:
   marks them stale, and the next read recomputes just the tail.
 - **df.cumulate(target)** must be a whole multiple of the source frame (e.g.
   `5m→15m`, not `5m→7m`; a week or 3-day bar does not nest into a month/year);
-  at the same time frame the same effective cumulators return a copy keeping the open
-  fine bars, different ones raise before any change; cached columns are dropped (see [Cumulation](cumulation.md)).
+  at the same time frame the same effective cumulators return a copy keeping the open fine bars;
+  different ones raise an error before any change; cached columns are dropped (see [Cumulation](cumulation.md)).
 - **A derived frame of the same bars stays tf-aware.** A selection ending at the forming
   row (`df.iloc[a:]`, `df.tail(n)`, `df.loc[t:]`) keeps the open period, so the next finer
   bar still folds into it; a projection and `rename` (each column keeps its aggregator)

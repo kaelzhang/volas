@@ -1,6 +1,7 @@
 //! `DataFrame` import / export (NumPy, CSV, pandas, Arrow) and directive evaluation.
 
 
+use volas_core::ColumnView;
 use numpy::{IntoPyArray, PyReadwriteArray2};
 use pyo3::exceptions::{PyTypeError, PyValueError};
 use pyo3::prelude::*;
@@ -149,7 +150,7 @@ impl PyDataFrame {
             self.refresh_computed(Some(&name))?;
         }
         let col = self.inner.column(&name).map_err(pyerr)?.clone();
-        Ok(self.present_series(name, col))
+        self.present_series(name, col)
     }
 
     /// A copy of the frame — preserving the cached directive columns / cursor and
@@ -306,7 +307,7 @@ impl PyDataFrame {
     #[pyo3(signature = (data, *, copy = volas_arrow::DEFAULT_IMPORT_COPY), text_signature = "(data, *, copy=False)")]
     pub(crate) fn from_arrow(data: &Bound<'_, PyAny>, copy: bool) -> PyResult<PyDataFrame> {
         let (names, cols, height) = crate::arrow::frame_from_arrow_obj(data, copy)?;
-        let frame = DataFrame::new(names, cols, Some(Index::range(height))).map_err(pyerr)?;
+        let frame = DataFrame::new(names, cols, Some(Index::new(None, volas_core::IndexKind::Range { start: 0, len: height }).map_err(pyerr)?)).map_err(pyerr)?;
         Self::validate_schema(&frame)?;
         Ok(PyDataFrame::plain(frame))
     }
@@ -361,13 +362,12 @@ impl PyDataFrame {
         // Fast path: an entirely numeric/bool frame is exactly the f64 matrix (an
         // empty frame counts — `all` over no columns is true, checked first).
         let all_numeric = cols.iter().all(|c| {
-            matches!(
-                c,
-                Column::F64(_)
-                    | Column::F32(_)
-                    | Column::I64(..)
-                    | Column::I32(..)
-                    | Column::Bool(..)
+            matches!(c.view(),
+                ColumnView::F64(_)
+                    | ColumnView::F32(_)
+                    | ColumnView::I64(..)
+                    | ColumnView::I32(..)
+                    | ColumnView::Bool(..)
             )
         });
         if all_numeric {
@@ -382,7 +382,7 @@ impl PyDataFrame {
         // raw i64 ns buffer (ns-exact, NaT = i64::MIN native). The old path boxed
         // each cell into a Python `Timestamp` then let NumPy re-coerce it, which
         // truncated ns and failed outright on a NaT cell (P1-01 / D1 / D2).
-        if cols.iter().all(|c| matches!(c, Column::Datetime(_))) {
+        if cols.iter().all(|c| matches!(c.view(), ColumnView::Datetime(_))) {
             let (data, h, w) = df.to_row_major_i64();
             let arr = ndarray::Array2::from_shape_vec((h, w), data)
                 .map_err(|e| PyValueError::new_err(e.to_string()))?
@@ -421,7 +421,7 @@ impl PyDataFrame {
                 .collect::<PyResult<_>>()?,
             None => (0..df.width()).collect(),
         };
-        if let Some(c) = positions.iter().find(|&&j| matches!(df.columns()[j], Column::Str(..))) {
+        if let Some(c) = positions.iter().find(|&&j| matches!(df.columns()[j].view(), ColumnView::Str(..))) {
             return Err(PyValueError::new_err(format!(
                 "fill_into: column \"{}\" is a string column (no float value) — exclude it via columns=",
                 df.names()[*c]
@@ -436,15 +436,15 @@ impl PyDataFrame {
                 // F64 (the common float feature matrix) reads its slice directly — no
                 // per-column `to_f64_vec` heap allocation. Other dtypes keep the
                 // validity-aware conversion (NA -> NaN), unchanged.
-                match &df.columns()[j] {
-                    Column::F64(buf) => {
+                match df.columns()[j].view() {
+                    ColumnView::F64(buf) => {
                         let s = buf.as_slice();
                         for i in 0..h {
                             a[[i, jj]] = s[i] as f32;
                         }
                     }
-                    col => {
-                        let v = col.to_f64_vec();
+                    _ => {
+                        let v = df.columns()[j].to_f64_vec();
                         for i in 0..h {
                             a[[i, jj]] = v[i] as f32;
                         }
@@ -459,15 +459,15 @@ impl PyDataFrame {
             for (jj, &j) in positions.iter().enumerate() {
                 // F64 reads its slice directly (no `to_f64_vec` allocation); other
                 // dtypes keep the validity-aware NA -> NaN conversion, unchanged.
-                match &df.columns()[j] {
-                    Column::F64(buf) => {
+                match df.columns()[j].view() {
+                    ColumnView::F64(buf) => {
                         let s = buf.as_slice();
                         for i in 0..h {
                             a[[i, jj]] = s[i];
                         }
                     }
-                    col => {
-                        let v = col.to_f64_vec();
+                    _ => {
+                        let v = df.columns()[j].to_f64_vec();
                         for i in 0..h {
                             a[[i, jj]] = v[i];
                         }

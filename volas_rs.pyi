@@ -259,6 +259,7 @@ class DatetimeAccessor:
 
 @final
 class Series:
+    """An indexed column: labels stay unique; datetime labels stay strictly increasing without NaT."""
     @staticmethod
     def from_arrow(data: Any, name: str | None = ..., *, copy: bool = False) -> Series:
         """Borrow immutable matching Arrow buffers; copy=True takes an owned snapshot.
@@ -473,6 +474,7 @@ class Row:
 
 @final
 class DataFrame:
+    """A columnar frame with unique labels; datetime indexes are strictly increasing without NaT."""
     def __new__(
         cls,
         data: dict[str, Any] | DataFrame,

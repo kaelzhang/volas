@@ -72,6 +72,12 @@ assert_eq!(close.as_f64(), Some(&[10.5, 10.5, 13.0][..])); // 借用切片（仅
 `Column::to_f64_vec`（拥有所有权）、`Column::as_f64`（借用，非 `f64` 返回 `None`）、
 `Column::is_valid`（逐单元格 NA 检查）、`Column::len`、`Column::dtype`。
 
+
+`Column` 的存储配对及 `Series` 的结构均不公开；通过列的只读类型访问器或借用的 `ColumnView` 读取数据。`Series::new` 在所有构建模式下检查数据与索引的长度，使用 `name()`、`data()` 和 `index()` 借用各部分；受检的 `Series::scatter` 仅更新选中的值，保持结构和标签不变。
+
+带标签的索引统一使用 `Index::new(name, IndexKind::...)` 构造：datetime 标签必须严格递增且不含 NaT，整数和字符串标签必须唯一但不限制顺序。`DataFrame::new` 也验证索引；`Index::take`、`extend` 及 frame 行选择若产生无效标签则返回错误，因此 datetime 索引不能逆序排列。
+
+
 ### 缺失值(NA)
 
 单元格的缺失与其取值无关。浮点列用 `NaN` 作为 NA 标记；整数 / 布尔 / 字符串列携带一个
@@ -79,7 +85,7 @@ assert_eq!(close.as_f64(), Some(&[10.5, 10.5, 13.0][..])); // 借用切片（仅
 
 ```rust
 use volas::Column;
-use volas::core::Validity;
+use volas::Validity;
 
 // 浮点列：NaN 即缺失标记。
 let prices = Column::f64(vec![1.0, f64::NAN, 3.0]);
@@ -216,6 +222,8 @@ Rust 增量输入可用 `volas::time::Cumulator::append`，它保留开放周期
 普通 `new` / `append` 构建器保留既有快照容量预算。
 
 
+原始细粒度数据若包含连续重发，使用 `volas::time::RawFineInput::new(names, columns, timestamps, tz, index_name)`：该入口检查时间非递减且不含 NaT，并在每组连续相等时间戳中保留最后一行，再构造合法 frame。通过 `Cumulator::from_raw(&input, tf, spec)` 或 `append_raw(&input)` 送入累积器；普通 `Index` 与 `DataFrame` 构造始终要求标签唯一。
+
 ## 错误处理
 
 可失败的函数返回 `Result<_, VolasError>`（单一错误枚举）——对非法输入不 panic。未知或
@@ -239,10 +247,9 @@ assert!(bad.is_err());
 - `directive`——`parse` / `execute` / `stringify` / `lookback`，以及 `Ast`；
 - `compute`——数值内核与技术指标（纯函数）；
 - `time`——时间框架累积（OHLCV 重采样）；
-- `core`——完整的 `volas-core` 表面，用于不常用的类型。
 
-本 crate 是一个轻量门面，把 volas workspace（`volas-core`、`volas-compute`、
-`volas-directive`、`volas-time`、`volas-io`）重导出到单一依赖之后。
+
+本 crate 通过单一依赖提供经过选择的受检接口，不再重导出完整 core 或其底层存储类型。
 
 ## 许可证
 

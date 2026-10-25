@@ -13,6 +13,7 @@
 //! `copy=True` returns an **independent** owned copy (writable, flagged `IS_COPIED`); a
 //! non-CPU `dl_device` or a `stream` is refused with `BufferError` (CPU-only producer).
 
+use volas_core::ColumnView;
 use std::any::Any;
 use std::ffi::{c_void, CStr};
 use std::ptr;
@@ -167,14 +168,14 @@ fn dl_parts(
              mask) — fill the NA first",
         )
     };
-    match col {
-        Column::F64(b) => parts!(b, KDL_FLOAT, 64),
-        Column::F32(b) => parts!(b, KDL_FLOAT, 32),
-        Column::I64(_, v) | Column::I32(_, v) | Column::Bool(_, v) if v.has_nulls() => Err(na()),
-        Column::I64(b, _) => parts!(b, KDL_INT, 64),
-        Column::I32(b, _) => parts!(b, KDL_INT, 32),
-        Column::Bool(b, _) => parts!(b, KDL_BOOL, 8),
-        Column::Str(..) | Column::Datetime(..) => Err(PyBufferError::new_err(format!(
+    match col.view() {
+        ColumnView::F64(b) => parts!(b, KDL_FLOAT, 64),
+        ColumnView::F32(b) => parts!(b, KDL_FLOAT, 32),
+        ColumnView::I64(_, v) | ColumnView::I32(_, v) | ColumnView::Bool(_, v) if v.has_nulls() => Err(na()),
+        ColumnView::I64(b, _) => parts!(b, KDL_INT, 64),
+        ColumnView::I32(b, _) => parts!(b, KDL_INT, 32),
+        ColumnView::Bool(b, _) => parts!(b, KDL_BOOL, 8),
+        ColumnView::Str(..) | ColumnView::Datetime(..) => Err(PyBufferError::new_err(format!(
             "cannot export a {} column via DLPack (only numeric / bool dtypes are supported)",
             col.dtype()
         ))),

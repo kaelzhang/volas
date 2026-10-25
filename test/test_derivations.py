@@ -456,7 +456,8 @@ def test_a_datetime_index_never_repeats_a_label(minutes):
     with pytest.raises(ValueError, match='duplicate labels'):
         DataFrame.from_pandas(pdf)
     nat = np.array(['NaT', 'NaT', '2024-01-01'], dtype='datetime64[ns]')
-    assert len(DataFrame({'close': [1.0, 2.0, 3.0]}, index=nat)) == 3  # NaT is no label
+    with pytest.raises(ValueError, match='without NaT'):
+        DataFrame({'close': [1.0, 2.0, 3.0]}, index=nat)
 
 
 DAYS = np.datetime64('2024-01-30', 'ns') + np.arange(40) * np.timedelta64(1, 'D')

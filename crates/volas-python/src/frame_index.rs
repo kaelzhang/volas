@@ -140,31 +140,11 @@ fn number_column(v: &Bound<'_, PyAny>, target: DType) -> PyResult<Column> {
         .map_err(|_| PyTypeError::new_err("expected a number"))
 }
 
-/// Assign a Python **scalar** into `col` at `positions`, in place, via the shared
-/// `scalar_to_column` + [`Column::scatter`] primitive — the Series setitem path (a
-/// DataFrame's cell writes reach `scatter` through `PyDataFrame::write_cells`).
-///
-/// **No selected positions** leave the column unchanged, so a typed fill (a string
-/// into a str column, say) errors only when it actually targets a cell of an
-/// incompatible column — the mixed-frame atomic rule: nothing is written unless every
-/// targeted column accepts the value.
-pub(crate) fn scatter_scalar(
-    col: &mut Column,
-    positions: &[usize],
-    value: &Bound<'_, PyAny>,
-) -> PyResult<()> {
-    if positions.is_empty() {
-        return Ok(());
-    }
-    let src = scalar_to_column(value, col.dtype())?;
-    col.scatter(positions, &src).map_err(pyerr)
-}
-
 /// Convert an array-like assignment value (list / NumPy array / `Series`) to a
 /// [`Column`]; core coerces it toward the target dtype.
 pub(crate) fn value_to_column(v: &Bound<'_, PyAny>) -> PyResult<Column> {
     if let Ok(s) = v.extract::<PyRef<PySeries>>() {
-        return Ok(s.inner.data.clone());
+        return Ok(s.inner.data().clone());
     }
     pyany_to_column(v)
 }
@@ -194,7 +174,7 @@ pub(crate) fn resolve_assignment(
 /// never becomes integer positions; an untyped empty list remains a list selector.
 pub(crate) fn as_bool_mask<'a>(
     sel: &Bound<'_, PyAny>, height: usize,
-    labels: impl FnOnce() -> std::borrow::Cow<'a, Index>,
+    labels: impl FnOnce() -> PyResult<std::borrow::Cow<'a, Index>>,
 ) -> PyResult<Option<Vec<usize>>> {
     if sel.is_exact_instance_of::<pyo3::types::PyBool>() {
         return Err(PyTypeError::new_err("boolean mask must be one-dimensional"));
@@ -234,7 +214,7 @@ pub(crate) fn as_bool_mask<'a>(
 pub(crate) fn iloc_positions(sel: &Bound<'_, PyAny>, labels: &Labels<'_>) -> PyResult<Vec<usize>> {
     let height = labels.rows.len();
 
-    if let Some(pos) = as_bool_mask(sel, height, || labels.index())? {
+    if let Some(pos) = as_bool_mask(sel, height, || Ok(labels.index()))? {
         return Ok(pos);
     }
     if let Ok(i) = sel.extract::<isize>() {
@@ -299,7 +279,7 @@ pub(crate) fn loc_positions(
     labels: &Labels<'_>,
     height: usize,
 ) -> PyResult<Vec<usize>> {
-    if let Some(pos) = as_bool_mask(sel, height, || labels.index())? {
+    if let Some(pos) = as_bool_mask(sel, height, || Ok(labels.index()))? {
         return Ok(pos);
     }
     if let Ok(slice) = sel.downcast::<PySlice>() {
@@ -326,7 +306,7 @@ pub(crate) enum AxisSel {
 pub(crate) fn iloc_row_axis(sel: &Bound<'_, PyAny>, index: &Index) -> PyResult<RowAxis> {
     let height = index.len();
 
-    if let Some(positions) = as_bool_mask(sel, height, || std::borrow::Cow::Borrowed(index))? {
+    if let Some(positions) = as_bool_mask(sel, height, || Ok(std::borrow::Cow::Borrowed(index)))? {
         return Ok(RowAxis::Rows(RowSel::Positions(positions)));
     }
     if let Ok(i) = sel.extract::<isize>() {
@@ -354,7 +334,7 @@ pub(crate) enum RowAxis {
 pub(crate) fn iloc_col_axis(sel: &Bound<'_, PyAny>, df: &DataFrame) -> PyResult<AxisSel> {
     let width = df.width();
 
-    if let Some(positions) = as_bool_mask(sel, width, || std::borrow::Cow::Owned(Index::str(df.names().to_vec())))? {
+    if let Some(positions) = as_bool_mask(sel, width, || Index::new(None, volas_core::IndexKind::Str(df.names().to_vec())).map(std::borrow::Cow::Owned).map_err(pyerr))? {
         return Ok(AxisSel::Many(positions));
     }
     if let Ok(j) = sel.extract::<isize>() {
@@ -388,7 +368,7 @@ pub(crate) fn loc_row_axis(
         return Ok(RowAxis::Rows(label_rows(index, slice)?));
     }
     let labels = Labels::whole(index);
-    if let Some(positions) = as_bool_mask(sel, height, || std::borrow::Cow::Borrowed(index))? {
+    if let Some(positions) = as_bool_mask(sel, height, || Ok(std::borrow::Cow::Borrowed(index)))? {
         return Ok(RowAxis::Rows(RowSel::Positions(positions)));
     }
     if sel.downcast::<PyList>().is_ok() {
@@ -430,7 +410,7 @@ pub(crate) fn period_rows(key: &Bound<'_, PyAny>, index: &Index) -> PyResult<Opt
 /// Resolve a `loc` column axis (name / name-list / inclusive name-slice) to
 /// column positions.
 pub(crate) fn loc_col_axis(sel: &Bound<'_, PyAny>, df: &DataFrame) -> PyResult<AxisSel> {
-    if let Some(positions) = as_bool_mask(sel, df.width(), || std::borrow::Cow::Owned(Index::str(df.names().to_vec())))? {
+    if let Some(positions) = as_bool_mask(sel, df.width(), || Index::new(None, volas_core::IndexKind::Str(df.names().to_vec())).map(std::borrow::Cow::Owned).map_err(pyerr))? {
         return Ok(AxisSel::Many(positions));
     }
     let pos_of = |name: &str| PyDataFrame::column_position(df, name);
@@ -489,16 +469,16 @@ pub(crate) fn select_2d(
     match (rows, cols) {
         (RowAxis::One(i), AxisSel::One(j)) => np_scalar_to_py(py, &df.columns()[j], i),
         (RowAxis::Rows(r), AxisSel::One(j)) => {
-            let sub = project_cols(df, &[j])?.take(&r.positions());
+            let sub = project_cols(df, &[j])?.take(&r.positions()).map_err(pyerr)?;
             let name = sub.names()[0].clone();
             let col = sub.columns()[0].clone();
             let series = PySeries {
-                inner: Series::new(Some(name), col, Arc::clone(sub.index())),
+                inner: Series::new(Some(name), col, Arc::clone(sub.index())).map_err(pyerr)?,
             };
             Ok(Py::new(py, series)?.into_any())
         }
         (RowAxis::One(i), AxisSel::Many(c)) => {
-            let sub = project_cols(df, &c)?.take(&[i]);
+            let sub = project_cols(df, &c)?.take(&[i]).map_err(pyerr)?;
             Ok(Py::new(py, PyRow { inner: sub })?.into_any())
         }
         (RowAxis::Rows(sel), AxisSel::Many(c)) => {
@@ -560,7 +540,7 @@ impl DataFrameILoc {
             }
         }
         match iloc_row_axis(key, df.index())? {
-            RowAxis::One(i) => Ok(Py::new(py, row_at(df, i))?.into_any()),
+            RowAxis::One(i) => Ok(Py::new(py, row_at(df, i)?)?.into_any()),
             RowAxis::Rows(sel) => Ok(Py::new(py, pf.derive_rows(&view, &sel)?)?.into_any()),
         }
     }
@@ -577,7 +557,7 @@ impl DataFrameILoc {
         let mut pf = self.parent.borrow_mut(py);
         let (rows, col) = split_row_col(key, "iloc")?;
         // Positions of the visible rows; the write path maps them onto the frame.
-        let columns = match as_bool_mask(&col, pf.inner.width(), || std::borrow::Cow::Owned(Index::str(pf.inner.names().to_vec())))? {
+        let columns = match as_bool_mask(&col, pf.inner.width(), || Index::new(None, volas_core::IndexKind::Str(pf.inner.names().to_vec())).map(std::borrow::Cow::Owned).map_err(pyerr))? {
             Some(selected) => AxisSel::Many(selected),
             None => AxisSel::One(norm_idx(col.extract::<isize>()?, pf.inner.width())?),
         };
@@ -611,12 +591,12 @@ impl PyDataFrame {
     }
 }
 
-pub(crate) fn row_at(df: &DataFrame, i: usize) -> PyRow {
+pub(crate) fn row_at(df: &DataFrame, i: usize) -> PyResult<PyRow> {
     // `take` materializes the index label (Range -> Int64([i])) and preserves
     // every column's dtype — a faithful 1-row frame.
-    PyRow {
-        inner: df.take(&[i]),
-    }
+    Ok(PyRow {
+        inner: df.take(&[i]).map_err(pyerr)?,
+    })
 }
 
 /// A positional slice of the visible rows: a contiguous `step == 1` slice is a range;
@@ -736,7 +716,7 @@ impl DataFrameLoc {
             }
         }
         match loc_row_axis(key, index, df.height())? {
-            RowAxis::One(i) => Ok(Py::new(py, row_at(df, i))?.into_any()),
+            RowAxis::One(i) => Ok(Py::new(py, row_at(df, i)?)?.into_any()),
             RowAxis::Rows(sel) => Ok(Py::new(py, pf.derive_rows(&view, &sel)?)?.into_any()),
         }
     }
@@ -752,7 +732,7 @@ impl DataFrameLoc {
     ) -> PyResult<()> {
         let mut pf = self.parent.borrow_mut(py);
         let (rows, col) = split_row_col(key, "loc")?;
-        let columns = match as_bool_mask(&col, pf.inner.width(), || std::borrow::Cow::Owned(Index::str(pf.inner.names().to_vec())))? {
+        let columns = match as_bool_mask(&col, pf.inner.width(), || Index::new(None, volas_core::IndexKind::Str(pf.inner.names().to_vec())).map(std::borrow::Cow::Owned).map_err(pyerr))? {
             Some(selected) => AxisSel::Many(selected),
             None => {
                 let name = col.extract::<String>().map_err(|_| PyTypeError::new_err("loc assignment column must be a single column name or boolean mask"))?;
@@ -841,29 +821,29 @@ pub struct SeriesLoc {
 impl SeriesLoc {
     fn __getitem__(&self, py: Python<'_>, key: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
         if let Ok(slice) = key.downcast::<PySlice>() {
-            let (lo, hi) = label_bounds(slice, &self.inner.index)?;
+            let (lo, hi) = label_bounds(slice, self.inner.index())?;
             let (a, b) = self
                 .inner
-                .index
+                .index()
                 .label_slice(lo.as_ref(), hi.as_ref())
                 .map_err(pyerr)?;
             let positions: Vec<usize> = (a..b).collect();
-            let data = self.inner.data.take(&positions);
-            let index = Arc::new(self.inner.index.take(&positions));
+            let index = Arc::new(self.inner.index().take(&positions).map_err(pyerr)?);
+            let data = self.inner.data().take(&positions);
             return Ok(Py::new(
                 py,
                 PySeries {
-                    inner: Series::new(self.inner.name.clone(), data, index),
+                    inner: Series::new(self.inner.name().map(str::to_owned), data, index).map_err(pyerr)?,
                 },
             )?
             .into_any());
         }
-        let label = parse_label(key, &self.inner.index)?;
+        let label = parse_label(key, self.inner.index())?;
         let pos = self
             .inner
-            .index
+            .index()
             .position_of(&label)
             .ok_or_else(|| PyKeyError::new_err("label not found"))?;
-        np_scalar_to_py(py, &self.inner.data, pos)
+        np_scalar_to_py(py, self.inner.data(), pos)
     }
 }

@@ -3,7 +3,7 @@
 use super::*;
 
 impl Column {
-    /// Parse this column into a [`Column::Datetime`] (epoch ns). `Str` cells are
+    /// Parse this column into a [`Column`] of datetime values (epoch ns). `Str` cells are
     /// parsed via [`datetime::parse_ns`]; an already-`Datetime` column is shared
     /// back (cheap). Errors on an unparseable cell or an unsupported dtype.
     pub fn to_datetime(&self) -> Result<Column> {
@@ -16,8 +16,8 @@ impl Column {
     /// *index* (storage stays UTC).
     pub fn to_datetime_tz(&self, tz: crate::tz::Tz) -> Result<Column> {
         match self {
-            Column::Datetime(_) => Ok(self.clone()),
-            Column::Str(v, val) => {
+            Column { data: ColumnData::Datetime(_) } => Ok(self.clone()),
+            Column { data: ColumnData::Str(v, val) } => {
                 let mut out = Vec::with_capacity(v.len());
                 for (i, s) in v.iter().enumerate() {
                     // A missing (NA) string cell — or a present but empty/blank one —
@@ -70,7 +70,7 @@ impl Column {
             // validity bit, and treat a float `NaN` as missing. Every present value
             // passes the instant gate (an unknown unit or an out-of-range instant
             // raises — never saturates or lands on `NaT`).
-            Column::I64(v, val) => v
+            Column { data: ColumnData::I64(v, val) } => v
                 .iter()
                 .enumerate()
                 .map(|(i, &x)| {
@@ -78,7 +78,7 @@ impl Column {
                 })
                 .collect::<Result<Vec<_>>>()
                 .map(Column::datetime),
-            Column::F64(v) => v
+            Column { data: ColumnData::F64(v) } => v
                 .iter()
                 .map(|&x| if x.is_nan() { Ok(datetime::NAT) } else { f64_to_ns(x) })
                 .collect::<Result<Vec<_>>>()
@@ -98,7 +98,7 @@ impl Column {
         }
         // An int/bool source to an int/bool target keeps its missing cells and
         // converts present values exactly (no f64 round-trip; range-checked).
-        if matches!(self, Column::I64(..) | Column::I32(..) | Column::Bool(..))
+        if matches!(self, Column { data: ColumnData::I64(..) } | Column { data: ColumnData::I32(..) } | Column { data: ColumnData::Bool(..) })
             && matches!(to, DType::I64 | DType::I32 | DType::Bool)
         {
             return self.cast_int_bool(to);
@@ -107,7 +107,7 @@ impl Column {
         // each cell rather than funnelling to a silent all-NaN (`to_f64_vec` reads
         // a str column as NaN): a valid numeric string converts, an empty/missing
         // cell becomes NA, any other non-empty string raises (contract C4).
-        if let Column::Str(v, val) = self {
+        if let Column { data: ColumnData::Str(v, val) } = self {
             if matches!(to, DType::F64 | DType::F32 | DType::I64 | DType::I32) {
                 return Self::cast_str_to_numeric(v, val, to);
             }
@@ -116,7 +116,7 @@ impl Column {
         // (values past 2^53 quantize to ~256ns), so reject it (pandas does too).
         // `astype('int64')` gives the exact ns; an explicit `to_numpy(dtype=...)`
         // export is the deliberate opt-in lossy channel.
-        if matches!(self, Column::Datetime(_)) && matches!(to, DType::F64 | DType::F32) {
+        if matches!(self, Column { data: ColumnData::Datetime(_) }) && matches!(to, DType::F64 | DType::F32) {
             return Err(VolasError::DType(
                 "cannot cast a datetime column to float (lossy past 2^53 ns); \
                  use astype('int64') for the exact epoch nanoseconds"
@@ -125,7 +125,7 @@ impl Column {
         }
         // Epoch nanoseconds never fit int32 (except meaningless near-1970
         // instants), so a datetime -> int32 cast is rejected like the float one.
-        if matches!(self, Column::Datetime(_)) && to == DType::I32 {
+        if matches!(self, Column { data: ColumnData::Datetime(_) }) && to == DType::I32 {
             return Err(VolasError::DType(
                 "cannot cast a datetime column to int32 (epoch nanoseconds do not fit); \
                  use astype('int64') for the exact epoch nanoseconds"
@@ -139,12 +139,12 @@ impl Column {
             DType::F64 | DType::F32 => self.convert_lossless(to),
             DType::I64 => match self {
                 // F32 truncates like F64 (consistent with F32 -> I32).
-                Column::F64(_) | Column::F32(_) => truncate_to_i64(&self.to_f64_vec()),
+                Column { data: ColumnData::F64(_) } | Column { data: ColumnData::F32(_) } => truncate_to_i64(&self.to_f64_vec()),
                 // int/bool sources are handled by `cast_int_bool` above.
                 // The exact epoch nanoseconds; a NaT cell stays missing in the
                 // int64 validity (# C2) instead of surfacing the i64::MIN sentinel
                 // as a value (pandas raises here; volas's native-NA int carries it).
-                Column::Datetime(v) => {
+                Column { data: ColumnData::Datetime(v) } => {
                     let validity = Validity::from_valid_iter(
                         v.len(),
                         (0..v.len()).map(|i| self.is_valid(i)),
@@ -160,11 +160,11 @@ impl Column {
             // missing float cell (NaN) STAYS missing — never numpy's
             // NaN-is-truthy footgun. int sources go through `cast_int_bool`.
             DType::Bool => match self {
-                Column::F64(v) => Ok(Column::bool_masked(
+                Column { data: ColumnData::F64(v) } => Ok(Column::bool_masked(
                     v.iter().map(|&x| x != 0.0).collect(),
                     Validity::from_valid_iter(v.len(), v.iter().map(|x| !x.is_nan())),
                 )),
-                Column::F32(v) => Ok(Column::bool_masked(
+                Column { data: ColumnData::F32(v) } => Ok(Column::bool_masked(
                     v.iter().map(|&x| x != 0.0).collect(),
                     Validity::from_valid_iter(v.len(), v.iter().map(|x| !x.is_nan())),
                 )),
@@ -220,7 +220,7 @@ impl Column {
         if self.dtype() == to {
             return Ok(self.clone());
         }
-        if !(self.dtype().is_numeric() || matches!(self, Column::Bool(..)))
+        if !(self.dtype().is_numeric() || matches!(self, Column { data: ColumnData::Bool(..) }))
             || !to.is_numeric()
         {
             return Err(VolasError::DType(format!(
@@ -237,8 +237,8 @@ impl Column {
         // each present cell as an exact integer or a float (never both)
         let cell = |i: usize| -> Option<std::result::Result<i64, f64>> {
             self.is_valid(i).then(|| match self {
-                Column::F64(v) => Err(v[i]),
-                Column::F32(v) => Err(v[i] as f64),
+                Column { data: ColumnData::F64(v) } => Err(v[i]),
+                Column { data: ColumnData::F32(v) } => Err(v[i] as f64),
                 other => Ok(other.get_i64(i)),
             })
         };
@@ -246,7 +246,7 @@ impl Column {
             DType::F64 => Column::f64(match self {
                 // Float targets carry NaN in-band: no validity bitmap. Preserve
                 // the conversion's canonical missing NaN, including NaN payloads.
-                Column::F32(v) => v.iter().map(|&x| if x.is_nan() { f64::NAN } else { x as f64 }).collect(),
+                Column { data: ColumnData::F32(v) } => v.iter().map(|&x| if x.is_nan() { f64::NAN } else { x as f64 }).collect(),
                 _ => {
                     let mut out = Vec::with_capacity(n);
                     for i in 0..n {
@@ -263,7 +263,7 @@ impl Column {
             DType::F32 => {
                 let mut out = Vec::with_capacity(n);
                 match self {
-                    Column::F64(v) => {
+                    Column { data: ColumnData::F64(v) } => {
                         for &x in v.iter() {
                             out.push(if x.is_nan() { f32::NAN } else {
                                 f64_to_f32_in_range(x).ok_or_else(|| out_of_range(&x))?
@@ -330,24 +330,24 @@ impl Column {
                 .collect()
         };
         match (self, to) {
-            (Column::I64(v, _), DType::I32) => Ok(Column::i32_masked(narrow_i32(v)?, validity)),
-            (Column::I64(v, _), DType::Bool) => Ok(Column::bool_masked(
+            (Column { data: ColumnData::I64(v, _) }, DType::I32) => Ok(Column::i32_masked(narrow_i32(v)?, validity)),
+            (Column { data: ColumnData::I64(v, _) }, DType::Bool) => Ok(Column::bool_masked(
                 v.iter().map(|&x| x != 0).collect(),
                 validity,
             )),
-            (Column::I32(v, _), DType::I64) => Ok(Column::i64_masked(
+            (Column { data: ColumnData::I32(v, _) }, DType::I64) => Ok(Column::i64_masked(
                 v.iter().map(|&x| x as i64).collect(),
                 validity,
             )),
-            (Column::I32(v, _), DType::Bool) => Ok(Column::bool_masked(
+            (Column { data: ColumnData::I32(v, _) }, DType::Bool) => Ok(Column::bool_masked(
                 v.iter().map(|&x| x != 0).collect(),
                 validity,
             )),
-            (Column::Bool(v, _), DType::I64) => Ok(Column::i64_masked(
+            (Column { data: ColumnData::Bool(v, _) }, DType::I64) => Ok(Column::i64_masked(
                 v.iter().map(|&b| b as i64).collect(),
                 validity,
             )),
-            (Column::Bool(v, _), DType::I32) => Ok(Column::i32_masked(
+            (Column { data: ColumnData::Bool(v, _) }, DType::I32) => Ok(Column::i32_masked(
                 v.iter().map(|&b| b as i32).collect(),
                 validity,
             )),

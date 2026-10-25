@@ -80,26 +80,27 @@ def test_sort_index_descending_reverses_rows():
     _eq(_df().sort_index(False), ROWS[::-1])
 
 
-def test_sort_index_datetime_nat_sorts_last_both_directions():
-    # V9: a NaT index label sinks to the end in both directions (pandas
-    # na_position='last' / parity with sort_values), not sorted as the smallest
-    # i64 — which used to put NaT first.
+def test_sort_index_rejects_datetime_nat_and_column_sort_keeps_nat_last():
     dates = np.array(["2021-01-03", "NaT", "2021-01-01"], dtype="datetime64[ns]")
-    d = volas.DataFrame({"date": dates, "v": [3.0, 99.0, 1.0]}).set_index("date")
-    # ascending: 01-01, 01-03, then NaT
-    assert d.sort_index(True)["v"].to_list() == [1.0, 3.0, 99.0]
-    # descending: 01-03, 01-01, then NaT (NaT stays last, not reversed to first)
-    assert d.sort_index(False)["v"].to_list() == [3.0, 1.0, 99.0]
+    d = volas.DataFrame({"date": dates, "v": [3.0, 99.0, 1.0]})
+    with pytest.raises(ValueError, match="without NaT"):
+        d.set_index("date")
+    # Missing datetime values remain valid columns and sort last in either direction.
+    asc = d["date"].sort_values(True)
+    desc = d["date"].sort_values(False)
+    assert d.loc[asc.index.tolist()]["v"].to_list() == [1.0, 3.0, 99.0]
+    assert d.loc[desc.index.tolist()]["v"].to_list() == [3.0, 1.0, 99.0]
 
 
-def test_sort_index_multiple_nat_labels_all_sink_last_stably():
-    # two NaT labels exercise the NaT-vs-NaT comparison: both sink to the end, and
-    # equal (NaT) labels keep their original relative order (stable sort).
+def test_sort_index_rejects_multiple_nat_labels_and_column_sort_is_stable():
     dates = np.array(["2021-01-02", "NaT", "2021-01-01", "NaT"], dtype="datetime64[ns]")
-    d = volas.DataFrame({"date": dates, "v": [2.0, 98.0, 1.0, 99.0]}).set_index("date")
-    asc = d.sort_index(True)["v"].to_list()
-    assert asc[:2] == [1.0, 2.0]      # the real dates sort ahead, ascending
-    assert asc[2:] == [98.0, 99.0]    # both NaT rows last, in original order
+    d = volas.DataFrame({"date": dates, "v": [2.0, 98.0, 1.0, 99.0]})
+    with pytest.raises(ValueError, match="without NaT"):
+        d.set_index("date")
+    ordered = d["date"].sort_values(True)
+    asc = d.loc[ordered.index.tolist()]["v"].to_list()
+    assert asc[:2] == [1.0, 2.0]
+    assert asc[2:] == [98.0, 99.0]
 
 
 def test_rename_columns():
@@ -126,12 +127,13 @@ def test_set_index_rejects_na_int_and_str_labels():
         volas.DataFrame({"s": ["a", None], "v": [10, 20]}).set_index("s")
 
 
-def test_set_index_datetime_nat_still_allowed():
-    # datetime is the one nullable index kind: NaT is a physical sentinel in the
-    # label vector (rendered 'NaT', sorted last) — not a fabricated value.
+def test_set_index_rejects_datetime_nat_but_keeps_missing_column():
     t = np.array(["2021-01-01", "NaT"], dtype="datetime64[ns]")
-    v = volas.DataFrame({"t": t, "v": [10, 20]}).set_index("t")
-    assert v.shape == (2, 1)
+    frame = volas.DataFrame({"t": t, "v": [10, 20]})
+    with pytest.raises(ValueError, match="without NaT"):
+        frame.set_index("t")
+    assert frame.shape == (2, 2)
+    assert frame["t"].isna().to_list() == [False, True]
 
 
 def test_astype_to_int():

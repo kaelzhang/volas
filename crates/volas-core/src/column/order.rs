@@ -8,15 +8,15 @@ impl Column {
     /// A contiguous `[start, end)` slice (a fresh buffer).
     pub fn slice(&self, start: usize, end: usize) -> Column {
         match self {
-            Column::F64(v) => Column::F64(v.slice(start, end)),
-            Column::F32(v) => Column::F32(v.slice(start, end)),
-            Column::Bool(v, val) => {
+            Column { data: ColumnData::F64(v) } => Column { data: ColumnData::F64(v.slice(start, end)) },
+            Column { data: ColumnData::F32(v) } => Column { data: ColumnData::F32(v.slice(start, end)) },
+            Column { data: ColumnData::Bool(v, val) } => {
                 Column::bool_masked(v[start..end].to_vec(), val.slice(start, end))
             }
-            Column::I64(v, val) => Column::i64_masked(v[start..end].to_vec(), val.slice(start, end)),
-            Column::I32(v, val) => Column::i32_masked(v[start..end].to_vec(), val.slice(start, end)),
-            Column::Str(v, val) => Column::Str(v.slice(start, end), val.slice(start, end)),
-            Column::Datetime(v) => Column::datetime(v[start..end].to_vec()),
+            Column { data: ColumnData::I64(v, val) } => Column::i64_masked(v[start..end].to_vec(), val.slice(start, end)),
+            Column { data: ColumnData::I32(v, val) } => Column::i32_masked(v[start..end].to_vec(), val.slice(start, end)),
+            Column { data: ColumnData::Str(v, val) } => Column { data: ColumnData::Str(v.slice(start, end), val.slice(start, end)) },
+            Column { data: ColumnData::Datetime(v) } => Column::datetime(v[start..end].to_vec()),
         }
     }
 
@@ -24,8 +24,8 @@ impl Column {
     /// the next append cycle. Other dtypes already have ordinary owned slices.
     pub(crate) fn slice_with_spare(&self, start: usize, end: usize, spare: usize) -> Column {
         match self {
-            Column::F64(v) => Column::F64(v.slice_with_spare(start, end, spare)),
-            Column::F32(v) => Column::F32(v.slice_with_spare(start, end, spare)),
+            Column { data: ColumnData::F64(v) } => Column { data: ColumnData::F64(v.slice_with_spare(start, end, spare)) },
+            Column { data: ColumnData::F32(v) } => Column { data: ColumnData::F32(v.slice_with_spare(start, end, spare)) },
             _ => self.slice(start, end),
         }
     }
@@ -34,8 +34,8 @@ impl Column {
     /// retain their ordinary independent slicing semantics.
     pub(crate) fn compact_range(&mut self, start: usize, end: usize, spare: usize) {
         match self {
-            Column::F64(v) => v.compact_range(start, end, spare),
-            Column::F32(v) => v.compact_range(start, end, spare),
+            Column { data: ColumnData::F64(v) } => v.compact_range(start, end, spare),
+            Column { data: ColumnData::F32(v) } => v.compact_range(start, end, spare),
             _ => *self = self.slice(start, end),
         }
     }
@@ -49,22 +49,22 @@ impl Column {
     pub(super) fn take_with_spare(&self, idx: &[usize], spare: usize, bytes: usize) -> Column {
         let gather = |v: &[f64]| collect_with_spare(idx.iter().map(|&i| v[i]), spare);
         match self {
-            Column::F64(v) => Column::f64(gather(v)),
-            Column::F32(v) => Column::f32(collect_with_spare(idx.iter().map(|&i| v[i]), spare)),
-            Column::Bool(v, val) => {
+            Column { data: ColumnData::F64(v) } => Column::f64(gather(v)),
+            Column { data: ColumnData::F32(v) } => Column::f32(collect_with_spare(idx.iter().map(|&i| v[i]), spare)),
+            Column { data: ColumnData::Bool(v, val) } => {
                 Column::bool_masked(collect_with_spare(idx.iter().map(|&i| v[i]), spare), val.take(idx))
             }
-            Column::I64(v, val) => {
+            Column { data: ColumnData::I64(v, val) } => {
                 Column::i64_masked(collect_with_spare(idx.iter().map(|&i| v[i]), spare), val.take(idx))
             }
-            Column::I32(v, val) => {
+            Column { data: ColumnData::I32(v, val) } => {
                 Column::i32_masked(collect_with_spare(idx.iter().map(|&i| v[i]), spare), val.take(idx))
             }
             // Gather straight into one contiguous `StrBuffer` (no intermediate
             // `Vec<String>`, so no per-cell allocation).
-            Column::Str(v, val) => {
+            Column { data: ColumnData::Str(v, val) } => {
                 if spare == 0 && bytes == 0 {
-                    return Column::Str(idx.iter().map(|&i| v.get(i)).collect(), val.take(idx));
+                    return Column { data: ColumnData::Str(idx.iter().map(|&i| v.get(i)).collect(), val.take(idx)) };
                 }
                 let size = idx.iter().map(|&i| v.get(i).len()).sum::<usize>();
                 let capacity = if spare == 0 { size + bytes } else { (size * 2).max(size + bytes) };
@@ -72,9 +72,9 @@ impl Column {
                 let rows = idx.len() + spare + usize::from(spare != 0);
                 let mut builder = crate::strbuf::StrBufferBuilder::with_capacities(rows, capacity);
                 for &i in idx { builder.push(v.get(i)); }
-                Column::Str(builder.finish(), val.take(idx))
+                Column { data: ColumnData::Str(builder.finish(), val.take(idx)) }
             }
-            Column::Datetime(v) => Column::datetime(collect_with_spare(idx.iter().map(|&i| v[i]), spare)),
+            Column { data: ColumnData::Datetime(v) } => Column::datetime(collect_with_spare(idx.iter().map(|&i| v[i]), spare)),
         }
     }
 
@@ -90,31 +90,31 @@ impl Column {
             )
         };
         match self {
-            Column::F64(v) => {
+            Column { data: ColumnData::F64(v) } => {
                 Column::f64(idx.iter().map(|p| p.map_or(f64::NAN, |i| v[i])).collect())
             }
-            Column::F32(v) => {
+            Column { data: ColumnData::F32(v) } => {
                 Column::f32(idx.iter().map(|p| p.map_or(f32::NAN, |i| v[i])).collect())
             }
-            Column::Bool(v, _) => Column::bool_masked(
+            Column { data: ColumnData::Bool(v, _) } => Column::bool_masked(
                 idx.iter().map(|p| p.is_some_and(|i| v[i])).collect(),
                 validity(),
             ),
-            Column::I64(v, _) => Column::i64_masked(
+            Column { data: ColumnData::I64(v, _) } => Column::i64_masked(
                 idx.iter().map(|p| p.map_or(0, |i| v[i])).collect(),
                 validity(),
             ),
-            Column::I32(v, _) => Column::i32_masked(
+            Column { data: ColumnData::I32(v, _) } => Column::i32_masked(
                 idx.iter().map(|p| p.map_or(0, |i| v[i])).collect(),
                 validity(),
             ),
             // `None` → empty placeholder (the validity marks it NA); gather builds the
             // `StrBuffer` in one pass.
-            Column::Str(v, _) => Column::Str(
+            Column { data: ColumnData::Str(v, _) } => Column { data: ColumnData::Str(
                 idx.iter().map(|p| p.map_or("", |i| v.get(i))).collect(),
                 validity(),
-            ),
-            Column::Datetime(v) => Column::datetime(
+            ) },
+            Column { data: ColumnData::Datetime(v) } => Column::datetime(
                 idx.iter().map(|p| p.map_or(i64::MIN, |i| v[i])).collect(),
             ),
         }
@@ -148,13 +148,13 @@ impl Column {
     pub(crate) fn group_records(&self) -> Vec<(usize, usize, bool)> {
         let len = self.len();
         match self {
-            Column::F64(v) => group_by(len, |i| float_key(v[i])),
-            Column::F32(v) => group_by(len, |i| float_key(v[i] as f64)),
-            Column::I64(v, val) => group_by(len, |i| val.is_valid(i).then_some(v[i])),
-            Column::I32(v, val) => group_by(len, |i| val.is_valid(i).then_some(v[i] as i64)),
-            Column::Bool(v, val) => group_by(len, |i| val.is_valid(i).then_some(v[i] as i64)),
-            Column::Str(v, val) => group_by(len, |i| val.is_valid(i).then(|| v.get(i).to_string())),
-            Column::Datetime(v) => group_by(len, |i| (v[i] != i64::MIN).then_some(v[i])),
+            Column { data: ColumnData::F64(v) } => group_by(len, |i| float_key(v[i])),
+            Column { data: ColumnData::F32(v) } => group_by(len, |i| float_key(v[i] as f64)),
+            Column { data: ColumnData::I64(v, val) } => group_by(len, |i| val.is_valid(i).then_some(v[i])),
+            Column { data: ColumnData::I32(v, val) } => group_by(len, |i| val.is_valid(i).then_some(v[i] as i64)),
+            Column { data: ColumnData::Bool(v, val) } => group_by(len, |i| val.is_valid(i).then_some(v[i] as i64)),
+            Column { data: ColumnData::Str(v, val) } => group_by(len, |i| val.is_valid(i).then(|| v.get(i).to_string())),
+            Column { data: ColumnData::Datetime(v) } => group_by(len, |i| (v[i] != i64::MIN).then_some(v[i])),
         }
     }
 
@@ -183,15 +183,15 @@ impl Column {
     /// floats are non-`NaN` here, so `partial_cmp` is total).
     fn cmp_at(&self, a: usize, b: usize) -> Ordering {
         match self {
-            Column::F64(v) => v[a].partial_cmp(&v[b]).unwrap_or(Ordering::Equal),
-            Column::F32(v) => v[a].partial_cmp(&v[b]).unwrap_or(Ordering::Equal),
-            Column::I64(v, _) => v[a].cmp(&v[b]),
-            Column::I32(v, _) => v[a].cmp(&v[b]),
-            Column::Bool(v, _) => v[a].cmp(&v[b]),
+            Column { data: ColumnData::F64(v) } => v[a].partial_cmp(&v[b]).unwrap_or(Ordering::Equal),
+            Column { data: ColumnData::F32(v) } => v[a].partial_cmp(&v[b]).unwrap_or(Ordering::Equal),
+            Column { data: ColumnData::I64(v, _) } => v[a].cmp(&v[b]),
+            Column { data: ColumnData::I32(v, _) } => v[a].cmp(&v[b]),
+            Column { data: ColumnData::Bool(v, _) } => v[a].cmp(&v[b]),
             // SAFETY: `a`/`b` are present-row indices from `argsort` / `arg_extreme`,
             // always `< len`; the unchecked accessor avoids redundant offset/data checks.
-            Column::Str(v, _) => unsafe { v.get_unchecked(a).cmp(v.get_unchecked(b)) },
-            Column::Datetime(v) => v[a].cmp(&v[b]),
+            Column { data: ColumnData::Str(v, _) } => unsafe { v.get_unchecked(a).cmp(v.get_unchecked(b)) },
+            Column { data: ColumnData::Datetime(v) } => v[a].cmp(&v[b]),
         }
     }
 
@@ -289,35 +289,35 @@ impl Column {
             return self.append(&converted);
         }
         match (self, other) {
-            (Column::F64(a), Column::F64(b)) => {
+            (Column { data: ColumnData::F64(a) }, Column { data: ColumnData::F64(b) }) => {
                 a.append(b);
                 Ok(())
             }
-            (Column::F32(a), Column::F32(b)) => {
+            (Column { data: ColumnData::F32(a) }, Column { data: ColumnData::F32(b) }) => {
                 a.append(b);
                 Ok(())
             }
-            (Column::Bool(a, av), Column::Bool(b, bv)) => {
+            (Column { data: ColumnData::Bool(a, av) }, Column { data: ColumnData::Bool(b, bv) }) => {
                 append_validity(av, a.len(), bv, b.len());
                 a.make_mut().extend_from_slice(b);
                 Ok(())
             }
-            (Column::I64(a, av), Column::I64(b, bv)) => {
+            (Column { data: ColumnData::I64(a, av) }, Column { data: ColumnData::I64(b, bv) }) => {
                 append_validity(av, a.len(), bv, b.len());
                 a.make_mut().extend_from_slice(b);
                 Ok(())
             }
-            (Column::I32(a, av), Column::I32(b, bv)) => {
+            (Column { data: ColumnData::I32(a, av) }, Column { data: ColumnData::I32(b, bv) }) => {
                 append_validity(av, a.len(), bv, b.len());
                 a.make_mut().extend_from_slice(b);
                 Ok(())
             }
-            (Column::Str(a, av), Column::Str(b, bv)) => {
+            (Column { data: ColumnData::Str(a, av) }, Column { data: ColumnData::Str(b, bv) }) => {
                 append_validity(av, a.len(), bv, b.len());
                 a.extend(b.iter());
                 Ok(())
             }
-            (Column::Datetime(a), Column::Datetime(b)) => {
+            (Column { data: ColumnData::Datetime(a) }, Column { data: ColumnData::Datetime(b) }) => {
                 a.make_mut().extend_from_slice(b);
                 Ok(())
             }
@@ -353,24 +353,24 @@ impl Column {
             return self.set_last_from(&converted, 0);
         }
         match (self, src) {
-            (Column::F64(a), Column::F64(b)) => a.set(last, b[src_row]),
-            (Column::F32(a), Column::F32(b)) => a.set(last, b[src_row]),
-            (Column::Datetime(a), Column::Datetime(b)) => a.make_mut()[last] = b[src_row],
-            (Column::Bool(a, av), Column::Bool(b, bv)) => {
+            (Column { data: ColumnData::F64(a) }, Column { data: ColumnData::F64(b) }) => a.set(last, b[src_row]),
+            (Column { data: ColumnData::F32(a) }, Column { data: ColumnData::F32(b) }) => a.set(last, b[src_row]),
+            (Column { data: ColumnData::Datetime(a) }, Column { data: ColumnData::Datetime(b) }) => a.make_mut()[last] = b[src_row],
+            (Column { data: ColumnData::Bool(a, av) }, Column { data: ColumnData::Bool(b, bv) }) => {
                 a.make_mut()[last] = b[src_row];
-                av.set(last, n, bv.is_valid(src_row));
+                av.set_in_bounds(last, n, bv.is_valid(src_row));
             }
-            (Column::I64(a, av), Column::I64(b, bv)) => {
+            (Column { data: ColumnData::I64(a, av) }, Column { data: ColumnData::I64(b, bv) }) => {
                 a.make_mut()[last] = b[src_row];
-                av.set(last, n, bv.is_valid(src_row));
+                av.set_in_bounds(last, n, bv.is_valid(src_row));
             }
-            (Column::I32(a, av), Column::I32(b, bv)) => {
+            (Column { data: ColumnData::I32(a, av) }, Column { data: ColumnData::I32(b, bv) }) => {
                 a.make_mut()[last] = b[src_row];
-                av.set(last, n, bv.is_valid(src_row));
+                av.set_in_bounds(last, n, bv.is_valid(src_row));
             }
-            (Column::Str(a, av), Column::Str(b, bv)) => {
+            (Column { data: ColumnData::Str(a, av) }, Column { data: ColumnData::Str(b, bv) }) => {
                 a.set_last(b.get(src_row));
-                av.set(last, n, bv.is_valid(src_row));
+                av.set_in_bounds(last, n, bv.is_valid(src_row));
             }
             _ => unreachable!("dtypes matched above"), // LCOV_EXCL_LINE
         }
@@ -383,11 +383,11 @@ impl Column {
         let n = self.len();
         let Some(last) = n.checked_sub(1) else { return };
         match self {
-            Column::F64(a) => a.set(last, f64::NAN),
-            Column::F32(a) => a.set(last, f32::NAN),
-            Column::Datetime(a) => a.make_mut()[last] = i64::MIN,
-            Column::Bool(_, v) | Column::I64(_, v) | Column::I32(_, v) | Column::Str(_, v) => {
-                v.set(last, n, false)
+            Column { data: ColumnData::F64(a) } => a.set(last, f64::NAN),
+            Column { data: ColumnData::F32(a) } => a.set(last, f32::NAN),
+            Column { data: ColumnData::Datetime(a) } => a.make_mut()[last] = i64::MIN,
+            Column { data: ColumnData::Bool(_, v) } | Column { data: ColumnData::I64(_, v) } | Column { data: ColumnData::I32(_, v) } | Column { data: ColumnData::Str(_, v) } => {
+                v.set_in_bounds(last, n, false)
             }
         }
     }
@@ -401,22 +401,22 @@ impl Column {
     pub fn append_na(&mut self, len: usize) {
         let old = self.len();
         match self {
-            Column::F64(v) => v.append_repeated(f64::NAN, len),
-            Column::F32(v) => v.append_repeated(f32::NAN, len),
-            Column::Datetime(v) => v.make_mut().extend(std::iter::repeat_n(i64::MIN, len)),
-            Column::I64(v, val) => {
+            Column { data: ColumnData::F64(v) } => v.append_repeated(f64::NAN, len),
+            Column { data: ColumnData::F32(v) } => v.append_repeated(f32::NAN, len),
+            Column { data: ColumnData::Datetime(v) } => v.make_mut().extend(std::iter::repeat_n(i64::MIN, len)),
+            Column { data: ColumnData::I64(v, val) } => {
                 val.extend_missing(old, len);
                 v.make_mut().extend(std::iter::repeat_n(0, len));
             }
-            Column::I32(v, val) => {
+            Column { data: ColumnData::I32(v, val) } => {
                 val.extend_missing(old, len);
                 v.make_mut().extend(std::iter::repeat_n(0, len));
             }
-            Column::Bool(v, val) => {
+            Column { data: ColumnData::Bool(v, val) } => {
                 val.extend_missing(old, len);
                 v.make_mut().extend(std::iter::repeat_n(false, len));
             }
-            Column::Str(v, val) => {
+            Column { data: ColumnData::Str(v, val) } => {
                 val.extend_missing(old, len);
                 v.extend((0..len).map(|_| ""));
             }
@@ -432,26 +432,26 @@ impl Column {
         let k = src.len().min(n.saturating_sub(from));
         let presence = |val: &mut Validity, sv: &Validity| {
             for i in 0..k {
-                val.set(from + i, n, sv.is_valid(i));
+                val.set_in_bounds(from + i, n, sv.is_valid(i));
             }
         };
         match (self, src) {
-            (Column::F64(a), Column::F64(b)) => a.make_mut()[from..from + k].copy_from_slice(&b[..k]),
-            (Column::F32(a), Column::F32(b)) => a.make_mut()[from..from + k].copy_from_slice(&b[..k]),
-            (Column::Datetime(a), Column::Datetime(b)) => a.make_mut()[from..from + k].copy_from_slice(&b[..k]),
-            (Column::I64(a, av), Column::I64(b, bv)) => {
+            (Column { data: ColumnData::F64(a) }, Column { data: ColumnData::F64(b) }) => a.make_mut()[from..from + k].copy_from_slice(&b[..k]),
+            (Column { data: ColumnData::F32(a) }, Column { data: ColumnData::F32(b) }) => a.make_mut()[from..from + k].copy_from_slice(&b[..k]),
+            (Column { data: ColumnData::Datetime(a) }, Column { data: ColumnData::Datetime(b) }) => a.make_mut()[from..from + k].copy_from_slice(&b[..k]),
+            (Column { data: ColumnData::I64(a, av) }, Column { data: ColumnData::I64(b, bv) }) => {
                 a.make_mut()[from..from + k].copy_from_slice(&b[..k]);
                 presence(av, bv);
             }
-            (Column::I32(a, av), Column::I32(b, bv)) => {
+            (Column { data: ColumnData::I32(a, av) }, Column { data: ColumnData::I32(b, bv) }) => {
                 a.make_mut()[from..from + k].copy_from_slice(&b[..k]);
                 presence(av, bv);
             }
-            (Column::Bool(a, av), Column::Bool(b, bv)) => {
+            (Column { data: ColumnData::Bool(a, av) }, Column { data: ColumnData::Bool(b, bv) }) => {
                 a.make_mut()[from..from + k].copy_from_slice(&b[..k]);
                 presence(av, bv);
             }
-            (Column::Str(a, av), Column::Str(b, bv)) => {
+            (Column { data: ColumnData::Str(a, av) }, Column { data: ColumnData::Str(b, bv) }) => {
                 let mut rebuilt = a.slice(0, from);
                 rebuilt.extend(b.iter().take(k).chain(a.iter().skip(from + k)));
                 *a = rebuilt;
@@ -492,12 +492,12 @@ impl Column {
             }))
         };
         match (self, values) {
-            (Column::Bool(..), Column::Bool(..))
-            | (Column::Str(..), Column::Str(..))
-            | (Column::Datetime(_), Column::Datetime(_)) => Ok(values.clone()),
-            (Column::Bool(..), _) => kind("bool"),
-            (Column::Str(..), _) => kind("str"),
-            (Column::Datetime(_), _) => kind("datetime"),
+            (Column { data: ColumnData::Bool(..) }, Column { data: ColumnData::Bool(..) })
+            | (Column { data: ColumnData::Str(..) }, Column { data: ColumnData::Str(..) })
+            | (Column { data: ColumnData::Datetime(_) }, Column { data: ColumnData::Datetime(_) }) => Ok(values.clone()),
+            (Column { data: ColumnData::Bool(..) }, _) => kind("bool"),
+            (Column { data: ColumnData::Str(..) }, _) => kind("str"),
+            (Column { data: ColumnData::Datetime(_) }, _) => kind("datetime"),
             _ => values.convert_lossless(to),
         }
     }
@@ -545,32 +545,32 @@ impl Column {
         // with the source's presence; float and datetime carry missing in-band.
         let presence = |val: &mut Validity, sv: &Validity| {
             for (k, &p) in positions.iter().enumerate() {
-                val.set(p, len, sv.is_valid(pick(k)));
+                val.set_in_bounds(p, len, sv.is_valid(pick(k)));
             }
         };
         match (self, src) {
-            (Column::F64(v), Column::F64(s)) => v.scatter(positions, |k| s[pick(k)]),
-            (Column::F32(v), Column::F32(s)) => v.scatter(positions, |k| s[pick(k)]),
-            (Column::Datetime(v), Column::Datetime(s)) => {
+            (Column { data: ColumnData::F64(v) }, Column { data: ColumnData::F64(s) }) => v.scatter(positions, |k| s[pick(k)]),
+            (Column { data: ColumnData::F32(v) }, Column { data: ColumnData::F32(s) }) => v.scatter(positions, |k| s[pick(k)]),
+            (Column { data: ColumnData::Datetime(v) }, Column { data: ColumnData::Datetime(s) }) => {
                 let w = v.make_mut();
                 positions.iter().enumerate().for_each(|(k, &p)| w[p] = s[pick(k)]);
             }
-            (Column::I64(v, val), Column::I64(s, sv)) => {
-                let w = v.make_mut();
-                positions.iter().enumerate().for_each(|(k, &p)| w[p] = s[pick(k)]);
-                presence(val, sv);
-            }
-            (Column::I32(v, val), Column::I32(s, sv)) => {
+            (Column { data: ColumnData::I64(v, val) }, Column { data: ColumnData::I64(s, sv) }) => {
                 let w = v.make_mut();
                 positions.iter().enumerate().for_each(|(k, &p)| w[p] = s[pick(k)]);
                 presence(val, sv);
             }
-            (Column::Bool(v, val), Column::Bool(s, sv)) => {
+            (Column { data: ColumnData::I32(v, val) }, Column { data: ColumnData::I32(s, sv) }) => {
                 let w = v.make_mut();
                 positions.iter().enumerate().for_each(|(k, &p)| w[p] = s[pick(k)]);
                 presence(val, sv);
             }
-            (Column::Str(v, val), Column::Str(s, sv)) => {
+            (Column { data: ColumnData::Bool(v, val) }, Column { data: ColumnData::Bool(s, sv) }) => {
+                let w = v.make_mut();
+                positions.iter().enumerate().for_each(|(k, &p)| w[p] = s[pick(k)]);
+                presence(val, sv);
+            }
+            (Column { data: ColumnData::Str(v, val) }, Column { data: ColumnData::Str(s, sv) }) => {
                 let mut cells: Vec<&str> = v.iter().collect();
                 positions.iter().enumerate().for_each(|(k, &p)| cells[p] = s.get(pick(k)));
                 let rebuilt: StrBuffer = cells.into_iter().collect();
@@ -586,9 +586,9 @@ impl Column {
     /// [`equals`](Self::equals); other dtypes retain their native value comparison.
     pub fn equals_exact(&self, other: &Column) -> bool {
         match (self, other) {
-            (Column::F64(a), Column::F64(b)) => a.len() == b.len() && a.iter().zip(b.iter())
+            (Column { data: ColumnData::F64(a) }, Column { data: ColumnData::F64(b) }) => a.len() == b.len() && a.iter().zip(b.iter())
                 .all(|(a, b)| (a.is_nan() && b.is_nan()) || a.to_bits() == b.to_bits()),
-            (Column::F32(a), Column::F32(b)) => a.len() == b.len() && a.iter().zip(b.iter())
+            (Column { data: ColumnData::F32(a) }, Column { data: ColumnData::F32(b) }) => a.len() == b.len() && a.iter().zip(b.iter())
                 .all(|(a, b)| (a.is_nan() && b.is_nan()) || a.to_bits() == b.to_bits()),
             _ => self.equals(other),
         }
@@ -611,13 +611,13 @@ impl Column {
             })
         };
         match (self, other) {
-            (Column::F64(a), Column::F64(b)) => cells(&|i| a[i] == b[i]),
-            (Column::F32(a), Column::F32(b)) => cells(&|i| a[i] == b[i]),
-            (Column::I64(a, _), Column::I64(b, _)) => cells(&|i| a[i] == b[i]),
-            (Column::I32(a, _), Column::I32(b, _)) => cells(&|i| a[i] == b[i]),
-            (Column::Bool(a, _), Column::Bool(b, _)) => cells(&|i| a[i] == b[i]),
-            (Column::Str(a, _), Column::Str(b, _)) => cells(&|i| a.get(i) == b.get(i)),
-            (Column::Datetime(a), Column::Datetime(b)) => cells(&|i| a[i] == b[i]),
+            (Column { data: ColumnData::F64(a) }, Column { data: ColumnData::F64(b) }) => cells(&|i| a[i] == b[i]),
+            (Column { data: ColumnData::F32(a) }, Column { data: ColumnData::F32(b) }) => cells(&|i| a[i] == b[i]),
+            (Column { data: ColumnData::I64(a, _) }, Column { data: ColumnData::I64(b, _) }) => cells(&|i| a[i] == b[i]),
+            (Column { data: ColumnData::I32(a, _) }, Column { data: ColumnData::I32(b, _) }) => cells(&|i| a[i] == b[i]),
+            (Column { data: ColumnData::Bool(a, _) }, Column { data: ColumnData::Bool(b, _) }) => cells(&|i| a[i] == b[i]),
+            (Column { data: ColumnData::Str(a, _) }, Column { data: ColumnData::Str(b, _) }) => cells(&|i| a.get(i) == b.get(i)),
+            (Column { data: ColumnData::Datetime(a) }, Column { data: ColumnData::Datetime(b) }) => cells(&|i| a[i] == b[i]),
             _ => false,
         }
     }

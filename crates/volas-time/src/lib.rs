@@ -7,6 +7,8 @@
 
 pub mod agg;
 pub mod cumulate;
+mod raw_input;
+pub use raw_input::RawFineInput;
 pub mod open_period;
 mod period_aggregate;
 pub mod time_frame;

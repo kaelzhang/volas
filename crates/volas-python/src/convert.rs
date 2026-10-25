@@ -2,6 +2,7 @@
 //! scalar boxing, the numpy-type cache, and index/label rendering).
 
 
+use volas_core::ColumnView;
 use std::cell::LazyCell;
 
 use numpy::IntoPyArray;
@@ -23,11 +24,11 @@ use crate::*;
 /// missing cell, and the rarer `Str` / `Datetime` columns, take the borrowing export
 /// instead, so a missing cell is exported as missing — never as its payload.
 pub(crate) fn column_into_numpy<'py>(py: Python<'py>, col: Column) -> PyResult<Bound<'py, PyAny>> {
-    Ok(match col {
-        Column::F64(a) => a.into_vec().into_pyarray(py).into_any(),
-        Column::Bool(a, val) if !val.has_nulls() => a.into_vec().into_pyarray(py).into_any(),
-        Column::I64(a, val) if !val.has_nulls() => a.into_vec().into_pyarray(py).into_any(),
-        other => return column_to_numpy(py, &other),
+    Ok(match col.dtype() {
+        DType::F64 => col.into_f64_vec().into_pyarray(py).into_any(),
+        DType::Bool if !col.has_missing() => col.into_bool_vec().map_err(pyerr)?.into_pyarray(py).into_any(),
+        DType::I64 if !col.has_missing() => col.into_i64_vec().map_err(pyerr)?.into_pyarray(py).into_any(),
+        _ => return column_to_numpy(py, &col),
     })
 }
 
@@ -43,7 +44,7 @@ pub(crate) fn column_to_pandas<'py>(
 ) -> PyResult<Bound<'py, PyAny>> {
     // A datetime column holds UTC instants: pandas gets `datetime64[ns, UTC]` (the
     // NumPy export has no zone slot), under either backend.
-    if let Column::Datetime(_) = col {
+    if let ColumnView::Datetime(_) = col.view() {
         return pd
             .call_method1("array", (column_to_numpy(py, col)?,))?
             .call_method1("tz_localize", (Tz::DATETIME_COLUMN.name(),));
@@ -51,7 +52,7 @@ pub(crate) fn column_to_pandas<'py>(
     // A bool column holding a missing cell has no NumPy form (see
     // `column_to_numpy`), so it is pandas' masked `boolean` under either backend —
     // `pd.NA`, never a truthy `nan`.
-    let bool_na = matches!(col, Column::Bool(_, val) if val.has_nulls());
+    let bool_na = matches!(col.view(), ColumnView::Bool(_, val) if val.has_nulls());
     if !nullable && !bool_na {
         return column_to_numpy(py, col);
     }
@@ -59,20 +60,20 @@ pub(crate) fn column_to_pandas<'py>(
     let mask = |val: &Validity, n: usize| {
         (0..n).map(|i| !val.is_valid(i)).collect::<Vec<bool>>().into_pyarray(py)
     };
-    match col {
-        Column::I64(v, val) => {
+    match col.view() {
+        ColumnView::I64(v, val) => {
             arrays.call_method1("IntegerArray", (v.to_vec().into_pyarray(py), mask(val, v.len())))
         }
-        Column::I32(v, val) => {
+        ColumnView::I32(v, val) => {
             arrays.call_method1("IntegerArray", (v.to_vec().into_pyarray(py), mask(val, v.len())))
         }
-        Column::Bool(v, val) => {
+        ColumnView::Bool(v, val) => {
             arrays.call_method1("BooleanArray", (v.to_vec().into_pyarray(py), mask(val, v.len())))
         }
         // F9b: a str column exports as the pandas string dtype under the
         // nullable backend, so its declared dtype survives a round-trip even
         // when all-NA / empty (an object array of None carries no dtype).
-        Column::Str(v, val) => {
+        ColumnView::Str(v, val) => {
             let items: Vec<Bound<'_, PyAny>> = (0..v.len())
                 .map(|i| {
                     if val.is_valid(i) {
@@ -136,7 +137,7 @@ pub(crate) fn frame_from_pandas(py: Python<'_>, pdf: &Bound<'_, PyAny>) -> PyRes
         && idx.getattr("start")?.extract::<i64>()? == 0
         && idx.getattr("step")?.extract::<i64>()? == 1
     {
-        Index::range(idx.len()?).with_name(idx_name)
+        Index::new(None, volas_core::IndexKind::Range { start: 0, len: idx.len()? }).map_err(pyerr)?.with_name(idx_name)
     } else {
         let instants = if datetime_index {
             // Read UTC instants in their native unit; coercion scales to ns, checked.
@@ -226,27 +227,27 @@ fn pandas_series_to_values<'py>(
 }
 
 pub(crate) fn column_to_numpy<'py>(py: Python<'py>, col: &Column) -> PyResult<Bound<'py, PyAny>> {
-    Ok(match col {
-        Column::F64(v) => v.to_vec().into_pyarray(py).into_any(),
-        Column::F32(v) => v.to_vec().into_pyarray(py).into_any(),
+    Ok(match col.view() {
+        ColumnView::F64(v) => v.to_vec().into_pyarray(py).into_any(),
+        ColumnView::F32(v) => v.to_vec().into_pyarray(py).into_any(),
         // numpy int/bool cannot hold a missing value, so an int column with any NA
         // exports as float64 with NaN (pandas `Int64.to_numpy()` semantics); a
         // dense column keeps its native dtype.
-        Column::Bool(v, val) if !val.has_nulls() => v.to_vec().into_pyarray(py).into_any(),
-        Column::I64(v, val) if !val.has_nulls() => v.to_vec().into_pyarray(py).into_any(),
-        Column::I32(v, val) if !val.has_nulls() => v.to_vec().into_pyarray(py).into_any(),
+        ColumnView::Bool(v, val) if !val.has_nulls() => v.to_vec().into_pyarray(py).into_any(),
+        ColumnView::I64(v, val) if !val.has_nulls() => v.to_vec().into_pyarray(py).into_any(),
+        ColumnView::I32(v, val) if !val.has_nulls() => v.to_vec().into_pyarray(py).into_any(),
         // A bool column with a missing cell has no NumPy form: any placeholder would
         // be read as a truth value (a `nan` is truthy, `None` falsy) — an unknown
         // signal must not act like a decided one (the rule that rejects NA masks).
         // The caller states what a missing cell means instead.
-        Column::Bool(..) => return Err(bool_na_err()),
+        ColumnView::Bool(..) => return Err(bool_na_err()),
         // numpy int cannot hold a missing value -> float64 with NaN (pandas
         // Int64.to_numpy() semantics); a dense column keeps its native dtype.
-        Column::I64(..) | Column::I32(..) => {
+        ColumnView::I64(..) | ColumnView::I32(..) => {
             col.to_f64_vec().into_pyarray(py).into_any()
         }
         // String columns become NumPy object arrays (pandas `object` dtype).
-        Column::Str(v, val) => {
+        ColumnView::Str(v, val) => {
             // a missing cell becomes Python `None` in the object array (pandas parity)
             let items: Vec<Bound<'_, PyAny>> = (0..v.len())
                 .map(|i| {
@@ -263,7 +264,7 @@ pub(crate) fn column_to_numpy<'py>(py: Python<'py>, col: &Column) -> PyResult<Bo
             py.import("numpy")?.call_method("array", (list,), Some(&kwargs))?
         }
         // Datetime columns become NumPy datetime64[ns] arrays.
-        Column::Datetime(v) => v.to_vec().into_pyarray(py).call_method1("astype", ("datetime64[ns]",))?,
+        ColumnView::Datetime(v) => v.to_vec().into_pyarray(py).call_method1("astype", ("datetime64[ns]",))?,
     })
 }
 
@@ -329,7 +330,7 @@ pub(crate) fn column_to_numpy_with<'py>(
         return column_to_numpy(py, col);
     };
     // The default NA model is independent of explicit target conversion.
-    if let Column::Bool(v, val) = col {
+    if let ColumnView::Bool(v, val) = col.view() {
         let cells = bool_cells(py, v, val, nv)?;
         return if nv.is_instance_of::<pyo3::types::PyBool>() || type_is_numpy_bool(nv) {
             cells.call_method1("astype", ("bool",))
@@ -367,7 +368,7 @@ pub(crate) fn columns_to_numpy_with<'py>(
     let requested = np.call_method1("dtype", (dtype,))?;
     let target = ExportTarget::of(&requested)?;
     if frame && matches!(target, ExportTarget::Float | ExportTarget::Integer | ExportTarget::Bool | ExportTarget::Temporal)
-        && cols.iter().any(|c| matches!(c, Column::Str(..)))
+        && cols.iter().any(|c| matches!(c.view(), ColumnView::Str(..)))
     {
         return Err(PyValueError::new_err(format!(
             "cannot convert a string column to {dtype}; use dtype='object' to keep strings"
@@ -377,11 +378,11 @@ pub(crate) fn columns_to_numpy_with<'py>(
     for col in cols {
         let missing = LazyCell::new(|| col.has_missing());
         if na_value.is_none() && target.has_no_na()
-            && !(frame && matches!(col, Column::Datetime(_))) && *missing
+            && !(frame && matches!(col.view(), ColumnView::Datetime(_))) && *missing
         {
             return Err(no_na_target_err(if frame { "a frame" } else { "a column" }, dtype));
         }
-        if na_value.is_none() && matches!(col, Column::Bool(..))
+        if na_value.is_none() && matches!(col.view(), ColumnView::Bool(..))
             && !matches!(target, ExportTarget::Float | ExportTarget::Object) && *missing
         {
             return Err(bool_na_err());
@@ -397,13 +398,13 @@ pub(crate) fn columns_to_numpy_with<'py>(
         // Native floats and datetimes already carry their default NA in-band.
         // Mask only when a fill or a different missing representation needs it.
         let separate_missing = na_value.is_some()
-            || (target != ExportTarget::Object && (matches!(col, Column::I64(..) | Column::I32(..) | Column::Bool(..) | Column::Str(..))
-                || (frame && target == ExportTarget::Float && matches!(col, Column::Datetime(_)))));
+            || (target != ExportTarget::Object && (matches!(col.view(), ColumnView::I64(..) | ColumnView::I32(..) | ColumnView::Bool(..) | ColumnView::Str(..))
+                || (frame && target == ExportTarget::Float && matches!(col.view(), ColumnView::Datetime(_)))));
         let mask = (separate_missing && *missing).then(|| na_mask(py, col));
         let default_missing = if na_value.is_none() && mask.is_some() {
             // Convert only the chosen missing representation, never valid values
             // through the default whole-column export (not even for text/time).
-            Some(if matches!(col, Column::Str(..)) {
+            Some(if matches!(col.view(), ColumnView::Str(..)) {
                 let kwargs = PyDict::new(py);
                 kwargs.set_item("dtype", "object")?;
                 np.call_method("array", (PyList::new(py, [py.None()])?,), Some(&kwargs))?
@@ -512,21 +513,21 @@ pub(crate) fn na_mask<'py>(py: Python<'py>, col: &Column) -> Bound<'py, PyAny> {
 /// int, datetime stays `datetime64`) — the base for every explicit cast. Missing
 /// payloads are unspecified; the owner separates them when representation changes.
 fn column_values_native<'py>(py: Python<'py>, col: &Column) -> PyResult<Bound<'py, PyAny>> {
-    Ok(match col {
-        Column::F64(v) => v.to_vec().into_pyarray(py).into_any(),
-        Column::F32(v) => v.to_vec().into_pyarray(py).into_any(),
-        Column::I64(v, _) => v.to_vec().into_pyarray(py).into_any(),
-        Column::I32(v, _) => v.to_vec().into_pyarray(py).into_any(),
-        Column::Bool(v, _) => v.to_vec().into_pyarray(py).into_any(),
+    Ok(match col.view() {
+        ColumnView::F64(v) => v.to_vec().into_pyarray(py).into_any(),
+        ColumnView::F32(v) => v.to_vec().into_pyarray(py).into_any(),
+        ColumnView::I64(v, _) => v.to_vec().into_pyarray(py).into_any(),
+        ColumnView::I32(v, _) => v.to_vec().into_pyarray(py).into_any(),
+        ColumnView::Bool(v, _) => v.to_vec().into_pyarray(py).into_any(),
         // Variable-width string storage has an object representation; validity
         // is kept separately, so missing payloads never influence a conversion.
-        Column::Str(v, _) => {
+        ColumnView::Str(v, _) => {
             let kwargs = PyDict::new(py);
             kwargs.set_item("dtype", "object")?;
             let values = PyList::new(py, (0..v.len()).map(|i| v.get(i)))?;
             py.import("numpy")?.call_method("array", (values,), Some(&kwargs))?
         }
-        Column::Datetime(v) => {
+        ColumnView::Datetime(v) => {
             v.to_vec().into_pyarray(py).call_method1("astype", ("datetime64[ns]",))?
         }
     })
@@ -583,22 +584,22 @@ impl ExportTarget {
 
 /// The i-th element of a column as a Python scalar.
 pub(crate) fn scalar_to_py(py: Python<'_>, col: &Column, i: usize) -> PyResult<Py<PyAny>> {
-    Ok(match col {
-        Column::F64(v) => v[i].into_pyobject(py).unwrap().into_any().unbind(),
-        Column::F32(v) => (v[i] as f64).into_pyobject(py).unwrap().into_any().unbind(),
+    Ok(match col.view() {
+        ColumnView::F64(v) => v[i].into_pyobject(py).unwrap().into_any().unbind(),
+        ColumnView::F32(v) => (v[i] as f64).into_pyobject(py).unwrap().into_any().unbind(),
         // an int/bool missing cell is the volas.NA symbol (pandas tolist semantics)
-        Column::I64(v, val) if val.is_valid(i) => v[i].into_pyobject(py).unwrap().into_any().unbind(),
-        Column::I32(v, val) if val.is_valid(i) => (v[i] as i64).into_pyobject(py).unwrap().into_any().unbind(),
-        Column::Bool(v, val) if val.is_valid(i) => {
+        ColumnView::I64(v, val) if val.is_valid(i) => v[i].into_pyobject(py).unwrap().into_any().unbind(),
+        ColumnView::I32(v, val) if val.is_valid(i) => (v[i] as i64).into_pyobject(py).unwrap().into_any().unbind(),
+        ColumnView::Bool(v, val) if val.is_valid(i) => {
             v[i].into_pyobject(py).unwrap().to_owned().into_any().unbind()
         }
-        Column::Str(v, val) if val.is_valid(i) => v.get(i).into_pyobject(py).unwrap().into_any().unbind(),
-        Column::I64(..) | Column::I32(..) | Column::Bool(..) | Column::Str(..) => na(py),
+        ColumnView::Str(v, val) if val.is_valid(i) => v.get(i).into_pyobject(py).unwrap().into_any().unbind(),
+        ColumnView::I64(..) | ColumnView::I32(..) | ColumnView::Bool(..) | ColumnView::Str(..) => na(py),
         // O1 (-> B): a datetime cell is a volas.Timestamp (matching the index-label
         // scalar type and pandas); a NaT cell is volas.NA (the unified missing
         // singleton). A column holds UTC instants, so the cell is UTC-aware.
-        Column::Datetime(v) if v[i] == i64::MIN => na(py),
-        Column::Datetime(v) => return Py::new(py, PyTimestamp { ns: v[i], tz: Tz::DATETIME_COLUMN })
+        ColumnView::Datetime(v) if v[i] == i64::MIN => na(py),
+        ColumnView::Datetime(v) => return Py::new(py, PyTimestamp { ns: v[i], tz: Tz::DATETIME_COLUMN })
             .map(|v| v.into_any()),
     })
 }
@@ -667,16 +668,16 @@ pub(crate) fn np_bool(py: Python<'_>, b: bool) -> PyResult<Py<PyAny>> {
 /// semantics), matching the column dtype. Bulk paths (`to_list`, iteration) use
 /// [`scalar_to_py`] instead, which yields native Python scalars like pandas.
 pub(crate) fn np_scalar_to_py(py: Python<'_>, col: &Column, i: usize) -> PyResult<Py<PyAny>> {
-    match col {
+    match col.view() {
         // a float carries missing in-band as NaN -> np.float64(nan), like pandas.
-        Column::F64(v) => np_f64(py, v[i]),
-        Column::F32(v) => np_f32(py, v[i]),
+        ColumnView::F64(v) => np_f64(py, v[i]),
+        ColumnView::F32(v) => np_f32(py, v[i]),
         // an int/bool missing cell surfaces as the volas.NA symbol.
-        Column::I64(v, val) => if val.is_valid(i) { np_i64(py, v[i]) } else { Ok(na(py)) },
-        Column::I32(v, val) => if val.is_valid(i) { np_i32(py, v[i]) } else { Ok(na(py)) },
-        Column::Bool(v, val) => if val.is_valid(i) { np_bool(py, v[i]) } else { Ok(na(py)) },
+        ColumnView::I64(v, val) => if val.is_valid(i) { np_i64(py, v[i]) } else { Ok(na(py)) },
+        ColumnView::I32(v, val) => if val.is_valid(i) { np_i32(py, v[i]) } else { Ok(na(py)) },
+        ColumnView::Bool(v, val) => if val.is_valid(i) { np_bool(py, v[i]) } else { Ok(na(py)) },
         // str -> Python str; datetime -> np.datetime64 (already numpy) — as scalar_to_py.
-        Column::Str(_, _) | Column::Datetime(_) => scalar_to_py(py, col, i),
+        ColumnView::Str(_, _) | ColumnView::Datetime(_) => scalar_to_py(py, col, i),
     }
 }
 
@@ -700,8 +701,8 @@ pub(crate) fn scalar_to_numpy(py: Python<'_>, s: Scalar) -> PyResult<Py<PyAny>> 
 /// An all-NA str/datetime column yields `volas.NA`; numeric yields `np.float64`
 /// NaN (the existing [`Column::extreme`] behaviour). Backs `Series.min`/`max`.
 pub(crate) fn extreme_value(py: Python<'_>, col: &Column, want_max: bool) -> PyResult<Py<PyAny>> {
-    match col {
-        Column::Str(..) | Column::Datetime(..) => match col.arg_extreme(want_max) {
+    match col.view() {
+        ColumnView::Str(..) | ColumnView::Datetime(..) => match col.arg_extreme(want_max) {
             Some(i) => scalar_to_py(py, col, i),
             None => Ok(na(py)),
         },
@@ -902,7 +903,8 @@ pub(crate) fn index_values<'py>(py: Python<'py>, index: &Index) -> PyResult<Boun
             Ok(arr.call_method1("astype", ("datetime64[ns]",))?)
         }
         IndexKind::Int64(v) => Ok(v.clone().into_pyarray(py).into_any()),
-        IndexKind::Range { start, len } => Ok((*start..*start + *len as i64)
+        IndexKind::Range { start, len } => Ok((0..*len)
+            .map(|i| *start + i as i64)
             .collect::<Vec<_>>()
             .into_pyarray(py)
             .into_any()),

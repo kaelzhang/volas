@@ -45,7 +45,7 @@ impl Column {
     /// a quantized epoch (datetime), which the API contract (C4) forbids as a silent
     /// lossy conversion.
     pub fn require_numeric(&self) -> Result<()> {
-        if self.dtype().is_numeric() || matches!(self, Column::Bool(..)) {
+        if self.dtype().is_numeric() || matches!(self, Column { data: ColumnData::Bool(..) }) {
             Ok(())
         } else {
             Err(VolasError::DType(format!(
@@ -66,11 +66,11 @@ impl Column {
         self.require_numeric()?;
         other.require_numeric()?;
         match (self, other) {
-            (Column::F64(a), Column::F64(b)) => return Ok(Column::f64(float_slice_kernel(a, b, op))),
-            (Column::F32(a), Column::F32(b)) => return Ok(Column::f32(float_slice_kernel(a, b, op))),
+            (Column { data: ColumnData::F64(a) }, Column { data: ColumnData::F64(b) }) => return Ok(Column::f64(float_slice_kernel(a, b, op))),
+            (Column { data: ColumnData::F32(a) }, Column { data: ColumnData::F32(b) }) => return Ok(Column::f32(float_slice_kernel(a, b, op))),
             _ => {}
         }
-        if let (Column::Bool(a, av), Column::Bool(b, bv)) = (self, other) {
+        if let (Column { data: ColumnData::Bool(a, av) }, Column { data: ColumnData::Bool(b, bv) }) = (self, other) {
             let nulls = av.and(bv);
             return match op {
                 BinOp::Add => Ok(Column::bool_masked(
@@ -112,16 +112,16 @@ impl Column {
         self.require_numeric()?;
         other.require_numeric()?;
         match (self, other) {
-            (Column::F64(a), Column::F64(b)) => {
+            (Column { data: ColumnData::F64(a) }, Column { data: ColumnData::F64(b) }) => {
                 return Ok(Column::f64(float_output(a, b, |x, y| x / y)));
             }
-            (Column::F32(a), Column::F32(b)) => {
+            (Column { data: ColumnData::F32(a) }, Column { data: ColumnData::F32(b) }) => {
                 // True division has always widened BOTH operands before dividing.
                 return Ok(Column::f64(float_output(a, b, |x, y| x as f64 / y as f64)));
             }
             _ => {}
         }
-        if matches!((self, other), (Column::Bool(_, _), Column::Bool(_, _))) {
+        if matches!((self, other), (Column { data: ColumnData::Bool(_, _) }, Column { data: ColumnData::Bool(_, _) })) {
             return Err(VolasError::DType(
                 "division is not supported between two bool columns".into(),
             ));
@@ -142,7 +142,7 @@ impl Column {
         let n = self.require_same_len(other)?;
         self.require_numeric()?;
         other.require_numeric()?;
-        if matches!((self, other), (Column::Bool(_, _), Column::Bool(_, _))) {
+        if matches!((self, other), (Column { data: ColumnData::Bool(_, _) }, Column { data: ColumnData::Bool(_, _) })) {
             return Err(VolasError::DType(
                 "floor division is not supported between two bool columns".into(),
             ));
@@ -187,11 +187,11 @@ impl Column {
     /// [`VolasError::Shape`].
     pub fn compare(&self, other: &Column, op: CmpOp) -> Result<Column> {
         match (self, other) {
-            (Column::F64(a), Column::F64(b)) => {
+            (Column { data: ColumnData::F64(a) }, Column { data: ColumnData::F64(b) }) => {
                 self.require_same_len(other)?;
                 Ok(Column::bool(compare_floats(a, b, op)))
             }
-            (Column::F32(a), Column::F32(b)) => {
+            (Column { data: ColumnData::F32(a) }, Column { data: ColumnData::F32(b) }) => {
                 self.require_same_len(other)?;
                 Ok(Column::bool(compare_floats(a, b, op)))
             }
@@ -216,19 +216,19 @@ impl Column {
     /// Both IEEE masks and nullable directive orders use this comparison owner.
     fn map_order_rows<T>(&self, other: &Column, map: impl Fn(Option<Ordering>) -> T) -> Result<Vec<T>> {
         let n = self.require_same_len(other)?;
-        let numeric_like = |c: &Column| c.dtype().is_numeric() || matches!(c, Column::Bool(..));
+        let numeric_like = |c: &Column| c.dtype().is_numeric() || matches!(c, Column { data: ColumnData::Bool(..) });
         Ok(match (self, other) {
-            (Column::F64(a), Column::F64(b)) => mapped_orders(n, &map, |i| a[i].partial_cmp(&b[i])),
-            (Column::F32(a), Column::F32(b)) => mapped_orders(n, &map, |i| a[i].partial_cmp(&b[i])),
-            (Column::Str(a, av), Column::Str(b, bv)) => mapped_orders(n, &map, |i| {
+            (Column { data: ColumnData::F64(a) }, Column { data: ColumnData::F64(b) }) => mapped_orders(n, &map, |i| a[i].partial_cmp(&b[i])),
+            (Column { data: ColumnData::F32(a) }, Column { data: ColumnData::F32(b) }) => mapped_orders(n, &map, |i| a[i].partial_cmp(&b[i])),
+            (Column { data: ColumnData::Str(a, av) }, Column { data: ColumnData::Str(b, bv) }) => mapped_orders(n, &map, |i| {
                 // SAFETY: `i < n` and `require_same_len` proved both columns have length `n`.
                 (av.is_valid(i) && bv.is_valid(i))
                     .then(|| unsafe { a.get_unchecked(i).cmp(b.get_unchecked(i)) })
             }),
-            (Column::Datetime(a), Column::Datetime(b)) => {
+            (Column { data: ColumnData::Datetime(a) }, Column { data: ColumnData::Datetime(b) }) => {
                 mapped_orders(n, &map, |i| (a[i] != i64::MIN && b[i] != i64::MIN).then(|| a[i].cmp(&b[i])))
             }
-            (Column::Bool(a, av), Column::Bool(b, bv)) => {
+            (Column { data: ColumnData::Bool(a, av) }, Column { data: ColumnData::Bool(b, bv) }) => {
                 mapped_orders(n, &map, |i| (av.is_valid(i) && bv.is_valid(i)).then(|| a[i].cmp(&b[i])))
             }
             (a, b) if numeric_like(a) && numeric_like(b) => match (a.is_float_like(), b.is_float_like()) {
@@ -343,8 +343,8 @@ impl Column {
             return None;
         }
         Some(match self {
-            Column::Bool(v, _) => v[i],
-            Column::Str(v, _) => !v.get(i).is_empty(),
+            Column { data: ColumnData::Bool(v, _) } => v[i],
+            Column { data: ColumnData::Str(v, _) } => !v.get(i).is_empty(),
             other => other.get_f64(i) != 0.0,
         })
     }
@@ -354,12 +354,12 @@ impl Column {
     /// checked: an int64 overflow is an error (contract #25).
     pub fn sum(&self) -> Result<Scalar> {
         Ok(match self {
-            Column::F64(v) => Scalar::F64(stats::sum(v.as_slice())?),
-            Column::F32(v) => Scalar::F32(stats::sum(v.as_slice())?),
-            Column::I64(v, val) => Scalar::I64(sum_valid(v, val)?),
+            Column { data: ColumnData::F64(v) } => Scalar::F64(stats::sum(v.as_slice())?),
+            Column { data: ColumnData::F32(v) } => Scalar::F32(stats::sum(v.as_slice())?),
+            Column { data: ColumnData::I64(v, val) } => Scalar::I64(sum_valid(v, val)?),
             // int32 / bool sum promotes to int64 (pandas / numpy accumulator)
-            Column::I32(v, val) => Scalar::I64(sum_valid(&widen_i64(v), val)?),
-            Column::Bool(v, val) => Scalar::I64(sum_valid(&widen_i64(v), val)?),
+            Column { data: ColumnData::I32(v, val) } => Scalar::I64(sum_valid(&widen_i64(v), val)?),
+            Column { data: ColumnData::Bool(v, val) } => Scalar::I64(sum_valid(&widen_i64(v), val)?),
             other => Scalar::F64(stats::sum(&other.to_f64_vec())?),
         })
     }
@@ -368,11 +368,11 @@ impl Column {
     /// [`sum`](Self::sum).
     pub fn prod(&self) -> Result<Scalar> {
         Ok(match self {
-            Column::F64(v) => Scalar::F64(stats::prod(v.as_slice())?),
-            Column::F32(v) => Scalar::F32(stats::prod(v.as_slice())?),
-            Column::I64(v, val) => Scalar::I64(prod_valid(v, val)?),
-            Column::I32(v, val) => Scalar::I64(prod_valid(&widen_i64(v), val)?),
-            Column::Bool(v, val) => Scalar::I64(prod_valid(&widen_i64(v), val)?),
+            Column { data: ColumnData::F64(v) } => Scalar::F64(stats::prod(v.as_slice())?),
+            Column { data: ColumnData::F32(v) } => Scalar::F32(stats::prod(v.as_slice())?),
+            Column { data: ColumnData::I64(v, val) } => Scalar::I64(prod_valid(v, val)?),
+            Column { data: ColumnData::I32(v, val) } => Scalar::I64(prod_valid(&widen_i64(v), val)?),
+            Column { data: ColumnData::Bool(v, val) } => Scalar::I64(prod_valid(&widen_i64(v), val)?),
             other => Scalar::F64(stats::prod(&other.to_f64_vec())?),
         })
     }
@@ -381,18 +381,18 @@ impl Column {
     /// int -> i64, bool -> bool). Empty / all-missing -> `F64(NaN)`.
     pub fn extreme(&self, want_max: bool) -> Scalar {
         match self {
-            Column::I64(v, val) => match extreme_valid(v, val, want_max) {
+            Column { data: ColumnData::I64(v, val) } => match extreme_valid(v, val, want_max) {
                 Some(x) => Scalar::I64(x),
                 None => Scalar::F64(f64::NAN),
             },
-            Column::I32(v, val) => match extreme_valid(v, val, want_max) {
+            Column { data: ColumnData::I32(v, val) } => match extreme_valid(v, val, want_max) {
                 Some(x) => Scalar::I32(x),
                 None => Scalar::F64(f64::NAN),
             },
-            Column::F32(v) => {
+            Column { data: ColumnData::F32(v) } => {
                 Scalar::F32(stats::extreme(v.as_slice(), want_max).unwrap_or(f32::NAN))
             }
-            Column::Bool(v, val) => {
+            Column { data: ColumnData::Bool(v, val) } => {
                 // min = all (AND) / max = any (OR), over present values; none -> NaN
                 let present = |i: usize| val.is_valid(i);
                 if !(0..v.len()).any(present) {
@@ -403,7 +403,7 @@ impl Column {
                     Scalar::Bool((0..v.len()).all(|i| !present(i) || v[i]))
                 }
             }
-            Column::F64(v) => {
+            Column { data: ColumnData::F64(v) } => {
                 Scalar::F64(stats::extreme(v.as_slice(), want_max).unwrap_or(f64::NAN))
             }
             other => Scalar::F64(stats::extreme(&other.to_f64_vec(), want_max).unwrap_or(f64::NAN)),

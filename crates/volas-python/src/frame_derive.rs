@@ -9,8 +9,8 @@
 //!   the forming row keeps the open period; any other selection of bars in time order is
 //!   the time-frame frame of its rows, its last one the forming bar (the constructor's
 //!   seed rule); a projection, a rename and a time-zone change whose bars are still
-//!   periods of the frame's grid carry the open period over. Rows out of time order, or
-//!   labels that are not periods of the grid, give a plain frame.
+//!   periods of the frame's grid carry the open period over. Rows out of time order are
+//!   rejected; labels that are not periods of the grid give a plain frame.
 //! - a **bounded window** is kept by `copy()` / `DataFrame(wf)` alone: a frame derived
 //!   from a windowed frame is an unbounded frame of its visible rows (the hidden margin
 //!   only serves as the lead of its cached columns).
@@ -67,19 +67,6 @@ impl Fresh<'_> {
         let (a, b) = (a.min(len), b.max(a).min(len));
         self.physical().rows(start + a, start + b, &Replayer)
     }
-
-    /// The visible rows `sel` selects, as the one derivation decides it.
-    pub(crate) fn selected(&self, sel: &RowSel) -> DataFrame {
-        match (sel.range(), sel) {
-            (Some((a, b)), _) => self.contiguous(a, b),
-            (None, RowSel::Positions(p)) => {
-                let start = self.range().0;
-                let physical: Vec<usize> = p.iter().map(|&i| start + i).collect();
-                self.physical().take_data(&physical)
-            }
-            (None, RowSel::Range(..)) => unreachable!("a range is contiguous"), // LCOV_EXCL_LINE
-        }
-    }
 }
 
 impl PyDataFrame {
@@ -87,8 +74,17 @@ impl PyDataFrame {
     /// contiguous selection continues the cached columns, any other is a new series; a
     /// time-frame frame's model is kept where the result is still one of its bars.
     pub(crate) fn derive_rows(&self, view: &Fresh, sel: &RowSel) -> PyResult<PyDataFrame> {
-        let inner = view.selected(sel);
-        let ends_forming = sel.range().is_some_and(|(a, b)| b > a && b == view.rows());
+        let range = sel.range();
+        let inner = match (range, sel) {
+            (Some((a, b)), _) => view.contiguous(a, b),
+            (None, RowSel::Positions(p)) => {
+                let start = view.range().0;
+                let physical: Vec<usize> = p.iter().map(|&i| start + i).collect();
+                view.physical().take_data(&physical).map_err(pyerr)?
+            }
+            (None, RowSel::Range(..)) => unreachable!("a range is contiguous"), // LCOV_EXCL_LINE
+        };
+        let ends_forming = range.is_some_and(|(a, b)| b > a && b == view.rows());
         let tf = match &self.tf {
             Some(t) if ends_forming => Some(t.clone()),
             Some(t) => t.relabelled(&inner)?,

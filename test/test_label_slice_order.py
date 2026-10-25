@@ -195,7 +195,12 @@ def _outcome(f):
 
 @pytest.mark.parametrize("name", DT_INDEXES)
 def test_timestamp_bounds_on_datetime_indexes_match_pandas(name):
-    # an exact Timestamp bound follows the index's order, like an int label
+    # Every datetime row axis is checked before any timestamp slice can exist.
+    if name != "increasing":
+        message = "without NaT" if name == "nat" else "monotonic"
+        with pytest.raises(ValueError, match=message):
+            _dt_frames(DT_INDEXES[name])
+        return
     for lo in DT_BOUNDS:
         for hi in DT_BOUNDS:
             lo_t = None if lo is None else _day(lo)
@@ -217,36 +222,27 @@ def test_a_datetime_index_never_repeats_a_label(days):
         volas.DataFrame({"x": [10, 11, 12, 13]}, index=pd.DatetimeIndex([_day(d) for d in days]))
 
 
-PARTIAL = "Value based partial slicing on non-monotonic DatetimeIndexes"
-
-
 @pytest.mark.parametrize("name", ["decreasing", "unordered", "nat"])
-def test_string_bounds_on_a_non_increasing_datetime_index_fail_closed(name):
-    # pandas reads a string bound there as a partial-date value and may select
-    # non-contiguous rows; volas raises rather than select different rows
-    _, vdf = _dt_frames(DT_INDEXES[name])
-    before = vdf["x"].to_list()
-    for lo, hi in [("2024-01-02", None), (None, "2024-01-04"), ("2024-01-02", "2024-01-04")]:
-        with pytest.raises(KeyError, match=PARTIAL):
-            vdf.loc[lo:hi]
-        with pytest.raises(KeyError, match=PARTIAL):
-            vdf["x"].loc[lo:hi]
-        with pytest.raises(KeyError, match=PARTIAL):
-            vdf[lo:hi]
-        with pytest.raises(KeyError, match=PARTIAL):
-            vdf.loc[lo:hi, "x"] = 99
-    # a Timestamp with a string on the other side is still a text slice
-    with pytest.raises(KeyError, match=PARTIAL):
-        vdf.loc[_day(1):"2024-01-04"]
-    assert vdf["x"].to_list() == before  # nothing written
+def test_datetime_columns_are_checked_before_string_slicing(name):
+    days = DT_INDEXES[name]
+    labels = pd.DatetimeIndex([pd.NaT if d is None else _day(d) for d in days])
+    frame = volas.DataFrame({"time": labels.to_numpy(), "x": list(range(10, 14))})
+    before = frame["x"].to_list()
+    message = "without NaT" if name == "nat" else "monotonic"
+    with pytest.raises(ValueError, match=message):
+        frame.set_index("time")
+    assert frame["x"].to_list() == before
 
 
 def test_reported_partial_string_overwrite():
-    # the reviewed case: volas wrote one row where pandas selects three
-    _, vdf = _dt_frames([4, 1, 6, 2])
-    with pytest.raises(KeyError, match=PARTIAL):
-        vdf.loc["2024-01-02":, "x"] = 0
-    assert vdf["x"].to_list() == [10, 11, 12, 13]
+    # The invalid source axis fails before an overwrite can be attempted.
+    with pytest.raises(ValueError, match="monotonic"):
+        _dt_frames([4, 1, 6, 2])
+    # A valid time axis writes exactly the three rows covered by the date slice.
+    pdf, vdf = _dt_frames([1, 2, 4, 6])
+    pdf.loc["2024-01-02":, "x"] = 0
+    vdf.loc["2024-01-02":, "x"] = 0
+    assert vdf["x"].to_list() == pdf["x"].to_list() == [10, 0, 0, 0]
 
 
 def test_string_bounds_on_an_increasing_datetime_index_still_search_by_order():

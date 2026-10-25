@@ -2,10 +2,9 @@
 
 ## The rest of the pandas-compatible API
 
-Everything below behaves like its `pandas` counterpart — if you know it from
-pandas, it works the same in volas, except for the deliberate
-[NA-model divergences](#known-pandas-divergences-the-volasna-model) noted after
-the listing.
+The interfaces below follow their `pandas` calling conventions. The strict
+[index rules](#indexing--selection) and deliberate
+[NA-model divergences](#known-pandas-divergences-the-volasna-model) still apply.
 
 ```py
 # --- DataFrame: metadata --------------------------------------------------
@@ -212,13 +211,18 @@ Either is a contiguous selection, so cached directive columns continue on it (se
 its values and is never continued afterwards. `drop(axis=1)` only removes the columns it
 names: the remaining cached columns keep continuing.
 
-A datetime index holding `NaT` counts as unordered, as in pandas. On a datetime
-index that is not increasing (decreasing, unordered, or holding `NaT`), a bound
-written as a **string** raises `KeyError`: pandas reads it as a partial-date value
-and may select rows that are not contiguous, which volas does not reproduce, so it
-refuses rather than select different rows. Use `Timestamp` bounds there, or sort
-the index first. A bound of the other label kind (a string against an integer
-index, an integer against a string index) raises `TypeError`.
+Datetime labels must strictly increase and contain no NaT at every construction
+entry, including `index=`, `set_index`, `read_csv(index_col=...)` and `from_pandas`.
+Duplicates, decreasing order and missing labels raise `ValueError` immediately;
+there is no invalid datetime index to repair later with Timestamp bounds or sorting.
+A bound of the other label kind (a string against an integer index, an integer
+against a string index) raises `TypeError`.
+
+A DataFrame or Series derivation must preserve those label invariants. Selecting
+the same row twice raises `ValueError` for every index kind. On a datetime index,
+reverse slicing, `sort_index(ascending=False)`, and value sorting raise if their
+result no longer strictly increases; the source remains unchanged. Integer and string labels can
+be reversed or otherwise reordered while they remain unique.
 
 ### Differences from pandas (vs pandas)
 

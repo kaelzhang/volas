@@ -1,6 +1,7 @@
 //! `DataFrame` structural / row-reshaping ops (head/tail, sort, drop, rename,
 //! set_index, astype, dedup, nlargest, resample).
 
+use volas_core::ColumnView;
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -67,7 +68,7 @@ impl PyDataFrame {
         let df = self.read()?;
         let dup = Self::row_duplicated(&df, keep)?;
         Ok(PySeries {
-            inner: Series::new(None, Column::bool(dup), Arc::clone(df.index())),
+            inner: Series::new(None, Column::bool(dup), Arc::clone(df.index())).map_err(pyerr)?,
         })
     }
     /// The first (smallest-position) mode of each column, as a 1-row frame.
@@ -84,13 +85,13 @@ impl PyDataFrame {
         let mut cols = Vec::with_capacity(df.width());
         for (name, col) in df.names().iter().zip(df.columns()) {
             let s = PySeries {
-                inner: Series::new(Some(name.clone()), col.clone(), Arc::clone(idx)),
+                inner: Series::new(Some(name.clone()), col.clone(), Arc::clone(idx)).map_err(pyerr)?,
             };
-            let m = s.mode();
+            let m = s.mode()?;
             cols.push(if m.inner.is_empty() {
                 Column::na_of(col.dtype(), 1)
             } else {
-                m.inner.data.take(&[0])
+                m.inner.data().take(&[0])
             });
         }
         Ok(PyDataFrame::plain(
@@ -112,7 +113,7 @@ impl PyDataFrame {
         let name = df.names()[0].clone();
         let col = df.columns()[0].clone();
         let s = PySeries {
-            inner: Series::new(Some(name), col, Arc::clone(df.index())),
+            inner: Series::new(Some(name), col, Arc::clone(df.index())).map_err(pyerr)?,
         };
         s.value_counts(false, true, false, true)
     }
@@ -322,8 +323,8 @@ impl PyDataFrame {
                 // column by the dtype's unit (truncating, like a NumPy
                 // `datetime64[unit]` cast).
                 let col = df.column(&name).map_err(pyerr)?.clone();
-                let converted = match &col {
-                    Column::Datetime(_) | Column::Str(_, _) => col.to_datetime().map_err(pyerr)?,
+                let converted = match col.view() {
+                    ColumnView::Datetime(_) | ColumnView::Str(_, _) => col.to_datetime().map_err(pyerr)?,
                     _ => col.epoch_to_datetime(unit).map_err(pyerr)?,
                 };
                 df.set_column(&name, converted).map_err(pyerr)?;

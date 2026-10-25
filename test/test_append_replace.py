@@ -84,10 +84,9 @@ def test_a_datetime_label_before_the_last_raises_and_leaves_the_frame_unchanged(
     at = T0 + np.timedelta64(int(minute * 60), "s")
     with pytest.raises(ValueError, match="only increases"):
         df.append(_frame_of([_bar(9)], np.array([at])))
-    # in a batch, a later row going back raises too, atomically
-    batch = _frame_of([_bar(5), _bar(6), _bar(7)], T0 + np.array([5, 6, 4]) * MINUTE)
-    with pytest.raises(ValueError, match="only increases"):
-        df.append(batch)
+    # A batch going backwards is rejected at its earliest checked construction.
+    with pytest.raises(ValueError, match="monotonic"):
+        _frame_of([_bar(5), _bar(6), _bar(7)], T0 + np.array([5, 6, 4]) * MINUTE)
     assert len(df) == 5
     _same(df['close'], before, "unchanged")
     _same(df['ema:3'], _full(df)['ema:3'], "ema unchanged")

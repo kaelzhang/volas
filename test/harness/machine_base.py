@@ -6,7 +6,7 @@ history starts, and which are stale). After every op it asserts:
 
 * structure (``observe.structure``);
 * the cache model: membership, ``is_computed`` per column, and staleness exactly
-  as the model predicts (a bulk read raises iff some cached column is stale);
+  as the model predicts (bulk reads reject stale caches before index derivation);
 * values, on a refreshed ``copy()``: index and data columns equal the ledger, every
   cached column equals its from-scratch reference.
 
@@ -412,8 +412,32 @@ class FrameMachine(RuleBasedStateMachine):
                                         for t in self.df.dtypes.values()):
             return  # rolling is numeric-only
         stale = bool(self.stale) and contracts.BULK_READ_STALE_RAISES
-        self.attempt(lambda: ops[surface](self.df), expect_error=ValueError if stale else None,
-                     label=f'{surface}{" (stale)" if stale else ""}')
+        invalid_order = False
+        if not stale and surface == 'nsmallest' and self.coarse().schema.index == 'datetime':
+            ledger = self.coarse()
+            start = self.visible_start()
+            values = ledger.values('close', start).tolist()
+            # Native, stable ordering of the independent visible ledger rows;
+            # missing closes are excluded like nsmallest, with no float funnel.
+            present = [i for i, value in enumerate(values)
+                       if value is not None
+                       and not (isinstance(value, float) and np.isnan(value))]
+            order = sorted(present, key=values.__getitem__)[:2]
+            labels = [ledger.index[start + i] for i in order]
+            invalid_order = any(b <= a for a, b in zip(labels, labels[1:]))
+
+        def read():
+            try:
+                return ops[surface](self.df)
+            except ValueError as error:
+                if stale:
+                    assert 'stale' in str(error), 'freshness must be checked before index derivation'
+                elif invalid_order:
+                    assert 'monotonic' in str(error), 'the selected datetime labels are out of order'
+                raise
+
+        self.attempt(read, expect_error=ValueError if stale or invalid_order else None,
+                     label=f'{surface}{" (stale)" if stale else " (index order)" if invalid_order else ""}')
 
     @rule()
     def snapshot(self):

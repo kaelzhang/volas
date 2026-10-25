@@ -62,7 +62,7 @@ pub(crate) fn owned_chunks(src: &[ArrayRef]) -> Result<Column, ArrowError> {
         }};
     }
     macro_rules! integer {
-        ($ty:ty) => { Column::I64(Buffer::from_vec(values!($ty, |a: &arrow_array::PrimitiveArray<$ty>, i| a.value(i) as i64, 0)), validity()) };
+        ($ty:ty) => { Column::from_i64_buffer(Buffer::from_vec(values!($ty, |a: &arrow_array::PrimitiveArray<$ty>, i| a.value(i) as i64, 0)), validity()).map_err(|e| ArrowError::InvalidArgumentError(e.to_string()))? };
     }
     macro_rules! instant {
         ($ty:ty, $unit:expr) => {{
@@ -78,14 +78,14 @@ pub(crate) fn owned_chunks(src: &[ArrayRef]) -> Result<Column, ArrowError> {
                     });
                 }
             }
-            Column::Datetime(Buffer::from_vec(out))
+            Column::from_datetime_buffer(Buffer::from_vec(out))
         }};
     }
     Ok(match dtype(src[0].data_type()) {
-        DataType::Float64 => Column::F64(float!(Float64Type, f64::NAN)),
-        DataType::Float32 => Column::F32(float!(Float32Type, f32::NAN)),
-        DataType::Int64 => Column::I64(native!(Int64Type), validity()),
-        DataType::Int32 => Column::I32(native!(Int32Type), validity()),
+        DataType::Float64 => Column::from_f64_buffer(float!(Float64Type, f64::NAN)),
+        DataType::Float32 => Column::from_f32_buffer(float!(Float32Type, f32::NAN)),
+        DataType::Int64 => Column::from_i64_buffer(native!(Int64Type), validity()).map_err(|e| ArrowError::InvalidArgumentError(e.to_string()))?,
+        DataType::Int32 => Column::from_i32_buffer(native!(Int32Type), validity()).map_err(|e| ArrowError::InvalidArgumentError(e.to_string()))?,
         DataType::Int8 => integer!(Int8Type),
         DataType::Int16 => integer!(Int16Type),
         DataType::UInt8 => integer!(UInt8Type),
@@ -107,7 +107,7 @@ pub(crate) fn owned_chunks(src: &[ArrayRef]) -> Result<Column, ArrowError> {
                     out.push(v as i64);
                 }
             }
-            Column::I64(Buffer::from_vec(out), validity())
+            Column::from_i64_buffer(Buffer::from_vec(out), validity()).map_err(|e| ArrowError::InvalidArgumentError(e.to_string()))?
         }
         DataType::Boolean => {
             let mut out = Vec::with_capacity(len);
@@ -116,7 +116,7 @@ pub(crate) fn owned_chunks(src: &[ArrayRef]) -> Result<Column, ArrowError> {
                     out.extend((0..s.len()).map(|i| cell(s, i).is_some_and(|(a, i)| a.as_boolean().value(i))));
                 } else { out.extend(s.as_boolean().values().iter()); }
             }
-            Column::Bool(Buffer::from_vec(out), validity())
+            Column::from_bool_buffer(Buffer::from_vec(out), validity()).map_err(|e| ArrowError::InvalidArgumentError(e.to_string()))?
         }
         DataType::Timestamp(TimeUnit::Nanosecond, _) => instant!(TimestampNanosecondType, "ns"),
         DataType::Timestamp(TimeUnit::Microsecond, _) => instant!(TimestampMicrosecondType, "us"),
@@ -124,11 +124,11 @@ pub(crate) fn owned_chunks(src: &[ArrayRef]) -> Result<Column, ArrowError> {
         DataType::Timestamp(TimeUnit::Second, _) => instant!(TimestampSecondType, "s"),
         DataType::Date32 => instant!(Date32Type, "D"),
         DataType::Date64 => instant!(Date64Type, "ms"),
-        DataType::Decimal128(_, scale) => Column::F64(Buffer::from_vec(values!(Decimal128Type,
+        DataType::Decimal128(_, scale) => Column::from_f64_buffer(Buffer::from_vec(values!(Decimal128Type,
             |a: &arrow_array::Decimal128Array, i| if a.is_null(i) { f64::NAN } else {
                 decimal::scaled_to_f64(a.value(i), *scale as i32).expect("Arrow decimal fits f64")
             }, f64::NAN))),
-        DataType::Decimal256(_, scale) => Column::F64(Buffer::from_vec(values!(Decimal256Type,
+        DataType::Decimal256(_, scale) => Column::from_f64_buffer(Buffer::from_vec(values!(Decimal256Type,
             |a: &arrow_array::Decimal256Array, i| if a.is_null(i) { f64::NAN } else {
                 match a.value(i).to_i128() {
                     Some(m) => decimal::scaled_to_f64(m, *scale as i32),
@@ -183,7 +183,7 @@ fn strings<O: arrow_array::OffsetSizeTrait>(src: &[ArrayRef], len: usize) -> Res
     let validity = Validity::from_valid_iter(len, src.iter().flat_map(|a| {
         (0..a.len()).map(|i| valid(a, i))
     }));
-    Ok(Column::Str(builder.finish(), validity))
+    Column::from_str_buffer(builder.finish(), validity).map_err(|e| ArrowError::InvalidArgumentError(e.to_string()))
 }
 
 fn string_views(src: &[ArrayRef], len: usize) -> Result<Column, ArrowError> {
@@ -204,6 +204,6 @@ fn string_views(src: &[ArrayRef], len: usize) -> Result<Column, ArrowError> {
             });
         }
     }
-    Ok(Column::Str(builder.finish(), Validity::from_valid_iter(len,
-        src.iter().flat_map(|a| (0..a.len()).map(|i| valid(a, i))))))
+    Column::from_str_buffer(builder.finish(), Validity::from_valid_iter(len,
+        src.iter().flat_map(|a| (0..a.len()).map(|i| valid(a, i))))).map_err(|e| ArrowError::InvalidArgumentError(e.to_string()))
 }

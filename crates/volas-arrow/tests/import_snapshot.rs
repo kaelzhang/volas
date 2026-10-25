@@ -1,4 +1,5 @@
 //! Every Rust foreign import entry point borrows by default and offers explicit owned snapshots.
+use volas_core::ColumnView;
 use std::ffi::c_void;
 use std::sync::Arc;
 use arrow_array::{ArrayRef, Float32Array, Float64Array, Int32Array, Int64Array, TimestampNanosecondArray};
@@ -6,11 +7,11 @@ use volas_arrow::*;
 use volas_core::Column;
 
 fn borrowed(c: &Column) -> bool {
-    match c {
-        Column::F64(b) => b.is_borrowed(),
-        Column::F32(b) => b.is_borrowed(),
-        Column::I64(b, _) | Column::Datetime(b) => b.is_borrowed(),
-        Column::I32(b, _) => b.is_borrowed(),
+    match c.view() {
+        ColumnView::F64(b) => b.is_borrowed(),
+        ColumnView::F32(b) => b.is_borrowed(),
+        ColumnView::I64(b, _) | ColumnView::Datetime(b) => b.is_borrowed(),
+        ColumnView::I32(b, _) => b.is_borrowed(),
         _ => panic!("native primitive expected"),
     }
 }

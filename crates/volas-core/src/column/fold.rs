@@ -77,8 +77,8 @@ impl Column {
     #[inline]
     pub fn is_missing_input(&self, row: usize) -> bool {
         match self {
-            Column::F64(s) => s[row].is_missing_value(),
-            Column::F32(s) => s[row].is_missing_value(),
+            Column { data: ColumnData::F64(s) } => s[row].is_missing_value(),
+            Column { data: ColumnData::F32(s) } => s[row].is_missing_value(),
             _ => !self.is_valid(row),
         }
     }
@@ -111,25 +111,25 @@ impl Column {
             return Err((0, op.unsupported(self.dtype())));
         }
         let finite = match self {
-            Column::F64(s) => finite_group_inputs(s, &groups),
-            Column::F32(s) => finite_group_inputs(s, &groups),
+            Column { data: ColumnData::F64(s) } => finite_group_inputs(s, &groups),
+            Column { data: ColumnData::F32(s) } => finite_group_inputs(s, &groups),
             _ => false,
         };
         if op.is_endpoint() {
             return Ok(self.endpoint_columns(op, groups, spare_rows, spare_bytes, finite));
         }
         Ok(match self {
-            Column::F64(s) => Column::f64(collect_with_spare(groups.map(|r| float_reduce(op, s, r[0], r[1..].iter().copied(), finite)), spare_rows)),
-            Column::F32(s) => Column::f32(collect_with_spare(groups.map(|r| float_reduce(op, s, r[0], r[1..].iter().copied(), finite)), spare_rows)),
-            Column::I64(s, sv) => {
+            Column { data: ColumnData::F64(s) } => Column::f64(collect_with_spare(groups.map(|r| float_reduce(op, s, r[0], r[1..].iter().copied(), finite)), spare_rows)),
+            Column { data: ColumnData::F32(s) } => Column::f32(collect_with_spare(groups.map(|r| float_reduce(op, s, r[0], r[1..].iter().copied(), finite)), spare_rows)),
+            Column { data: ColumnData::I64(s, sv) } => {
                 let (values, valid) = int_groups(op, s, sv, groups, DType::I64, spare_rows)?;
                 Column::i64_masked(values, valid)
             }
-            Column::I32(s, sv) => {
+            Column { data: ColumnData::I32(s, sv) } => {
                 let (values, valid) = int_groups(op, s, sv, groups, DType::I32, spare_rows)?;
                 Column::i32_masked(values, valid)
             }
-            Column::Datetime(s) => Column::datetime(collect_with_spare(groups.map(|r| instant_reduce(op, s, r[0], r[1..].iter().copied())), spare_rows)),
+            Column { data: ColumnData::Datetime(s) } => Column::datetime(collect_with_spare(groups.map(|r| instant_reduce(op, s, r[0], r[1..].iter().copied())), spare_rows)),
             _ => unreachable!("the support table admits no other pair"), // LCOV_EXCL_LINE
         })
     }
@@ -141,39 +141,39 @@ impl Column {
         spare: usize, bytes: usize, finite: bool,
     ) -> Column {
         match self {
-            Column::F64(s) => {
+            Column { data: ColumnData::F64(s) } => {
                 let (values, _, missing) = float_endpoint_values(op, groups, s, spare, finite);
                 let mut out = Column::f64(values);
                 // Match the original builder's learned NaN fact as well as its bits.
-                if let (Some(row), Column::F64(v)) = (missing, &mut out) { v.set(row, f64::NAN); }
+                if let (Some(row), Column { data: ColumnData::F64(v) }) = (missing, &mut out) { v.set(row, f64::NAN); }
                 out
             }
-            Column::F32(s) => {
+            Column { data: ColumnData::F32(s) } => {
                 let (values, _, missing) = float_endpoint_values(op, groups, s, spare, finite);
                 let mut out = Column::f32(values);
-                if let (Some(row), Column::F32(v)) = (missing, &mut out) { v.set(row, f32::NAN); }
+                if let (Some(row), Column { data: ColumnData::F32(v) }) = (missing, &mut out) { v.set(row, f32::NAN); }
                 out
             }
-            Column::Datetime(s) => {
+            Column { data: ColumnData::Datetime(s) } => {
                 let (values, _, _) = endpoint_values(op, groups, s, |r| s[r] != i64::MIN, |_| i64::MIN, spare);
                 Column::datetime(values)
             }
-            Column::I64(s, v) => {
+            Column { data: ColumnData::I64(s, v) } => {
                 let (values, valid, _) = endpoint_values(op, groups, s, |r| v.is_valid(r), |x| x, spare);
                 Column::i64_masked(values, valid)
             }
-            Column::I32(s, v) => {
+            Column { data: ColumnData::I32(s, v) } => {
                 let (values, valid, _) = endpoint_values(op, groups, s, |r| v.is_valid(r), |x| x, spare);
                 Column::i32_masked(values, valid)
             }
-            Column::Bool(s, v) => {
+            Column { data: ColumnData::Bool(s, v) } => {
                 let (values, valid, _) = endpoint_values(op, groups, s, |r| v.is_valid(r), |x| x, spare);
                 Column::bool_masked(values, valid)
             }
-            Column::Str(_, v) => {
+            Column { data: ColumnData::Str(_, v) } => {
                 let (positions, valid) = endpoint_groups(op, groups, |r| v.is_valid(r));
                 let mut out = self.take_with_spare(&positions, spare, bytes);
-                if let Column::Str(_, v) = &mut out { *v = valid; }
+                if let Column { data: ColumnData::Str(_, v) } = &mut out { *v = valid; }
                 out
             }
         }
@@ -213,20 +213,20 @@ impl Column {
         match (&mut *self, src) {
             // `make_mut` forgets the column's NaN fact; a resume then checks its few
             // rows directly (tracking it here would grow this per-bar hot path).
-            (Column::F64(buf), Column::F64(s)) => float_fold(buf, row, op, s[r]),
-            (Column::F32(buf), Column::F32(s)) => float_fold(buf, row, op, s[r]),
-            (Column::I64(buf, val), Column::I64(s, sv)) => {
+            (Column { data: ColumnData::F64(buf) }, Column { data: ColumnData::F64(s) }) => float_fold(buf, row, op, s[r]),
+            (Column { data: ColumnData::F32(buf) }, Column { data: ColumnData::F32(s) }) => float_fold(buf, row, op, s[r]),
+            (Column { data: ColumnData::I64(buf, val) }, Column { data: ColumnData::I64(s, sv) }) => {
                 int_step(buf, val, row, op, s[r], sv.is_valid(r), DType::I64)?
             }
-            (Column::I32(buf, val), Column::I32(s, sv)) => {
+            (Column { data: ColumnData::I32(buf, val) }, Column { data: ColumnData::I32(s, sv) }) => {
                 int_step(buf, val, row, op, s[r], sv.is_valid(r), DType::I32)?
             }
-            (Column::Datetime(buf), Column::Datetime(s)) if op != CombineOp::Sum => {
+            (Column { data: ColumnData::Datetime(buf) }, Column { data: ColumnData::Datetime(s) }) if op != CombineOp::Sum => {
                 if let Some(v) = instant_step(op, buf[row], s[r]) {
                     buf.make_mut()[row] = v;
                 }
             }
-            (Column::Bool(..), Column::Bool(..)) | (Column::Str(..), Column::Str(..)) if op.is_endpoint() => {
+            (Column { data: ColumnData::Bool(..) }, Column { data: ColumnData::Bool(..) }) | (Column { data: ColumnData::Str(..) }, Column { data: ColumnData::Str(..) }) if op.is_endpoint() => {
                 if !self.is_valid(row) {
                     return Ok(()); // a missing aggregate stays missing
                 }
@@ -253,11 +253,11 @@ impl Column {
         }
         if !op.is_endpoint() {
             match (&mut *self, src) {
-                (Column::F64(a), Column::F64(b)) => {
+                (Column { data: ColumnData::F64(a) }, Column { data: ColumnData::F64(b) }) => {
                     if !had_missing { a.set(row, if b[r].is_missing_value() { missing_float(b[r]) } else { float_combine(op, a[row], b[r]).unwrap_or(a[row]) }); }
                     return Ok(());
                 }
-                (Column::F32(a), Column::F32(b)) => {
+                (Column { data: ColumnData::F32(a) }, Column { data: ColumnData::F32(b) }) => {
                     if !had_missing { a.set(row, if b[r].is_missing_value() { missing_float(b[r]) } else { float_combine(op, a[row], b[r]).unwrap_or(a[row]) }); }
                     return Ok(());
                 }
@@ -297,13 +297,13 @@ impl Column {
         if !op.supports(dtype) {
             return Err(op.unsupported(dtype));
         }
-        if matches!(self, Column::Str(..)) && row + 1 != self.len() {
+        if matches!(self, Column { data: ColumnData::Str(..) }) && row + 1 != self.len() {
             return Err(str_not_last(row, self.len()));
         }
         // the integer aggregate (`None` once missing); only an integer fold can overflow
         let mut acc = match self {
-            Column::I64(buf, val) => val.is_valid(row).then(|| buf[row]),
-            Column::I32(buf, val) => val.is_valid(row).then(|| i64::from(buf[row])),
+            Column { data: ColumnData::I64(buf, val) } => val.is_valid(row).then(|| buf[row]),
+            Column { data: ColumnData::I32(buf, val) } => val.is_valid(row).then(|| i64::from(buf[row])),
             _ => None,
         };
         let integer = matches!(dtype, DType::I64 | DType::I32);
@@ -359,15 +359,15 @@ impl Column {
             // first / last: the endpoint cell, missing unless every row is present
             // (presence read once per dtype, not dispatched per row)
             let (present, last) = match src {
-                Column::F64(s) => float_endpoint_scan(s, first, rows),
-                Column::F32(s) => float_endpoint_scan(s, first, rows),
-                Column::Datetime(s) => endpoint_scan(first, rows, |r| s[r] != i64::MIN),
-                Column::I64(_, v) | Column::I32(_, v) | Column::Bool(_, v) | Column::Str(_, v)
+                Column { data: ColumnData::F64(s) } => float_endpoint_scan(s, first, rows),
+                Column { data: ColumnData::F32(s) } => float_endpoint_scan(s, first, rows),
+                Column { data: ColumnData::Datetime(s) } => endpoint_scan(first, rows, |r| s[r] != i64::MIN),
+                Column { data: ColumnData::I64(_, v) } | Column { data: ColumnData::I32(_, v) } | Column { data: ColumnData::Bool(_, v) } | Column { data: ColumnData::Str(_, v) }
                     if !v.has_nulls() =>
                 {
                     endpoint_scan(first, rows, |_| true)
                 }
-                Column::I64(_, v) | Column::I32(_, v) | Column::Bool(_, v) | Column::Str(_, v) => {
+                Column { data: ColumnData::I64(_, v) } | Column { data: ColumnData::I32(_, v) } | Column { data: ColumnData::Bool(_, v) } | Column { data: ColumnData::Str(_, v) } => {
                     endpoint_scan(first, rows, |r| v.is_valid(r))
                 }
             };
@@ -377,23 +377,23 @@ impl Column {
             return self.write_present(row, src, endpoint_position(op, first, last, true));
         }
         match (&mut *self, src) {
-            (Column::F64(buf), Column::F64(s)) => {
+            (Column { data: ColumnData::F64(buf) }, Column { data: ColumnData::F64(s) }) => {
                 let finite = finite_inputs(s, rows.size_hint().0.saturating_add(1));
                 buf.set(row, float_reduce(op, s, first, rows, finite));
             },
-            (Column::F32(buf), Column::F32(s)) => {
+            (Column { data: ColumnData::F32(buf) }, Column { data: ColumnData::F32(s) }) => {
                 let finite = finite_inputs(s, rows.size_hint().0.saturating_add(1));
                 buf.set(row, float_reduce(op, s, first, rows, finite));
             },
-            (Column::I64(buf, val), Column::I64(s, sv)) => {
+            (Column { data: ColumnData::I64(buf, val) }, Column { data: ColumnData::I64(s, sv) }) => {
                 let v = int_reduce(op, s, sv, first, rows, DType::I64)?;
                 write_int(buf, val, row, v)
             }
-            (Column::I32(buf, val), Column::I32(s, sv)) => {
+            (Column { data: ColumnData::I32(buf, val) }, Column { data: ColumnData::I32(s, sv) }) => {
                 let v = int_reduce(op, s, sv, first, rows, DType::I32)?;
                 write_int(buf, val, row, v)
             }
-            (Column::Datetime(buf), Column::Datetime(s)) => {
+            (Column { data: ColumnData::Datetime(buf) }, Column { data: ColumnData::Datetime(s) }) => {
                 buf.make_mut()[row] = instant_reduce(op, s, first, rows);
             }
             _ => unreachable!("the support table admits no other pair"), // LCOV_EXCL_LINE
@@ -405,21 +405,21 @@ impl Column {
     fn write_present(&mut self, row: usize, src: &Column, r: usize) -> Result<()> {
         let n = self.len();
         match (self, src) {
-            (Column::F64(buf), Column::F64(s)) => buf.set(row, s[r]),
-            (Column::F32(buf), Column::F32(s)) => buf.set(row, s[r]),
-            (Column::Datetime(buf), Column::Datetime(s)) => buf.make_mut()[row] = s[r],
-            (Column::I64(buf, val), Column::I64(s, _)) => write_int(buf, val, row, Some(s[r])),
-            (Column::I32(buf, val), Column::I32(s, _)) => write_int(buf, val, row, Some(s[r])),
-            (Column::Bool(buf, val), Column::Bool(s, _)) => {
+            (Column { data: ColumnData::F64(buf) }, Column { data: ColumnData::F64(s) }) => buf.set(row, s[r]),
+            (Column { data: ColumnData::F32(buf) }, Column { data: ColumnData::F32(s) }) => buf.set(row, s[r]),
+            (Column { data: ColumnData::Datetime(buf) }, Column { data: ColumnData::Datetime(s) }) => buf.make_mut()[row] = s[r],
+            (Column { data: ColumnData::I64(buf, val) }, Column { data: ColumnData::I64(s, _) }) => write_int(buf, val, row, Some(s[r])),
+            (Column { data: ColumnData::I32(buf, val) }, Column { data: ColumnData::I32(s, _) }) => write_int(buf, val, row, Some(s[r])),
+            (Column { data: ColumnData::Bool(buf, val) }, Column { data: ColumnData::Bool(s, _) }) => {
                 buf.make_mut()[row] = s[r];
-                val.set(row, n, true);
+                val.set_in_bounds(row, n, true);
             }
-            (Column::Str(buf, val), Column::Str(s, _)) => {
+            (Column { data: ColumnData::Str(buf, val) }, Column { data: ColumnData::Str(s, _) }) => {
                 if row + 1 != n {
                     return Err(str_not_last(row, n));
                 }
                 buf.set_last(s.get(r));
-                val.set(row, n, true);
+                val.set_in_bounds(row, n, true);
             }
             _ => unreachable!("the caller matched the dtypes"), // LCOV_EXCL_LINE
         }
@@ -433,12 +433,12 @@ impl Column {
     fn set_missing_at(&mut self, row: usize) -> Result<()> {
         let n = self.len();
         match self {
-            Column::F64(a) => a.set(row, f64::NAN),
-            Column::F32(a) => a.set(row, f32::NAN),
-            Column::Datetime(a) => a.make_mut()[row] = i64::MIN,
-            Column::Str(_, _) if row + 1 != n => return Err(str_not_last(row, n)),
-            Column::Bool(_, v) | Column::I64(_, v) | Column::I32(_, v) | Column::Str(_, v) => {
-                v.set(row, n, false)
+            Column { data: ColumnData::F64(a) } => a.set(row, f64::NAN),
+            Column { data: ColumnData::F32(a) } => a.set(row, f32::NAN),
+            Column { data: ColumnData::Datetime(a) } => a.make_mut()[row] = i64::MIN,
+            Column { data: ColumnData::Str(_, _) } if row + 1 != n => return Err(str_not_last(row, n)),
+            Column { data: ColumnData::Bool(_, v) } | Column { data: ColumnData::I64(_, v) } | Column { data: ColumnData::I32(_, v) } | Column { data: ColumnData::Str(_, v) } => {
+                v.set_in_bounds(row, n, false)
             }
         }
         Ok(())
@@ -471,7 +471,7 @@ fn endpoint_groups<'a>(op: CombineOp, groups: impl ExactSizeIterator<Item = &'a 
     let positions = groups.enumerate().map(|(i, rows)| {
         let first = rows[0];
         let (present, last) = endpoint_scan(first, rows[1..].iter().copied(), &present);
-        valid.set(i, n, present);
+        valid.set_in_bounds(i, n, present);
         endpoint_position(op, first, last, present)
     }).collect();
     (positions, valid)
@@ -490,7 +490,7 @@ fn int_groups<'a, T: crate::buffer::Element + Copy + Into<i64> + TryFrom<i64>>(
     let mut values = Vec::with_capacity(reserved_capacity::<T>(n, spare));
     for (i, rows) in groups.enumerate() {
         let value = int_reduce(op, s, sv, rows[0], rows[1..].iter().copied(), dtype).map_err(|e| (i, e))?;
-        valid.set(i, n, value.is_some());
+        valid.set_in_bounds(i, n, value.is_some());
         values.push(value.unwrap_or(s[rows[0]]));
     }
     Ok((values, valid))
@@ -777,9 +777,9 @@ fn write_int<T: crate::buffer::Element + Copy>(buf: &mut Buffer<T>, val: &mut Va
     match v {
         Some(v) => {
             buf.make_mut()[row] = v;
-            val.set(row, n, true);
+            val.set_in_bounds(row, n, true);
         }
-        None => val.set(row, n, false),
+        None => val.set_in_bounds(row, n, false),
     }
 }
 
@@ -815,7 +815,7 @@ fn endpoint_values<'a, T: Copy>(
         let first = rows[0];
         let (present, last) = endpoint_scan(first, rows[1..].iter().copied(), &present);
         let row = endpoint_position(op, first, last, present);
-        valid.set(i, n, present);
+        valid.set_in_bounds(i, n, present);
         values.push(if present { source[row] } else { missing.get_or_insert(i); absent(source[row]) });
     }
     (values, valid, missing)

@@ -1,6 +1,7 @@
 //! Execute a directive AST against a [`DataFrame`], producing a [`Column`].
 
 
+use volas_core::ColumnView;
 use crate::bind::bind_command_node;
 use crate::operands::Operands;
 use crate::spec::History;
@@ -89,8 +90,8 @@ pub(crate) fn operand(series: &[BoundNode], i: usize) -> Option<&BoundNode> {
 /// reject it (API contract C4 — a lossy implicit conversion errors, never a silent
 /// all-NaN feature column).
 pub(crate) fn require_numeric(col: &Column) -> Result<()> {
-    match col {
-        Column::Str(..) | Column::Datetime(..) => Err(VolasError::Value(format!(
+    match col.view() {
+        ColumnView::Str(..) | ColumnView::Datetime(..) => Err(VolasError::Value(format!(
             "directive operand must be a numeric column, got {}",
             col.dtype()
         ))),

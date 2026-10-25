@@ -24,6 +24,7 @@
 //! A selection of rows by positions decides between the two structurally, on the
 //! positions alone ([`DataFrame::select_rows`]).
 
+use crate::column::ColumnData;
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -54,7 +55,7 @@ pub trait Replay {
 /// A replay that never has the history (core tests: a selection that needs it keeps the
 /// column without a checkpoint).
 #[cfg(test)]
-pub(super) struct NoReplay;
+pub(crate) struct NoReplay;
 
 #[cfg(test)]
 impl Replay for NoReplay {
@@ -143,7 +144,7 @@ impl DataFrame {
         let columns: Vec<Column> = if live {
             self.columns.iter().map(|c| c.slice_with_spare(start, end, end - start)).collect()
         } else if end > start
-            && self.width() > 1 && self.columns.iter().all(|c| matches!(c, Column::F64(_)))
+            && self.width() > 1 && self.columns.iter().all(|c| matches!(c, Column { data: ColumnData::F64(_) }))
         {
             // Row selections keep no source allocation alive. One bounded slab
             // avoids repeating large allocator mappings per column; a write
@@ -168,7 +169,7 @@ impl DataFrame {
                         Arc::clone(&owner), range, col.known_has_nan() == Some(false),
                         col.known_has_nonfinite() == Some(false),
                     ).expect("copied slab range");
-                    Column::F64(buffer)
+                    Column { data: ColumnData::F64(buffer) }
                 }).collect()
             }
         } else {
@@ -354,10 +355,13 @@ impl DataFrame {
     /// contiguous and in order are the contiguous selection ([`rows`](Self::rows)); any
     /// other selection — rows out of order, repeated or with gaps, or none — is a new
     /// series of the data columns ([`take_data`](Self::take_data)).
-    pub fn select_rows(&self, positions: &[usize], replay: &dyn Replay) -> DataFrame {
+    pub fn select_rows(&self, positions: &[usize], replay: &dyn Replay) -> Result<DataFrame> {
+        if positions.iter().any(|&i| i >= self.height) {
+            return Err(VolasError::Shape("index selection position out of bounds".into()));
+        }
         match positions {
             [first, ..] if positions.windows(2).all(|w| w[1] == w[0] + 1) => {
-                self.rows(*first, first + positions.len(), replay)
+                Ok(self.rows(*first, first + positions.len(), replay))
             }
             _ => self.take_data(positions),
         }
@@ -373,23 +377,25 @@ impl DataFrame {
             )));
         }
         let positions: Vec<usize> = mask.iter().enumerate().filter_map(|(i, &b)| b.then_some(i)).collect();
-        Ok(self.select_rows(&positions, replay))
+        self.select_rows(&positions, replay)
     }
 
     /// The rows at `positions` as a new series: the data columns only, row 0 at position
     /// 0.
-    pub fn take_data(&self, positions: &[usize]) -> DataFrame {
+    pub fn take_data(&self, positions: &[usize]) -> Result<DataFrame> {
+        let index = self.index.take(positions)?;
         let (names, columns) = self.data_parts();
         let columns = columns.iter().map(|c| c.take(positions)).collect();
-        DataFrame::new_series(names, columns, self.index.take(positions)).expect("taken alike")
+        DataFrame::new_series(names, columns, index)
     }
 
     /// Every column's values at `positions` (cached ones as values), row 0 at position 0
     /// — a read of the rows (a row, a column's values), never a frame that continues: it
     /// carries no cached column.
-    pub fn take(&self, positions: &[usize]) -> DataFrame {
+    pub fn take(&self, positions: &[usize]) -> Result<DataFrame> {
+        let index = self.index.take(positions)?;
         let columns: Vec<Column> = self.columns.iter().map(|c| c.take(positions)).collect();
-        self.same_schema(columns, self.index.take(positions), 0)
+        Ok(self.same_schema(columns, index, 0))
     }
 
     // --- column projections ----------------------------------------------------------------
@@ -538,7 +544,7 @@ impl DataFrame {
             names.insert(0, label.to_string());
             columns.insert(0, self.index.to_column());
         }
-        DataFrame::new_series(names, columns, Index::range(self.height))
+        DataFrame::new_series(names, columns, Index::new(None, crate::IndexKind::Range { start: 0, len: self.height })?)
     }
 
     /// Change the DatetimeIndex's **display / matching** timezone without moving any
@@ -585,7 +591,7 @@ impl DataFrame {
         // `Tz` owns the wall clock -> instant conversion (sub-second digits kept; a DST
         // gap / fold or an instant past the range raises); a NaT label stays NaT.
         let shifted = tz.localize_values(values, cur)?;
-        self.reindexed(Index::datetime(shifted, tz).with_name(self.index.name().map(String::from)))
+        self.reindexed(Index::new(None, crate::IndexKind::Datetime(shifted, tz))?.with_name(self.index.name().map(String::from)))
     }
 
     /// The data columns over `index` (same length): a new series.

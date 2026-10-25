@@ -713,7 +713,7 @@ fn f32_i32_columns() {
     assert_eq!(fa.len(), 2, "unchanged");
     let mut fm = Column::f32(vec![1.0]);
     fm.append_na(2);
-    assert!(matches!(&fm, Column::F32(v) if v.len() == 3 && v[1].is_nan()));
+    assert!(matches!(&fm, Column { data: ColumnData::F32(v) } if v.len() == 3 && v[1].is_nan()));
 }
 
 #[test]
@@ -794,7 +794,7 @@ fn take_optional_every_dtype() {
 fn str_append_is_amortised_not_quadratic() {
     fn data_ptr(c: &Column) -> *const u8 {
         match c {
-            Column::Str(s, _) => s.buffers().1.as_ptr(),
+            Column { data: ColumnData::Str(s, _) } => s.buffers().1.as_ptr(),
             _ => unreachable!(),
         }
     }

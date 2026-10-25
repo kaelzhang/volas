@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use pyo3::prelude::*;
 use volas_core::{
-    stats, Column, DType, DataFrame, Index, Scalar, Series,
+    stats, Column, DType, DataFrame, Index, IndexKind, Scalar, Series,
 };
 
 #[allow(unused_imports)]
@@ -21,7 +21,7 @@ impl PyDataFrame {
         let names: Vec<String> = df.names().to_vec();
         let counts: Vec<i64> = df.columns().iter().map(|c| c.count() as i64).collect();
         Ok(PySeries {
-            inner: Series::new(None, Column::i64(counts), Arc::new(Index::str(names))),
+            inner: Series::new(None, Column::i64(counts), Arc::new(Index::new(None, volas_core::IndexKind::Str(names)).map_err(pyerr)?)).map_err(pyerr)?,
         })
     }
 
@@ -82,17 +82,17 @@ impl PyDataFrame {
             })
             .collect();
         Ok(PySeries {
-            inner: Series::new(None, Column::i64(counts), Arc::new(Index::str(names))),
+            inner: Series::new(None, Column::i64(counts), Arc::new(Index::new(None, volas_core::IndexKind::Str(names)).map_err(pyerr)?)).map_err(pyerr)?,
         })
     }
     /// Per-column truthiness `any` (pandas `df.any()`): a present, non-zero /
     /// True / non-empty cell counts.
     pub(crate) fn any(&self) -> PyResult<PySeries> {
-        Ok(Self::bool_reduce(&self.read()?, true))
+        Self::bool_reduce(&self.read()?, true)
     }
     /// Per-column truthiness `all` (pandas `df.all()`), NA-skipping.
     pub(crate) fn all(&self) -> PyResult<PySeries> {
-        Ok(Self::bool_reduce(&self.read()?, false))
+        Self::bool_reduce(&self.read()?, false)
     }
     /// Per-column index label of the maximum (pandas `df.idxmax()`).
     pub(crate) fn idxmax(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
@@ -130,10 +130,10 @@ impl PyDataFrame {
         for (name, col) in df.names().iter().zip(df.columns()) {
             if col.dtype().is_numeric() {
                 let s = PySeries {
-                    inner: Series::new(Some(name.clone()), col.clone(), Arc::clone(idx)),
+                    inner: Series::new(Some(name.clone()), col.clone(), Arc::clone(idx)).map_err(pyerr)?,
                 };
                 names.push(name.clone());
-                cols.push(s.describe()?.inner.data);
+                cols.push(s.describe()?.inner.into_data());
             }
         }
         // No numeric columns (empty / str-only / datetime-only frame) -> a 0x0
@@ -141,9 +141,9 @@ impl PyDataFrame {
         // columns, which the core rejects as a height mismatch. volas describe is
         // numeric-only (pandas would return object-column stats here instead).
         let index = if cols.is_empty() {
-            Index::str(Vec::new())
+            Index::new(None, volas_core::IndexKind::Str(Vec::new())).map_err(pyerr)?
         } else {
-            Index::str(describe_labels())
+            Index::new(None, volas_core::IndexKind::Str(describe_labels())).map_err(pyerr)?
         };
         DataFrame::new(names, cols, Some(index))
             .map(PyDataFrame::plain)
@@ -179,7 +179,7 @@ impl PyDataFrame {
             }
         }
         let data = Column::from_scalars(&parts).map_err(pyerr)?;
-        Ok(PySeries { inner: Series::new(None, data, Arc::new(Index::str(names))) })
+        Ok(PySeries { inner: Series::new(None, data, Arc::new(Index::new(None, volas_core::IndexKind::Str(names)).map_err(pyerr)?)).map_err(pyerr)? })
     }
 
 
@@ -194,21 +194,21 @@ impl PyDataFrame {
         for (name, col) in df.names().iter().zip(df.columns()) {
             if crate::frame::reduces(col) {
                 let s = PySeries {
-                    inner: Series::new(Some(name.clone()), col.clone(), Arc::clone(idx)),
+                    inner: Series::new(Some(name.clone()), col.clone(), Arc::clone(idx)).map_err(pyerr)?,
                 };
                 names.push(name.clone());
                 vals.push(op(&s)?);
             }
         }
         Ok(PySeries {
-            inner: Series::new(None, Column::f64(vals), Arc::new(Index::str(names))),
+            inner: Series::new(None, Column::f64(vals), Arc::new(Index::new(None, volas_core::IndexKind::Str(names)).map_err(pyerr)?)).map_err(pyerr)?,
         })
     }
 
     /// Per-column truthiness any/all over the numeric / bool columns (a str /
     /// datetime column has no truth value, as `Series.any` raises for it), NA
     /// skipped — the same core truth owner as the Series surface (#27).
-    fn bool_reduce(df: &Fresh<'_>, want_any: bool) -> PySeries {
+    fn bool_reduce(df: &Fresh<'_>, want_any: bool) -> PyResult<PySeries> {
         let (mut names, mut vals) = (Vec::new(), Vec::new());
         for (name, c) in df.names().iter().zip(df.columns()) {
             if crate::frame::reduces(c) {
@@ -217,9 +217,9 @@ impl PyDataFrame {
                 vals.push(if want_any { truth.any(|t| t) } else { truth.all(|t| t) });
             }
         }
-        PySeries {
-            inner: Series::new(None, Column::bool(vals), Arc::new(Index::str(names))),
-        }
+        Ok(PySeries {
+            inner: Series::new(None, Column::bool(vals), Arc::new(Index::new(None, volas_core::IndexKind::Str(names)).map_err(pyerr)?)).map_err(pyerr)?,
+        })
     }
 
     /// Per-column index label of the extreme -> a Series of labels keyed by
@@ -231,9 +231,16 @@ impl PyDataFrame {
             positions.push(argext(col, want_max)?);
         }
         let index = df.index();
-        let labels = index.take(&positions).to_column();
+        // These are result values, not a new row axis: several columns may
+        // choose the same label, and their extrema need not follow time order.
+        let labels = match index.kind() {
+            IndexKind::Range { start, .. } => Column::i64(positions.iter().map(|&i| start + i as i64).collect()),
+            IndexKind::Int64(v) => Column::i64(positions.iter().map(|&i| v[i]).collect()),
+            IndexKind::Datetime(v, _) => Column::datetime(positions.iter().map(|&i| v[i]).collect()),
+            IndexKind::Str(v) => Column::str(positions.iter().map(|&i| v[i].clone()).collect()),
+        };
         let s = PySeries {
-            inner: Series::new(None, labels, Arc::new(Index::str(names))),
+            inner: Series::new(None, labels, Arc::new(Index::new(None, volas_core::IndexKind::Str(names)).map_err(pyerr)?)).map_err(pyerr)?,
         };
         Ok(Py::new(py, s)?.into_any())
     }

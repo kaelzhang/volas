@@ -19,9 +19,8 @@ def _ohlcv_with_nat():
 def test_cumulate_rejects_nat_index():
     # P1-03: a NaT index row used to be bucketed as its own period (silent wrong
     # OHLCV, shape (3,5) instead of an aggregated daily bar). It must now raise.
-    df = _ohlcv_with_nat()
-    with pytest.raises(ValueError):
-        df.cumulate('1d')
+    with pytest.raises(ValueError, match='without NaT'):
+        _ohlcv_with_nat()  # set_index rejects before a cumulation can be started
 
 
 def test_cumulate_clean_index_still_works():
@@ -62,9 +61,8 @@ def _bar(ts, c):
 
 def test_tf_append_nat_bar_rejected():
     # R4-P1-02: a NaT bar has no period — symmetric with cumulate()'s NaT rejection
-    nat = DataFrame({'t': np.array(['NaT'], dtype='datetime64[ns]'), 'c': [7.0]}).set_index('t')
-    with pytest.raises(ValueError):
-        _forming_5m().append(nat)
+    with pytest.raises(ValueError, match='without NaT'):
+        DataFrame({'t': np.array(['NaT'], dtype='datetime64[ns]'), 'c': [7.0]}).set_index('t')
 
 
 def test_tf_append_out_of_order_bar_rejected():
@@ -119,11 +117,10 @@ def test_time_frame_constructor_rejects_unsorted_or_nat_bars():
     with pytest.raises(ValueError):
         DataFrame(_bars(['2021-01-04T14:31', '2021-01-04T14:30'], [2.0, 1.0]),
                   time_frame='5m')
-    nat_bars = DataFrame(
-        {'t': np.array(['2021-01-04T14:30', 'NaT'], dtype='datetime64[ns]'),
-         'close': [1.0, 2.0]}).set_index('t')
-    with pytest.raises(ValueError):
-        DataFrame(nat_bars, time_frame='5m')
+    with pytest.raises(ValueError, match='without NaT'):
+        DataFrame(
+            {'t': np.array(['2021-01-04T14:30', 'NaT'], dtype='datetime64[ns]'),
+             'close': [1.0, 2.0]}).set_index('t')
 
 
 def test_tf_append_in_order_and_resent_bar_still_work():

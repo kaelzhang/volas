@@ -87,10 +87,7 @@ fn over<'v>(
 
 /// A result column's values as `f64`, taken over without a copy when they are.
 pub(crate) fn into_f64(column: Column) -> Vec<f64> {
-    match column {
-        Column::F64(values) => values.into_vec(),
-        other => other.to_f64_vec(),
-    }
+    column.into_f64_vec()
 }
 
 /// Run a full computation (or a state capture) of a recursive command over the

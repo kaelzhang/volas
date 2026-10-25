@@ -15,6 +15,11 @@ It is **not** a general-purpose pandas replacement. It is a narrow, fast DataFra
 
 **volas** is also a Rust [crate](crates/volas/README.md).
 
+Indexes are checked at construction and after row selection: datetime labels must
+strictly increase and cannot contain NaT; integer and string labels must be unique.
+The Rust data model exposes checked constructors and read-only Column / Series
+accessors; see the [Rust data-model guide](crates/volas/README.md#the-data-model).
+
 ```python
 from volas import read_csv
 
@@ -250,7 +255,8 @@ Rust `compute::window` helpers return typed `WindowError` results for invalid
 window, decay, quantile, rank, or input-shape parameters; see the
 [compute crate guide](crates/volas-compute/README.md). `time::Agg::reduce` rejects
 empty or out-of-range selections. `time::aggregate_period` requires non-empty,
-ordered datetime bars within one period and rejects NaT or multiple periods.
+strictly increasing, NaT-free datetime bars within one period; consecutive raw
+re-sends enter through `time::RawFineInput` before checked frame construction.
 Low-level grouped `Column` reductions take repeatable (`Clone`) group iterators;
 dense selections reuse finite-input facts, while sparse selections inspect only
 their selected values.

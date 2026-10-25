@@ -11,12 +11,20 @@
 //! sees the per-dtype storage difference.
 
 use std::sync::Arc;
+use crate::error::{Result, VolasError};
 
 /// A packed validity mask: 1 bit per element, **set = present (valid)**, clear =
 /// missing (`volas.NA`). Bits are stored LSB-first in `u64` words; bits beyond
 /// `len` are kept clear so a popcount over every word counts exactly the present
 /// values. The count of missing values is kept as the bits change, so reading it —
 /// and a single-cell write — is O(1), never a popcount of the whole mask.
+/// Raw bitmap mutation is private to the owning crate.
+///
+/// ```compile_fail
+/// use volas_core::Bitmap;
+/// let mut bitmap = Bitmap::from_valid_iter(2, [false, false]);
+/// bitmap.set(63, true);
+/// ```
 #[derive(Clone, Debug)]
 pub struct Bitmap {
     words: Vec<u64>,
@@ -73,7 +81,7 @@ impl Bitmap {
 
     /// Mark element `i` present (`valid = true`) or missing, keeping the missing
     /// count. `i` in bounds.
-    pub fn set(&mut self, i: usize, valid: bool) {
+    pub(crate) fn set(&mut self, i: usize, valid: bool) {
         if self.get(i) == valid {
             return;
         }
@@ -119,6 +127,14 @@ impl PartialEq for Bitmap {
 /// present with no allocation; `Some` carries a [`Bitmap`] with at least one
 /// missing value. The invariant "`Some` ⇒ has a missing value" is upheld by the
 /// constructors so equality and `has_nulls` stay cheap and canonical.
+/// External writers use the checked [`set`](Self::set) operation; structural
+/// growth is controlled by the owning column.
+///
+/// ```compile_fail
+/// use volas_core::Validity;
+/// let mut validity = Validity::from_valid_iter(2, [false, false]);
+/// validity.extend_missing(63, 1);
+/// ```
 #[derive(Clone, Debug, Default)]
 pub struct Validity(Option<Arc<Bitmap>>);
 
@@ -154,8 +170,20 @@ impl Validity {
     /// Set element `i`'s presence in place (one cell). Dense stays dense when
     /// marking present; a bitmap is materialized only when a first missing value is
     /// introduced. `len` is the column length, needed to size that fresh bitmap.
-    /// Backs the single-cell write in [`crate::Column::combine_at`].
-    pub fn set(&mut self, i: usize, len: usize, valid: bool) {
+    /// Rejects an out-of-bounds index or a bitmap of another length without changing the mask.
+    pub fn set(&mut self, i: usize, len: usize, valid: bool) -> Result<()> {
+        if !self.covers(len) {
+            return Err(VolasError::Shape(format!("validity mask does not cover {len} values")));
+        }
+        if i >= len {
+            return Err(VolasError::Index(format!("validity index {i} out of bounds for length {len}")));
+        }
+        self.set_in_bounds(i, len, valid);
+        Ok(())
+    }
+
+    /// Update a cell whose bounds and mask length the owning column established.
+    pub(crate) fn set_in_bounds(&mut self, i: usize, len: usize, valid: bool) {
         match &mut self.0 {
             None => {
                 if !valid {
@@ -181,7 +209,7 @@ impl Validity {
     /// Grow the mask of a `len`-value column by `count` missing values, in place:
     /// amortized O(count) on a uniquely-owned bitmap; a dense mask materializes its
     /// bitmap once (O(len / 64)). No-op for `count == 0`.
-    pub fn extend_missing(&mut self, len: usize, count: usize) {
+    pub(crate) fn extend_missing(&mut self, len: usize, count: usize) {
         if count == 0 {
             return;
         }
@@ -289,14 +317,41 @@ mod tests {
     }
 
     #[test]
+    fn checked_validity_writes_preserve_counts_and_reject_invalid_positions() {
+        let mut validity = Validity::from_valid_iter(2, [false, false]);
+        let before = validity.clone();
+        assert_eq!(validity.set(63, 2, true), Err(VolasError::Index(
+            "validity index 63 out of bounds for length 2".into()
+        )));
+        assert_eq!(validity, before);
+        assert_eq!(validity.set(0, 3, true), Err(VolasError::Shape(
+            "validity mask does not cover 3 values".into()
+        )));
+        assert_eq!(validity, before);
+        let column = crate::Column::i64_with(vec![1, 2], validity).unwrap();
+        assert_eq!(column.count(), (0..2).filter(|&i| column.is_valid(i)).count());
+        assert_eq!(column.null_count(), 2);
+
+        let mut dense = Validity::dense();
+        for (position, length) in [(0, 0), (3, 3)] {
+            assert!(matches!(dense.set(position, length, false), Err(VolasError::Index(_))));
+            assert!(dense.bitmap().is_none());
+        }
+        let mut changed = before.clone();
+        changed.set(0, 2, true).unwrap();
+        assert_eq!((changed.null_count(), before.null_count()), (1, 2));
+        assert!(changed.is_valid(0) && !before.is_valid(0));
+    }
+
+    #[test]
     fn validity_set_cell_in_place() {
         let mut v = Validity::dense();
-        v.set(1, 3, true); // dense + still present -> stays dense (no allocation)
+        v.set(1, 3, true).unwrap(); // dense + still present -> stays dense (no allocation)
         assert!(!v.has_nulls());
-        v.set(1, 3, false); // first missing value -> materialize a bitmap
+        v.set(1, 3, false).unwrap(); // first missing value -> materialize a bitmap
         assert!(v.has_nulls());
         assert!(!v.is_valid(1) && v.is_valid(0));
-        v.set(1, 3, true); // Some(bitmap) branch -> back to present
+        v.set(1, 3, true).unwrap(); // Some(bitmap) branch -> back to present
         assert!(v.is_valid(1));
         // Clearing the LAST hole re-collapses to dense (C1): the `Some ⇒ has a
         // missing value` invariant holds, so has_nulls/null_count stay canonical.
@@ -309,11 +364,11 @@ mod tests {
         // re-collapses to dense. A no-op set-present must not collapse spuriously.
         let mut v = Validity::from_valid_iter(4, [true, false, true, false]);
         assert_eq!(v.null_count(), 2);
-        v.set(3, 4, true); // fill one hole -> still Some (idx 1 missing)
+        v.set(3, 4, true).unwrap(); // fill one hole -> still Some (idx 1 missing)
         assert!(v.has_nulls() && v.null_count() == 1);
-        v.set(0, 4, true); // no-op set-present (already valid) -> stays Some
+        v.set(0, 4, true).unwrap(); // no-op set-present (already valid) -> stays Some
         assert!(v.has_nulls() && v.null_count() == 1);
-        v.set(1, 4, true); // fill the last hole -> collapse to dense
+        v.set(1, 4, true).unwrap(); // fill the last hole -> collapse to dense
         assert!(!v.has_nulls() && v.bitmap().is_none());
     }
 

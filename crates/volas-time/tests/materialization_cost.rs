@@ -10,9 +10,9 @@ fn one_shot_cumulation_does_not_copy_and_regrow_closed_output() {
     let n = 30_000;
     let names = ["open", "high", "low", "close", "volume"].map(String::from).to_vec();
     let columns = names.iter().map(|_| Column::f64(vec![1.; n])).collect();
-    let fine = DataFrame::new(names, columns, Some(Index::datetime(
+    let fine = DataFrame::new(names, columns, Some(Index::new(None, volas_core::IndexKind::Datetime(
         (0..n).map(|i| i as i64 * 60_000_000_000).collect(), Tz::Utc,
-    ))).unwrap();
+    )).unwrap())).unwrap();
     let (out, calls, bytes) = measure(|| cumulate(&fine, TimeFrame::Min1, &AggSpec::ohlcv()).unwrap());
     assert!(out.equals(&fine));
     assert!(bytes < n * 170, "{calls} allocations, {bytes} bytes");
@@ -27,11 +27,11 @@ fn first_append_after_materialization_retains_live_capacity() {
             DType::Datetime => Column::datetime(vec![0; n]),
             _ => Column::f64(vec![1.; n]).cast(dtype).unwrap(),
         };
-        let fine = DataFrame::new(vec!["v".into()], vec![col], Some(Index::datetime(
+        let fine = DataFrame::new(vec!["v".into()], vec![col], Some(Index::new(None, volas_core::IndexKind::Datetime(
             (0..n).map(|i| i as i64 * 60_000_000_000).collect(), Tz::Utc,
-        ))).unwrap();
+        )).unwrap())).unwrap();
         let bar = DataFrame::new(vec!["v".into()], vec![fine.columns()[0].slice(0, 1)],
-            Some(Index::datetime(vec![n as i64 * 60_000_000_000], Tz::Utc))).unwrap();
+            Some(Index::new(None, volas_core::IndexKind::Datetime(vec![n as i64 * 60_000_000_000], Tz::Utc)).unwrap())).unwrap();
         let mut out = cumulate(&fine, TimeFrame::Min1, &AggSpec::ohlcv()).unwrap();
         let (_, calls, bytes) = measure(|| out.append(&bar).unwrap());
         assert_eq!(out.height(), n + 1);
@@ -45,7 +45,7 @@ fn incremental_snapshot_keeps_its_original_allocation_budget() {
     let n = 30_000;
     let names = ["open", "high", "low", "close", "volume"].map(String::from).to_vec();
     let fine = DataFrame::new(names.clone(), names.iter().map(|_| Column::f64(vec![1.; n])).collect(),
-        Some(Index::datetime((0..n).map(|i| i as i64 * 60_000_000_000).collect(), Tz::Utc))).unwrap();
+        Some(Index::new(None, volas_core::IndexKind::Datetime((0..n).map(|i| i as i64 * 60_000_000_000).collect(), Tz::Utc)).unwrap())).unwrap();
     let (out, calls, bytes) = measure(|| {
         let mut cum = Cumulator::new(TimeFrame::Min1, AggSpec::ohlcv());
         cum.append(&fine).unwrap();

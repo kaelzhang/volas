@@ -25,9 +25,9 @@ print(csv)
 19  2020-01-01 00:19:00  327.0  327.2  322.0  323.0  15086985
 ```
 
-> 注意：同一时间戳的重复记录不会重复累积。除最新一条外，其余都会被丢弃。
+普通 DataFrame 的 datetime 索引必须严格递增且不含 NaT，不能存储上面的重复时间戳；先在原始数据中为每个时间戳保留最终记录，再将 date 提升为索引。Rust 原始细 bar 使用 `RawFineInput::new(names, columns, timestamps, tz, index_name)`：它检查时间非递减且不含 NaT，每组连续相等时间戳保留最后一行，然后构造受检 frame；通过 `Cumulator::from_raw` / `append_raw` 送入累积器。Python 的实时重发通过 `append` 进入，沿既有替换 / 折叠规则保持 frame 标签合法。
 
-读取同一个 csv，并把 `date` 列解析为 `DatetimeIndex`：
+在原始数据中为每个时间戳保留最终记录后，读取整理好的 csv，并把 `date` 列解析为 `DatetimeIndex`：
 
 ```py
 df = read_csv(
@@ -202,3 +202,6 @@ df.cumulate(TimeFrame.m5)     # 与 df.cumulate('5m') 相同
 | `TimeFrame.Y1` | `'1y'` | frame 所在时区下的民用日历年。 |
 
 每个桶都按 **frame 所在时区的本地挂钟时间**对齐，但存储仍保持 UTC：日内小时桶（`2h`/`4h`/`6h`/`8h`/`12h`）从本地 `00` 开始，按本地小时步进；`3d` 从该时区下的 Unix 纪元日开始，计算连续 3 个本地民用日的桶（不在月边界重置）；`1w` 按本地民用时间从周一开始。因此日 / 周 bar 会跟随本地交易日，而具名时区会让小时桶具备 DST 意识（重复与被跳过的小时见 [bar 标签是周期起点](#bar-标签是周期起点)）。网格始终属于 **frame 自身**的时区：append 到 tf 感知 frame 的 bar 按其瞬时落到这张网格上，与该 bar 自身索引携带的时区无关。
+
+
+Rust 的 `volas_time::aggregate_period` 要求非空 frame，其受检 DatetimeIndex 严格递增、不含 NaT，且所有 bar 属于同一网格周期。连续重发的最后一条胜出规则仅属于 `RawFineInput`，普通 frame 不接受重复标签。无效周期输入返回 `VolasError::Value`；`Agg::reduce` 同样拒绝空选择和越界位置。

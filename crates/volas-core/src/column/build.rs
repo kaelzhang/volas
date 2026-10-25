@@ -7,27 +7,27 @@ use super::*;
 impl Column {
     /// Build an `F64` column.
     pub fn f64(v: Vec<f64>) -> Column {
-        Column::F64(Buffer::from_vec(v))
+        Column { data: ColumnData::F64(Buffer::from_vec(v)) }
     }
 
     /// Build an `F32` column.
     pub fn f32(v: Vec<f32>) -> Column {
-        Column::F32(Buffer::from_vec(v))
+        Column { data: ColumnData::F32(Buffer::from_vec(v)) }
     }
 
     /// Build an `I32` column (all values present).
     pub fn i32(v: Vec<i32>) -> Column {
-        Column::I32(Buffer::from_vec(v), Validity::dense())
+        Column { data: ColumnData::I32(Buffer::from_vec(v), Validity::dense()) }
     }
 
     /// Build a `Bool` column (all values present).
     pub fn bool(v: Vec<bool>) -> Column {
-        Column::Bool(Buffer::from_vec(v), Validity::dense())
+        Column { data: ColumnData::Bool(Buffer::from_vec(v), Validity::dense()) }
     }
 
     /// Build an `I64` column (all values present).
     pub fn i64(v: Vec<i64>) -> Column {
-        Column::I64(Buffer::from_vec(v), Validity::dense())
+        Column { data: ColumnData::I64(Buffer::from_vec(v), Validity::dense()) }
     }
 
     /// Build an `I64` column with an explicit validity (missing-aware). The validity
@@ -51,7 +51,7 @@ impl Column {
 
     /// Build a `Str` column (all values present).
     pub fn str(v: Vec<String>) -> Column {
-        Column::Str(StrBuffer::from_vec(v), Validity::dense())
+        Column { data: ColumnData::Str(StrBuffer::from_vec(v), Validity::dense()) }
     }
 
     /// Build a `Str` column with an explicit validity, checked like
@@ -101,19 +101,19 @@ impl Column {
     // column a frame receives is checked again by `DataFrame::new`.
 
     pub(crate) fn i64_masked(v: Vec<i64>, validity: Validity) -> Column {
-        Column::I64(Buffer::from_vec(v), validity)
+        Column { data: ColumnData::I64(Buffer::from_vec(v), validity) }
     }
 
     pub(crate) fn i32_masked(v: Vec<i32>, validity: Validity) -> Column {
-        Column::I32(Buffer::from_vec(v), validity)
+        Column { data: ColumnData::I32(Buffer::from_vec(v), validity) }
     }
 
     pub(crate) fn bool_masked(v: Vec<bool>, validity: Validity) -> Column {
-        Column::Bool(Buffer::from_vec(v), validity)
+        Column { data: ColumnData::Bool(Buffer::from_vec(v), validity) }
     }
 
     pub(crate) fn str_masked(v: Vec<String>, validity: Validity) -> Column {
-        Column::Str(StrBuffer::from_vec(v), validity)
+        Column { data: ColumnData::Str(StrBuffer::from_vec(v), validity) }
     }
 
     /// The layout invariant of a nullable column: its validity masks exactly its
@@ -133,13 +133,13 @@ impl Column {
     }
 
     /// `self` when its layout holds ([`check_layout`](Self::check_layout)).
-    fn checked_layout(self) -> Result<Column> {
+    pub(super) fn checked_layout(self) -> Result<Column> {
         self.check_layout().map(|()| self)
     }
 
     /// Build a `Datetime` column (epoch nanoseconds).
     pub fn datetime(v: Vec<i64>) -> Column {
-        Column::Datetime(Buffer::from_vec(v))
+        Column { data: ColumnData::Datetime(Buffer::from_vec(v)) }
     }
 
     /// An all-missing column of `dtype` with `len` rows — the dtype-preserving

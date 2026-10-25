@@ -1,6 +1,7 @@
 //! The one derivation owner: what a contiguous selection, a projection and a new series
 //! keep of their source.
 
+use crate::column::ColumnData;
 use std::collections::HashMap;
 
 use super::derive::NoReplay;
@@ -95,7 +96,7 @@ fn an_interior_float_copy_releases_its_source_and_memoizes_only_its_own_bytes() 
     let owner = Arc::new(vec![1.0, 2.0, 3.0, 4.0]);
     let weak = Arc::downgrade(&owner);
     let buffer = crate::buffer::Buffer::from_shared_range(Arc::clone(&owner), 0..4).unwrap();
-    let mut df = DataFrame::new(vec!["a".into(), "b".into()], vec![Column::F64(buffer), Column::f64(vec![0.0; 4])], None).unwrap();
+    let mut df = DataFrame::new(vec!["a".into(), "b".into()], vec![Column { data: ColumnData::F64(buffer) }, Column::f64(vec![0.0; 4])], None).unwrap();
     drop(owner);
     let copy = df.rows(1, 3, &NoReplay);
     assert_eq!(copy.column("a").unwrap().known_has_nan(), None);
@@ -134,7 +135,7 @@ fn a_joint_visible_and_lead_slab_preserves_float_bits_and_separate_nan_facts() {
 fn a_prefix_copy_writes_only_its_visible_range_and_releases_the_source() {
     let mut df = DataFrame::new(vec!["x".into(), "y".into(), "ma".into()],
         vec![Column::f64((0..100).map(f64::from).collect()), Column::f64(vec![2.0; 100]), Column::f64(vec![0.0; 100])], None).unwrap();
-    let Column::F64(source) = df.column("x").unwrap() else { unreachable!() };
+    let Column { data: ColumnData::F64(source) } = df.column("x").unwrap() else { unreachable!() };
     let guard = source.keepalive();
     let weak = Arc::downgrade(&guard);
     drop(guard);
@@ -409,18 +410,19 @@ fn a_selection_keeps_the_nearest_point_of_a_history_within_the_anchor_spacing() 
 #[test]
 fn rows_by_position_continue_only_when_contiguous_in_order() {
     let df = frame(10);
-    let run = df.select_rows(&[4, 5, 6], &NoReplay);
+    let run = df.select_rows(&[4, 5, 6], &NoReplay).unwrap();
     assert_eq!((run.origin(), run.is_computed("ema")), (4, true));
-    for positions in [&[4usize, 6][..], &[5, 4], &[4, 4], &[]] {
-        let new = df.select_rows(positions, &NoReplay);
+    for positions in [&[4usize, 6][..], &[5, 4], &[]] {
+        let new = df.select_rows(positions, &NoReplay).unwrap();
         assert_eq!(new.origin(), 0);
         assert_eq!(new.names(), &["close".to_string()]);
         assert!(new.lead.is_none());
     }
+    assert!(df.select_rows(&[4, 4], &NoReplay).is_err());
     let mask = df.filter_mask(&[false, true, true, false, false, false, false, false, false, false], &NoReplay).unwrap();
     assert_eq!((mask.origin(), mask.height(), mask.is_computed("ma")), (1, 2, true));
     // a read of the rows keeps every column's values, none cached
-    let read = df.take(&[2, 9]);
+    let read = df.take(&[2, 9]).unwrap();
     assert_eq!((read.width(), read.computed_columns().len()), (3, 0));
 }
 
@@ -467,7 +469,7 @@ fn a_time_zone_change_is_a_new_series() {
     let mut df = DataFrame::new(
         vec!["close".into(), "ma".into()],
         vec![Column::f64(vec![1.0, 2.0]); 2],
-        Some(Index::datetime(vec![0, 60_000_000_000], Tz::Naive)),
+        Some(Index::new(None, crate::IndexKind::Datetime(vec![0, 60_000_000_000], Tz::Naive)).unwrap()),
     )
     .unwrap();
     df.set_computed("ma", std::sync::Arc::new(()), Reach { lookback: 1, resume: 0, continuation: 1, history: History::Window });
@@ -487,21 +489,20 @@ fn a_time_zone_change_is_a_new_series() {
 fn a_frame_has_unique_column_names_and_labels() {
     let twice = DataFrame::new(vec!["a".into(), "a".into()], vec![Column::f64(vec![1.0]); 2], None);
     assert!(matches!(twice, Err(VolasError::Value(_))));
-    let col = Column::Datetime(crate::buffer::Buffer::from(vec![5i64, 5]));
+    let col = Column { data: ColumnData::Datetime(crate::buffer::Buffer::from(vec![5i64, 5])) };
     assert!(matches!(Index::from_column(&col), Err(VolasError::Value(_))));
-    let col = Column::Datetime(crate::buffer::Buffer::from(vec![5i64, 3]));
-    assert!(Index::from_column(&col).is_ok());
-    // NaT is no label: it never repeats one
+    let col = Column { data: ColumnData::Datetime(crate::buffer::Buffer::from(vec![5i64, 3])) };
+    assert!(Index::from_column(&col).is_err());
+    // Missing timestamps fail before a datetime index can be admitted.
     let nat = crate::datetime::NAT;
-    assert!(Index::from_column(&Column::Datetime(crate::buffer::Buffer::from(vec![nat, 1, nat]))).is_ok());
+    assert!(Index::from_column(&Column { data: ColumnData::Datetime(crate::buffer::Buffer::from(vec![nat, 1, nat])) }).is_err());
 }
 
-/// A frame's labels never repeat: any repeated label raises, consecutive or not; `NaT`
-/// is no label.
+/// A frame's labels never repeat; datetime labels are present and time ordered.
 #[test]
 fn a_frame_is_labelled_by_unique_labels() {
     let df = DataFrame::new(vec!["close".into()], vec![Column::f64(vec![1.0, 2.0, 3.0, 4.0])], None).unwrap();
-    let ts = |v: Vec<i64>| Column::Datetime(crate::buffer::Buffer::from(v));
+    let ts = |v: Vec<i64>| Column { data: ColumnData::Datetime(crate::buffer::Buffer::from(v)) };
     let labelled = df.with_labels(&ts(vec![10, 20, 25, 30]), Tz::Utc, Some("t".into())).unwrap();
     assert_eq!((labelled.index().len(), labelled.index().tz(), labelled.index().name()), (4, Tz::Utc, Some("t")));
     for repeated in [vec![10, 20, 20, 30], vec![10, 20, 10, 30]] {
@@ -509,7 +510,7 @@ fn a_frame_is_labelled_by_unique_labels() {
     }
     assert!(matches!(df.with_labels(&ts(vec![10, 20]), Tz::Naive, None), Err(VolasError::Shape(_))));
     let nat = crate::datetime::NAT;
-    assert_eq!(df.with_labels(&ts(vec![nat, nat, 1, 2]), Tz::Naive, None).unwrap().height(), 4);
+    assert!(df.with_labels(&ts(vec![nat, nat, 1, 2]), Tz::Naive, None).is_err());
     assert!(df.with_labels(&Column::i64(vec![1, 1, 2, 3]), Tz::Naive, None).is_err());
     assert_eq!(df.with_labels(&Column::i64(vec![4, 3, 2, 1]), Tz::Naive, None).unwrap().height(), 4);
     let mut with_t = df.clone();
@@ -570,8 +571,8 @@ fn an_integer_replacement_must_share_a_lossless_dtype_with_its_float_lead() {
     // A missing integer payload cannot make a lossless join fail.
     source.set_column("close", Column::f32(vec![0.0, 1.0, 2.0, 3.0])).unwrap();
     let mut narrow = source.rows(2, 4, &NoReplay);
-    let values = Column::I64(crate::buffer::Buffer::from(vec![(1 << 53) + 1, 7]),
-        crate::validity::Validity::from_bitmap(crate::validity::Bitmap::from_valid_iter(2, [false, true])));
+    let values = Column { data: ColumnData::I64(crate::buffer::Buffer::from(vec![(1 << 53) + 1, 7]),
+        crate::validity::Validity::from_bitmap(crate::validity::Bitmap::from_valid_iter(2, [false, true]))) };
     narrow.set_column("close", values).unwrap();
     let joined = narrow.led(&narrow, narrow.lead_rows());
     assert!(joined.column("close").unwrap().get_f64(joined.height() - 2).is_nan());
@@ -715,7 +716,7 @@ fn interleaved_raw_float_history_preserves_known_clean_facts_and_independent_ran
     values[890] = -0.0;
     let mut df = DataFrame::new(vec!["raw_a".into(), "ma".into(), "raw_b".into()],
         vec![Column::f64(values), Column::f64(vec![0.0; 1000]), Column::f64(vec![2.0; 1000])], None).unwrap();
-    let Column::F64(source) = df.column("raw_a").unwrap() else { unreachable!() };
+    let Column { data: ColumnData::F64(source) } = df.column("raw_a").unwrap() else { unreachable!() };
     let guard = source.keepalive();
     let weak = Arc::downgrade(&guard);
     drop(guard);
@@ -970,4 +971,18 @@ fn public_projection_owns_coordinates_but_internal_data_view_keeps_them() {
     assert_eq!(tail.project(&names, 0, 3).unwrap().origin(), 0);
     assert_eq!(tail.project(&names, 20, 1).unwrap().height(), 0);
     assert!(tail.project(&["absent".into()], 0, 3).is_err());
+}
+
+#[test]
+fn reusing_a_dropped_label_keeps_the_compacted_recursive_checkpoint() {
+    let mut target = frame(10);
+    target.set_computed_checkpoint("ema", Ok(Checkpoint { at: 3, state: Some(vec![3.].into()), raw: vec![] }));
+    let rows = DataFrame::new(vec!["close".into()], vec![Column::f64(vec![100., 101.])],
+        Some(Index::new(None, crate::IndexKind::Int64(vec![1, 11])).unwrap())).unwrap();
+    target.append_retaining(&rows, Retained { from: 4, shown: 6 }, &Replayed).unwrap();
+    assert_eq!((target.origin(), target.height()), (4, 8));
+    assert_eq!(target.index().to_i64_labels(), vec![4, 5, 6, 7, 8, 9, 1, 11]);
+    assert_eq!(target.computed_checkpoint("ema").map(|cp| cp.at), Some(3));
+    assert!(target.is_computed("ema"));
+    assert_eq!(meta(&target, "ema").valid_rows, 6);
 }

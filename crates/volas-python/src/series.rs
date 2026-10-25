@@ -1,5 +1,6 @@
 //! The `volas.Series` pyclass and its positional `.iloc` accessor.
 
+use volas_core::ColumnView;
 use std::sync::Arc;
 
 use pyo3::exceptions::{PyIndexError, PyTypeError, PyValueError};
@@ -38,32 +39,33 @@ pub struct PySeries {
 impl PySeries {
     /// A new Series whose data and index are gathered by `idx` (backs
     /// `sort_values` and any fancy-index reorder).
-    pub(crate) fn reindexed(&self, idx: &[usize]) -> PySeries {
-        PySeries {
+    pub(crate) fn reindexed(&self, idx: &[usize]) -> PyResult<PySeries> {
+        let index = Arc::new(self.inner.index().take(idx).map_err(pyerr)?);
+        Ok(PySeries {
             inner: Series::new(
-                self.inner.name.clone(),
-                self.inner.data.take(idx),
-                Arc::new(self.inner.index.take(idx)),
-            ),
-        }
+                self.inner.name().map(str::to_owned),
+                self.inner.data().take(idx),
+                index,
+            ).map_err(pyerr)?,
+        })
     }
 
     /// A new Series with the `[start, end)` row slice of both data and index
     /// (backs `head` / `tail`).
-    pub(crate) fn sliced(&self, start: usize, end: usize) -> PySeries {
-        PySeries {
+    pub(crate) fn sliced(&self, start: usize, end: usize) -> PyResult<PySeries> {
+        Ok(PySeries {
             inner: Series::new(
-                self.inner.name.clone(),
-                self.inner.data.slice(start, end),
-                Arc::new(self.inner.index.slice(start, end)),
-            ),
-        }
+                self.inner.name().map(str::to_owned),
+                self.inner.data().slice(start, end),
+                Arc::new(self.inner.index().slice(start, end)),
+            ).map_err(pyerr)?,
+        })
     }
 
     /// Box a float statistic as the column's float dtype: `np.float32` for an f32
     /// column, else `np.float64` (pandas: `f32.mean() -> np.float32`).
     pub(crate) fn box_float(&self, py: Python<'_>, value: f64) -> PyResult<Py<PyAny>> {
-        if self.inner.data.dtype() == DType::F32 {
+        if self.inner.data().dtype() == DType::F32 {
             np_f32(py, value as f32)
         } else {
             np_f64(py, value)
@@ -74,7 +76,7 @@ impl PySeries {
     // `describe` reuses them, so they stay unboxed here). Each is float64 math, so
     // an int64 past 2^53 raises (contract #26) through `to_f64_domain`.
     pub(crate) fn mean_f64(&self) -> PyResult<f64> {
-        let v = non_nan(&self.inner.data, "mean")?;
+        let v = non_nan(self.inner.data(), "mean")?;
         Ok(if v.is_empty() {
             f64::NAN
         } else {
@@ -85,20 +87,20 @@ impl PySeries {
         Ok(stats::var(&self.f64_domain("var")?))
     }
     pub(crate) fn median_f64(&self) -> PyResult<f64> {
-        let mut v = non_nan(&self.inner.data, "median")?;
+        let mut v = non_nan(self.inner.data(), "median")?;
         v.sort_by(|a, b| a.partial_cmp(b).unwrap());
         Ok(stats::sorted_median(&v))
     }
     /// The values as `f64` for the float64 operation `op` (raises past 2^53).
     pub(crate) fn f64_domain(&self, op: &str) -> PyResult<Vec<f64>> {
-        self.inner.data.to_f64_domain(op).map_err(pyerr)
+        self.inner.data().to_f64_domain(op).map_err(pyerr)
     }
     /// The `q`-quantile as a raw f64 (linear interpolation, NaN-skipping).
     pub(crate) fn quantile_f64(&self, q: f64) -> PyResult<f64> {
         if !(0.0..=1.0).contains(&q) {
             return Err(PyValueError::new_err("quantile: q must be in [0, 1]"));
         }
-        let mut v = non_nan(&self.inner.data, "quantile")?;
+        let mut v = non_nan(self.inner.data(), "quantile")?;
         if v.is_empty() {
             return Ok(f64::NAN);
         }
@@ -109,13 +111,13 @@ impl PySeries {
     /// The boolean mask for a `where` / `mask` condition, validating it matches
     /// this series' length (pandas requires equal-shape conditionals).
     pub(crate) fn cond_mask(&self, cond: &PySeries) -> PyResult<Vec<bool>> {
-        if !matches!(cond.inner.data, Column::Bool(..)) {
+        if !matches!(cond.inner.data().view(), ColumnView::Bool(..)) {
             return Err(PyTypeError::new_err(format!(
                 "where/mask: `cond` must be a boolean Series, got {}",
-                cond.inner.data.dtype()
+                cond.inner.data().dtype()
             )));
         }
-        let c = bool_mask_vec(&cond.inner.data)?;
+        let c = bool_mask_vec(cond.inner.data())?;
         if c.len() != self.inner.len() {
             return Err(PyValueError::new_err(format!(
                 "Array conditional must be same shape as self ({} != {})",
@@ -124,7 +126,7 @@ impl PySeries {
             )));
         }
         // the condition pairs with `self` by position, so its labels must align
-        require_aligned(&self.inner.index, &cond.inner.index)?;
+        require_aligned(self.inner.index(), cond.inner.index())?;
         Ok(c)
     }
 
@@ -160,16 +162,16 @@ impl PySeries {
         // A float column keeps its float dtype (it absorbs any fill); a same-dtype
         // `other` (incl. the default NA, and bool/str/datetime) keeps that dtype so
         // it is not funneled to f64; a mixed int/float promotes by the supertype.
-        let self_dt = self.inner.data.dtype();
+        let self_dt = self.inner.data().dtype();
         let target = if self_dt.is_float() || self_dt == other_dt {
             self_dt
         } else {
             binary_supertype(self_dt, other_dt)
         };
-        Ok(col_to_series(
+        col_to_series(
             &self.inner,
-            self.inner.data.select(keep, &other_col, target).map_err(pyerr)?,
-        ))
+            self.inner.data().select(keep, &other_col, target).map_err(pyerr)?,
+        )
     }
 
     /// Apply an element-wise `f64 -> f64` map, preserving name and index. The single
@@ -177,17 +179,17 @@ impl PySeries {
     /// funnel through `to_f64_vec` to silent `NaN` (str) or `sin(epoch-as-f64)`
     /// (datetime), which the contract (C4) forbids, so it raises here.
     pub(crate) fn map_f64(&self, f: impl Fn(f64) -> f64) -> PyResult<PySeries> {
-        self.inner.data.require_numeric().map_err(pyerr)?;
+        self.inner.data().require_numeric().map_err(pyerr)?;
         let data = Column::f64(self.f64_domain("a math transform")?.iter().map(|&x| f(x)).collect());
         Ok(PySeries {
-            inner: Series::new(self.inner.name.clone(), data, Arc::clone(&self.inner.index)),
+            inner: Series::new(self.inner.name().map(str::to_owned), data, Arc::clone(self.inner.index())).map_err(pyerr)?,
         })
     }
 
     /// Directional fill (`forward` = ffill, else bfill), dtype-aware over every
     /// dtype (int / bool / str / datetime / float). Shared by `ffill` / `bfill`.
-    pub(crate) fn fill_dir(&self, forward: bool) -> PySeries {
-        col_to_series(&self.inner, self.inner.data.fill_dir(forward))
+    pub(crate) fn fill_dir(&self, forward: bool) -> PyResult<PySeries> {
+        col_to_series(&self.inner, self.inner.data().fill_dir(forward))
     }
 }
 
@@ -202,7 +204,7 @@ impl SeriesILoc {
     pub(crate) fn __getitem__(&self, py: Python<'_>, key: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
         if let Ok(i) = key.extract::<isize>() {
             let i = norm_idx(i, self.inner.len())?;
-            return np_scalar_to_py(py, &self.inner.data, i);
+            return np_scalar_to_py(py, self.inner.data(), i);
         }
         if let Ok(slice) = key.downcast::<PySlice>() {
             return Ok(Py::new(py, slice_series(&self.inner, slice)?)?.into_any());
@@ -230,14 +232,14 @@ pub(crate) fn cell_key(col: &Column, i: usize) -> Option<String> {
             format!("f{:x}", x.to_bits())
         }
     };
-    Some(match col {
-        Column::F64(v) => float(v[i]),
-        Column::F32(v) => float(v[i] as f64),
-        Column::I64(v, _) => format!("i{}", v[i]),
-        Column::I32(v, _) => format!("i{}", v[i]),
-        Column::Bool(v, _) => format!("b{}", v[i]),
-        Column::Str(v, _) => format!("s{}", v.get(i)),
-        Column::Datetime(v) => format!("d{}", v[i]),
+    Some(match col.view() {
+        ColumnView::F64(v) => float(v[i]),
+        ColumnView::F32(v) => float(v[i] as f64),
+        ColumnView::I64(v, _) => format!("i{}", v[i]),
+        ColumnView::I32(v, _) => format!("i{}", v[i]),
+        ColumnView::Bool(v, _) => format!("b{}", v[i]),
+        ColumnView::Str(v, _) => format!("s{}", v.get(i)),
+        ColumnView::Datetime(v) => format!("d{}", v[i]),
     })
 }
 
@@ -263,11 +265,12 @@ pub(crate) fn duplicated_mask_keep(col: &Column, keep: &str) -> PyResult<Vec<boo
 
 
 /// The first `n` rows of a series (saturating).
-pub(crate) fn slice_head(s: &Series, n: usize) -> PySeries {
+pub(crate) fn slice_head(s: &Series, n: usize) -> PyResult<PySeries> {
     let take: Vec<usize> = (0..n.min(s.len())).collect();
-    PySeries {
-        inner: Series::new(s.name.clone(), s.data.take(&take), Arc::new(s.index.take(&take))),
-    }
+    let index = Arc::new(s.index().take(&take).map_err(pyerr)?);
+    Ok(PySeries {
+        inner: Series::new(s.name().map(str::to_owned), s.data().take(&take), index).map_err(pyerr)?,
+    })
 }
 
 

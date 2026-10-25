@@ -73,6 +73,30 @@ Column constructors: `Column::f64`, `Column::i64`, `Column::bool`,
 (borrowed, `None` for non-`f64`), `Column::is_valid` (per-cell NA check),
 `Column::len`, and `Column::dtype`.
 
+`Column` storage and `Series` structure are opaque. Inspect a column with typed
+slice accessors or its borrowed `ColumnView`; constructing that view cannot create
+a `Column`. `Series::new` checks value / index lengths in every build, while
+`name()`, `data()` and `index()` borrow its parts. Checked `Series::scatter`
+writes selected values while preserving the structure and labels.
+
+Every labelled index is built with `Index::new(name, IndexKind::...)`. Datetime
+labels must strictly increase and contain no NaT; integer and string labels must
+be unique (their order is unrestricted). `DataFrame::new` validates its index too.
+`Index::take`, `extend` and frame row selection return an error if the resulting
+labels violate these rules. Sorting a datetime index backwards therefore fails.
+
+```rust
+use std::sync::Arc;
+use volas::{Column, Index, IndexKind, Series, Tz};
+
+let index = Index::new(Some("time".into()), IndexKind::Datetime(vec![1, 2].into(), Tz::Utc)).unwrap();
+let series = Series::new(Some("close".into()), Column::f64(vec![10.0, 11.0]), Arc::new(index)).unwrap();
+assert_eq!(series.name(), Some("close"));
+assert_eq!(series.data().len(), series.index().len());
+assert!(series.index().take(&[1, 0]).is_err());
+assert!(Index::new(None, IndexKind::Int64(vec![1, 1].into())).is_err());
+```
+
 ### Missing values (NA)
 
 A cell can be missing independently of its value. Float columns use `NaN` as the NA
@@ -85,7 +109,7 @@ any frame column whose mask does not cover it). Check missingness per cell with
 
 ```rust
 use volas::Column;
-use volas::core::Validity;
+use volas::Validity;
 
 // Float columns: NaN is the missing marker.
 let prices = Column::f64(vec![1.0, f64::NAN, 3.0]);
@@ -234,6 +258,14 @@ with output capacity for consuming materialization and the first live append.
 It validates like `new` followed by `append`, including deferred open-period errors.
 Ordinary `new` / `append` builders retain their existing snapshot capacity budget.
 
+For raw feeds that contain consecutive retransmissions, build a
+`volas::time::RawFineInput` with `new(names, columns, timestamps, tz, index_name)`.
+This input checks non-decreasing, NaT-free timestamps and keeps the last row in
+each consecutive equal-timestamp group before creating a checked frame.
+`Cumulator::from_raw(&input, tf, spec)` and `append_raw(&input)` ingest it.
+The retransmission exception belongs to this raw cumulation entry; ordinary
+`Index` and `DataFrame` construction always enforce unique labels.
+
 
 ## Error handling
 
@@ -259,10 +291,10 @@ assert!(bad.is_err());
 - `directive` — `parse` / `execute` / `stringify` / `lookback`, and the `Ast`;
 - `compute` — numeric kernels and technical indicators (pure functions);
 - `time` — time-frame cumulation (OHLCV resampling);
-- `core` — the full `volas-core` surface, for the less-common types.
 
-This crate is a thin facade re-exporting the volas workspace (`volas-core`,
-`volas-compute`, `volas-directive`, `volas-time`, `volas-io`) behind one dependency.
+
+This crate exposes a selected, validated interface from the volas workspace behind
+one dependency. Low-level core storage types are not exported by the facade.
 
 ## License
 

@@ -183,7 +183,7 @@ fn a_compacted_float_window_owns_writable_columns_until_its_next_drop() {
         frame.set_computed_checkpoint("ema", Ok(Checkpoint { at: 15, state: Some(vec![1.0].into()), raw: vec![] }));
         let (mut kept, retain_calls, retain_bytes) = measure(|| frame.retain_tail(16, &NoReplay));
         let borrowed = ["close", "ema"].iter().filter(|name| {
-            matches!(kept.column(name).unwrap(), Column::F64(values) if values.is_borrowed())
+            matches!(kept.column(name).unwrap().view(), volas_core::ColumnView::F64(values) if values.is_borrowed())
         }).count();
         let row = DataFrame::new(vec!["close".into()], vec![raw(1, 3.0)], None).unwrap();
         let (_, calls, bytes) = measure(|| {

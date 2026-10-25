@@ -224,11 +224,8 @@ def test_e8_nat_guard_symmetry():
     nat = volas.DataFrame({"close": [1.0, 2.0]})
     nat["t"] = volas.DataFrame(
         {"t": np.array(["2021-01-01", "NaT"], dtype="datetime64[ns]")})["t"]
-    nat = nat.set_index("t")
-    with pytest.raises(Exception):
-        nat.cumulate("5m")                                  # batch entry
-    with pytest.raises(Exception):
-        volas.DataFrame(nat, time_frame="5m")               # construction entry
+    with pytest.raises(ValueError, match="without NaT"):
+        nat.set_index("t")  # earliest checked admission, before any cumulation
 
 
 def test_e8_monotonic_guard_symmetry():
@@ -236,11 +233,8 @@ def test_e8_monotonic_guard_symmetry():
     df = volas.DataFrame({"close": [1.0, 2.0]})
     df["t"] = volas.to_datetime(volas.DataFrame(
         {"t": ["2021-01-01 00:05:00", "2021-01-01 00:00:00"]})["t"])
-    df = df.set_index("t")
-    with pytest.raises(Exception):
-        df.cumulate("5m")
-    with pytest.raises(Exception):
-        volas.DataFrame(df, time_frame="5m")
+    with pytest.raises(ValueError, match="monotonic"):
+        df.set_index("t")  # ordinary datetime frames also require time order
 
 
 # --- E7, tz-aware dimension: the round-trip carries the zone -----------------

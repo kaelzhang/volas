@@ -26,7 +26,7 @@ impl PySeries {
         dtype: Option<&str>,
         na_value: Option<Bound<'py, PyAny>>,
     ) -> PyResult<Bound<'py, PyAny>> {
-        column_to_numpy_with(py, &self.inner.data, dtype, na_value.as_ref())
+        column_to_numpy_with(py, self.inner.data(), dtype, na_value.as_ref())
     }
 
     /// NumPy array protocol, so `np.isnan(series)` etc. work directly. Honors a
@@ -51,13 +51,13 @@ impl PySeries {
             Some(dt) => Some(dt.call_method0(py, "__str__")?.extract(py)?),
             None => None,
         };
-        column_to_numpy_with(py, &self.inner.data, dt.as_deref(), None)
+        column_to_numpy_with(py, self.inner.data(), dt.as_deref(), None)
     }
 
     /// Arrow PyCapsule schema protocol: a lone `arrow_schema` capsule (the column's
     /// dtype), so Arrow consumers can read the type without materialising the data.
     pub(crate) fn __arrow_c_schema__<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyCapsule>> {
-        crate::arrow::column_c_schema(py, &self.inner.data)
+        crate::arrow::column_c_schema(py, self.inner.data())
     }
 
     /// Arrow PyCapsule array protocol — lets pyarrow / polars consume the series
@@ -70,7 +70,7 @@ impl PySeries {
         requested_schema: Option<PyObject>,
     ) -> PyResult<Bound<'py, PyTuple>> {
         let _ = requested_schema;
-        crate::arrow::column_c_array(py, &self.inner.data)
+        crate::arrow::column_c_array(py, self.inner.data())
     }
 
     /// Build a Series from any object implementing the Arrow array protocol
@@ -82,7 +82,7 @@ impl PySeries {
     pub(crate) fn from_arrow(data: &Bound<'_, PyAny>, name: Option<String>, copy: bool) -> PyResult<PySeries> {
         let col = crate::arrow::column_from_arrow_obj(data, copy)?;
         let n = col.len();
-        Ok(PySeries { inner: Series::new(name, col, Arc::new(Index::range(n))) })
+        Ok(PySeries { inner: Series::new(name, col, Arc::new(Index::new(None, volas_core::IndexKind::Range { start: 0, len: n }).map_err(pyerr)?)).map_err(pyerr)? })
     }
 
     /// Export as a `pyarrow.Array` (zero-copy where dtypes match; requires pyarrow).
@@ -107,7 +107,7 @@ impl PySeries {
     ) -> PyResult<Bound<'py, PyAny>> {
         crate::dlpack::column_to_dlpack(
             py,
-            &self.inner.data,
+            self.inner.data(),
             max_version,
             dl_device,
             copy,
@@ -125,8 +125,8 @@ impl PySeries {
         let d = PyDict::new(py);
         for i in 0..self.inner.len() {
             d.set_item(
-                label_to_py(py, &self.inner.index, i)?,
-                scalar_to_py(py, &self.inner.data, i)?,
+                label_to_py(py, self.inner.index(), i)?,
+                scalar_to_py(py, self.inner.data(), i)?,
             )?;
         }
         Ok(d)
@@ -137,8 +137,8 @@ impl PySeries {
         let pairs: Vec<(Py<PyAny>, Py<PyAny>)> = (0..self.inner.len())
             .map(|i| {
                 Ok((
-                    label_to_py(py, &self.inner.index, i)?,
-                    scalar_to_py(py, &self.inner.data, i)?,
+                    label_to_py(py, self.inner.index(), i)?,
+                    scalar_to_py(py, self.inner.data(), i)?,
                 ))
             })
             .collect::<PyResult<_>>()?;
@@ -147,7 +147,7 @@ impl PySeries {
 
     pub(crate) fn to_list<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyList>> {
         let items: Vec<Py<PyAny>> = (0..self.inner.len())
-            .map(|i| scalar_to_py(py, &self.inner.data, i))
+            .map(|i| scalar_to_py(py, self.inner.data(), i))
             .collect::<PyResult<_>>()?;
         PyList::new(py, items)
     }
@@ -155,8 +155,8 @@ impl PySeries {
     /// Same labels, dtype and values (NaN equals NaN); names and display zones
     /// are ignored. Naive / aware datetime indexes cannot be compared.
     pub(crate) fn equals(&self, other: &PySeries) -> PyResult<bool> {
-        Ok(indexes_equal(&self.inner.index, &other.inner.index)?
-            && self.inner.data.dtype() == other.inner.data.dtype()
-            && self.inner.data.equals(&other.inner.data))
+        Ok(indexes_equal(self.inner.index(), other.inner.index())?
+            && self.inner.data().dtype() == other.inner.data().dtype()
+            && self.inner.data().equals(other.inner.data()))
     }
 }

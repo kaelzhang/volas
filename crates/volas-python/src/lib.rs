@@ -5,6 +5,7 @@
 //! This crate is the only place pyo3 / numpy are used; all logic lives in the
 //! `volas-core` / `volas-compute` / `volas-directive` crates.
 
+use volas_core::ColumnView;
 use std::sync::Arc;
 
 use pyo3::create_exception;
@@ -155,19 +156,19 @@ fn parse_ff(float_format: Option<&str>) -> PyResult<Option<(Option<usize>, char)
 fn to_datetime(obj: &Bound<'_, PyAny>, unit: &str, format: Option<&str>) -> PyResult<PySeries> {
     let (col, name, index) = match obj.extract::<PyRef<PySeries>>() {
         Ok(s) => (
-            s.inner.data.clone(),
-            s.inner.name.clone(),
-            Arc::clone(&s.inner.index),
+            s.inner.data().clone(),
+            s.inner.name().map(str::to_owned),
+            Arc::clone(s.inner.index()),
         ),
         Err(_) => {
             let col = pyany_to_column(obj)?;
             let n = col.len();
-            (col, None, Arc::new(Index::range(n)))
+            (col, None, Arc::new(Index::new(None, volas_core::IndexKind::Range { start: 0, len: n }).map_err(pyerr)?))
         }
     };
-    let converted = match col {
-        c @ Column::Datetime(_) => c,
-        Column::Str(v, val) => match format {
+    let converted = match col.view() {
+        ColumnView::Datetime(_) => col,
+        ColumnView::Str(v, val) => match format {
             // An explicit format parses faster and unambiguously (pandas `format=`).
             // A missing (NA) cell maps to NaT, not parsed from its "" placeholder.
             Some(fmt) => {
@@ -186,12 +187,12 @@ fn to_datetime(obj: &Bound<'_, PyAny>, unit: &str, format: Option<&str>) -> PyRe
                     .collect::<PyResult<Vec<i64>>>()?;
                 Column::datetime(ns)
             }
-            None => Column::Str(v, val).to_datetime().map_err(pyerr)?,
+            None => col.to_datetime().map_err(pyerr)?,
         },
-        c => c.epoch_to_datetime_rounded(unit).map_err(pyerr)?,
+        _ => col.epoch_to_datetime_rounded(unit).map_err(pyerr)?,
     };
     Ok(PySeries {
-        inner: Series::new(name, converted, index),
+        inner: Series::new(name, converted, index).map_err(pyerr)?,
     })
 }
 

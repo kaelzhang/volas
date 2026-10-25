@@ -8,6 +8,7 @@
 //! kept out of `lib.rs` so the binding layer stays a thin set of `#[pymethods]`
 //! that delegate here.
 
+use volas_core::ColumnView;
 use volas_core::{datetime, Column, DataFrame, Index, IndexKind, Series, Tz};
 
 /// The console display for *any* missing value, regardless of dtype — the single
@@ -31,22 +32,22 @@ pub(crate) fn cell_to_csv(
     if !col.is_valid(i) {
         return na_rep.to_string();
     }
-    match col {
-        Column::F64(v) => match ff {
+    match col.view() {
+        ColumnView::F64(v) => match ff {
             Some((prec, kind)) => fmt_f64_with(prec, kind, v[i]),
             // Default: the shortest round-trippable form that keeps the decimal
             // point, so `1.0` writes as "1.0" (Rust's `to_string` drops it to "1").
             None => format!("{:?}", v[i]),
         },
-        Column::F32(v) => match ff {
+        ColumnView::F32(v) => match ff {
             Some((prec, kind)) => fmt_f64_with(prec, kind, v[i] as f64),
             None => format!("{:?}", v[i]),
         },
-        Column::Bool(v, _) => if v[i] { "True" } else { "False" }.to_string(),
-        Column::I64(v, _) => v[i].to_string(),
-        Column::I32(v, _) => v[i].to_string(),
-        Column::Str(v, _) => v.get(i).to_string(),
-        Column::Datetime(v) => datetime::format_ns(v[i]),
+        ColumnView::Bool(v, _) => if v[i] { "True" } else { "False" }.to_string(),
+        ColumnView::I64(v, _) => v[i].to_string(),
+        ColumnView::I32(v, _) => v[i].to_string(),
+        ColumnView::Str(v, _) => v.get(i).to_string(),
+        ColumnView::Datetime(v) => datetime::format_ns(v[i]),
     }
 }
 
@@ -283,8 +284,8 @@ fn data_cells(
     na_rep: &str,
     ff: Option<(Option<usize>, char)>,
 ) -> Vec<String> {
-    match col {
-        Column::F64(v) => {
+    match col.view() {
+        ColumnView::F64(v) => {
             let d = float_decimals(v);
             rows.iter()
                 .map(|&i| {
@@ -301,7 +302,7 @@ fn data_cells(
                 })
                 .collect()
         }
-        Column::F32(v) => {
+        ColumnView::F32(v) => {
             let asf: Vec<f64> = v.iter().map(|&x| x as f64).collect();
             let d = float_decimals(&asf);
             rows.iter()
@@ -321,15 +322,15 @@ fn data_cells(
         }
         // Every dtype renders a missing cell as `na_rep` (the `volas.NA` symbol
         // `<NA>` by default), uniform with the float arms above.
-        Column::I64(v, val) => rows
+        ColumnView::I64(v, val) => rows
             .iter()
             .map(|&i| if val.is_valid(i) { lead_num(v[i] < 0, v[i].to_string()) } else { na_rep.to_string() })
             .collect(),
-        Column::I32(v, val) => rows
+        ColumnView::I32(v, val) => rows
             .iter()
             .map(|&i| if val.is_valid(i) { lead_num(v[i] < 0, v[i].to_string()) } else { na_rep.to_string() })
             .collect(),
-        Column::Bool(v, val) => rows
+        ColumnView::Bool(v, val) => rows
             .iter()
             .map(|&i| {
                 if val.is_valid(i) {
@@ -339,11 +340,11 @@ fn data_cells(
                 }
             })
             .collect(),
-        Column::Str(v, val) => rows
+        ColumnView::Str(v, val) => rows
             .iter()
             .map(|&i| if val.is_valid(i) { format!(" {}", v.get(i)) } else { na_rep.to_string() })
             .collect(),
-        Column::Datetime(v) => {
+        ColumnView::Datetime(v) => {
             // A `NaT` (i64::MIN) renders as `na_rep`; the date-vs-timestamp choice
             // looks only at the present instants (a NaT is neither midnight nor a date).
             let all_midnight = rows
@@ -403,7 +404,7 @@ pub(crate) fn render_frame(df: &DataFrame, col_pos: &[usize], opts: &DisplayOpts
     for &j in col_pos {
         let col = &df.columns()[j];
         let name = &df.names()[j];
-        headers.push(if matches!(col, Column::Datetime(_)) {
+        headers.push(if matches!(col.view(), ColumnView::Datetime(_)) {
             name.clone()
         } else {
             format!(" {name}")
@@ -524,16 +525,16 @@ pub(crate) fn render_series(
     footer: bool,
 ) -> String {
     let n = s.len();
-    let dtype = s.data.dtype().name();
+    let dtype = s.data().dtype().name();
     if n == 0 {
-        return match &s.name {
+        return match &s.name() {
             Some(name) => format!("Series([], Name: {name}, dtype: {dtype})"),
             None => format!("Series([], dtype: {dtype})"),
         };
     }
     let (rows, truncated) = displayed_rows(n, truncate);
-    let mut labels = index_cells(&s.index, &rows);
-    let mut values = data_cells(&s.data, &rows, na_rep, ff);
+    let mut labels = index_cells(s.index(), &rows);
+    let mut values = data_cells(s.data(), &rows, na_rep, ff);
     if truncated {
         let k = truncate.unwrap().0.min(rows.len());
         let vw = values.iter().map(|s| s.chars().count()).max().unwrap_or(0);
@@ -543,14 +544,14 @@ pub(crate) fn render_series(
     }
     let mut out = String::new();
     // A named index prints its name on a leading line (pandas).
-    if let Some(name) = s.index.name() {
+    if let Some(name) = s.index().name() {
         out.push_str(name);
         out.push('\n');
     }
     out.push_str(&vertical_body(&labels, &values));
     if footer {
         let mut parts: Vec<String> = Vec::new();
-        if let Some(name) = &s.name {
+        if let Some(name) = &s.name() {
             parts.push(format!("Name: {name}"));
         }
         if truncated {

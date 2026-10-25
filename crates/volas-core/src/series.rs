@@ -7,39 +7,49 @@ use crate::dtype::DType;
 use crate::error::{Result, VolasError};
 use crate::index::Index;
 
-/// A one-dimensional, named, indexed column.
+/// A one-dimensional, named, indexed column with opaque structure.
 ///
-/// The `data.len() == index.len()` invariant is enforced at construction (see
-/// [`Series::new`]); always build through `new` / `from_f64` rather than the
-/// fields. (Full field privatization with accessors is a documented follow-up —
-/// the read sites are pervasive and the construction check covers the realistic
-/// way the invariant could break.)
+/// [`Series::new`] checks that values and labels have equal lengths. Parts are
+/// available through read-only accessors; external callers cannot replace them.
 #[derive(Clone, Debug)]
 pub struct Series {
-    /// Optional column name.
-    pub name: Option<String>,
-    /// The column values.
-    pub data: Column,
-    /// The shared row index.
-    pub index: Arc<Index>,
+    name: Option<String>,
+    data: Column,
+    index: Arc<Index>,
 }
 
 impl Series {
-    /// Build a series from its parts. The data length must equal the index
-    /// length (checked in debug builds).
-    pub fn new(name: Option<String>, data: Column, index: Arc<Index>) -> Self {
-        debug_assert_eq!(
-            data.len(),
-            index.len(),
-            "Series data length != index length"
-        );
-        Series { name, data, index }
+    /// Build a series from equally sized data and a checked index.
+    pub fn new(name: Option<String>, data: Column, index: Arc<Index>) -> Result<Self> {
+        let data_len = data.len();
+        let index_len = index.len();
+        if data_len != index_len {
+            return Err(shape_error(data_len, index_len));
+        }
+        Ok(Self { name, data, index })
+    }
+
+    /// Optional column name.
+    pub fn name(&self) -> Option<&str> { self.name.as_deref() }
+
+    /// Borrow the column values.
+    pub fn data(&self) -> &Column { &self.data }
+
+    /// Borrow the shared checked row index.
+    pub fn index(&self) -> &Arc<Index> { &self.index }
+
+    /// Consume the series and take its column values.
+    pub fn into_data(self) -> Column { self.data }
+
+    /// Return a renamed series, preserving its checked values and labels.
+    pub fn with_name(&self, name: Option<String>) -> Self {
+        Self { name, data: self.data.clone(), index: Arc::clone(&self.index) }
     }
 
     /// Build a float series with an implicit range index.
-    pub fn from_f64(name: Option<String>, values: Vec<f64>) -> Self {
+    pub fn from_f64(name: Option<String>, values: Vec<f64>) -> Result<Self> {
         let n = values.len();
-        Series::new(name, Column::f64(values), Arc::new(Index::range(n)))
+        Self::new(name, Column::f64(values), Arc::new(Index::new(None, crate::IndexKind::Range { start: 0, len: n })?))
     }
 
     /// Number of elements.
@@ -57,6 +67,20 @@ impl Series {
         self.data.dtype()
     }
 
+    /// Write values without changing the series length or labels.
+    ///
+    /// A single value broadcasts; otherwise values must cover the selected rows.
+    /// Invalid positions or a lossy conversion leave the series unchanged.
+    pub fn scatter(&mut self, positions: &[usize], values: &Column) -> Result<()> {
+        if positions.iter().any(|&position| position >= self.len()) {
+            return Err(VolasError::Shape("Series assignment position out of bounds".into()));
+        }
+        if values.len() != 1 && values.len() != positions.len() {
+            return Err(VolasError::Shape("Series assignment values length != selected rows".into()));
+        }
+        self.data.scatter(positions, values)
+    }
+
     /// Rows where `mask` is `true`, as a new Series (pandas `s[bool_mask]`).
     /// Surviving index labels are preserved (a `RangeIndex` becomes `Int64`).
     pub fn filter_mask(&self, mask: &[bool]) -> Result<Series> {
@@ -72,12 +96,16 @@ impl Series {
             .enumerate()
             .filter_map(|(i, &b)| if b { Some(i) } else { None })
             .collect();
-        Ok(Series::new(
-            self.name.clone(),
-            self.data.take(&idx),
-            Arc::new(self.index.take(&idx)),
-        ))
+        let index = Arc::new(self.index.take(&idx)?);
+        Series::new(self.name.clone(), self.data.take(&idx), index)
     }
+}
+
+/// Formatting an invalid shape must not enlarge the successful constructor path.
+#[cold]
+#[inline(never)]
+fn shape_error(data_len: usize, index_len: usize) -> VolasError {
+    VolasError::Shape(format!("Series data length {data_len} != index length {index_len}"))
 }
 
 #[cfg(test)]
@@ -86,7 +114,7 @@ mod tests {
 
     #[test]
     fn from_f64_has_range_index_and_query_methods() {
-        let s = Series::from_f64(Some("x".into()), vec![1.0, 2.0, 3.0]);
+        let s = Series::from_f64(Some("x".into()), vec![1.0, 2.0, 3.0]).unwrap();
         assert_eq!(s.len(), 3);
         assert!(!s.is_empty());
         assert_eq!(s.dtype(), DType::F64);
@@ -96,14 +124,40 @@ mod tests {
 
     #[test]
     fn new_preserves_parts_and_empty_is_empty() {
-        let s = Series::new(None, Column::i64(vec![7, 8]), Arc::new(Index::range(2)));
+        let s = Series::new(None, Column::i64(vec![7, 8]), Arc::new(Index::new(None, crate::IndexKind::Range { start: 0, len: 2 }).unwrap())).unwrap();
         assert_eq!(s.dtype(), DType::I64);
         assert_eq!(s.len(), 2);
-        assert!(s.name.is_none());
+        assert!(s.name().is_none());
+        assert_eq!(s.data().as_i64(), Some(&[7, 8][..]));
+        assert_eq!(s.index().len(), 2);
+        let renamed = s.with_name(Some("next".into()));
+        assert_eq!(renamed.name(), Some("next"));
+        assert_eq!(renamed.into_data(), s.data);
 
-        let empty = Series::from_f64(None, vec![]);
+        let empty = Series::from_f64(None, vec![]).unwrap();
         assert!(empty.is_empty());
         assert_eq!(empty.len(), 0);
+    }
+
+    #[test]
+    fn checked_constructor_rejects_mismatched_parts() {
+        let result = Series::new(None, Column::i64(vec![1]), Arc::new(Index::new(None, crate::IndexKind::Range { start: 0, len: 2 }).unwrap()));
+        assert!(matches!(result, Err(VolasError::Shape(message)) if message == "Series data length 1 != index length 2"));
+    }
+
+    #[test]
+    fn scatter_preserves_structure_and_rejects_invalid_writes() {
+        let mut series = Series::from_f64(Some("v".into()), vec![1.0, 2.0]).unwrap();
+        let index = Arc::clone(series.index());
+        let values_pointer = series.data().as_f64().unwrap().as_ptr();
+        series.scatter(&[0], &Column::f64(vec![3.0])).unwrap();
+        assert_eq!(series.data().as_f64().unwrap().as_ptr(), values_pointer);
+        assert_eq!(series.data().to_f64_vec(), vec![3.0, 2.0]);
+        assert!(Arc::ptr_eq(&index, series.index()));
+        assert!(series.scatter(&[2], &Column::f64(vec![9.0])).is_err());
+        assert!(series.scatter(&[0, 1], &Column::f64(vec![])).is_err());
+        assert!(series.scatter(&[0], &Column::str(vec!["bad".into()])).is_err());
+        assert_eq!(series.data().to_f64_vec(), vec![3.0, 2.0]);
     }
 
     #[test]
@@ -111,12 +165,12 @@ mod tests {
         let s = Series::new(
             Some("v".into()),
             Column::f64(vec![10.0, 20.0, 30.0]),
-            Arc::new(Index::range(3)),
-        );
+            Arc::new(Index::new(None, crate::IndexKind::Range { start: 0, len: 3 }).unwrap()),
+        ).unwrap();
         let sub = s.filter_mask(&[false, true, true]).unwrap();
         assert_eq!(sub.data.to_f64_vec(), vec![20.0, 30.0]);
         // RangeIndex -> the surviving original labels (1, 2)
-        assert_eq!(sub.index.label_at(0), Index::range(3).label_at(1));
+        assert_eq!(sub.index.label_at(0), Index::new(None, crate::IndexKind::Range { start: 0, len: 3 }).unwrap().label_at(1));
         assert!(s.filter_mask(&[true, false]).is_err()); // length mismatch
     }
 }

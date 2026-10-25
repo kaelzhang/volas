@@ -8,6 +8,8 @@
 //! [`overflow`] error in every build profile (contract #25), never a wrap (pandas /
 //! NumPy) and never a debug-only panic.
 
+#[cfg(test)]
+use crate::column::ColumnData;
 use crate::column::Column;
 use crate::dtype::DType;
 use crate::error::VolasError;
@@ -378,7 +380,7 @@ mod tests {
         assert_eq!(f32::try_from_f64(0.1).map(|x| x.is_finite()), Some(true)); // rounds, still fits
         assert_eq!(Numeric::checked_add(3.0_f32, 4.0), Some(7.0));
         assert_eq!(Numeric::checked_abs(-2.0_f32), Some(2.0));
-        assert!(matches!(f32::into_column(vec![1.0_f32]), Column::F32(_)));
+        assert!(matches!(f32::into_column(vec![1.0_f32]), Column { data: ColumnData::F32(_) }));
         // i32: no missing, checked, range-checked try_from
         assert_eq!(i32::DTYPE, DType::I32);
         assert!(!5_i32.is_missing());
@@ -389,7 +391,7 @@ mod tests {
         assert_eq!(Numeric::checked_abs(i32::MIN), None);
         assert_eq!(Numeric::checked_sub(7_i32, 10), Some(-3));
         assert_eq!(Numeric::checked_mul(3_i32, 4), Some(12));
-        assert!(matches!(i32::into_column(vec![1_i32]), Column::I32(_, _)));
+        assert!(matches!(i32::into_column(vec![1_i32]), Column { data: ColumnData::I32(_, _) }));
     }
 
     #[test]

@@ -145,9 +145,10 @@ class PlainMachine(FrameMachine):
                 return
             bar = build.frame(type(schema)(schema.price, schema.volume, schema.extras, 'datetime', 'UTC'),
                               rows, index)
-        else:  # nat
-            bar = build.frame(schema, rows, index)
-            bar = _nat_index(bar, schema)
+        else:  # nat: admission may reject the index before append can run
+            self.attempt(lambda: self.df.append(_nat_index(build.frame(schema, rows, index), schema)),
+                         expect_error=ValueError, label=f'append {kind}')
+            return
         self.attempt(lambda: self.df.append(bar), expect_error=ValueError, label=f'append {kind}')
 
     # --- writes ------------------------------------------------------------------------------

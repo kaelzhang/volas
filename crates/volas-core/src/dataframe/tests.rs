@@ -93,7 +93,7 @@
         assert_eq!(indexed.index().name(), Some("t"));
         assert_eq!(
             indexed.index().as_ref(),
-            &Index::int64(vec![100, 200]).with_name(Some("t".into()))
+            &Index::new(None, crate::IndexKind::Int64(vec![100, 200])).unwrap().with_name(Some("t".into()))
         );
         assert!(indexed.column("t").is_err());
         // an f64 column cannot be an index
@@ -169,7 +169,7 @@
         assert!(DataFrame::new(
             vec!["a".into()],
             vec![Column::f64(vec![1.0, 2.0])],
-            Some(Index::range(3)),
+            Some(Index::new(None, crate::IndexKind::Range { start: 0, len: 3 }).unwrap()),
         )
         .is_err());
     }
@@ -178,9 +178,9 @@
     fn series_extracts_a_named_column() {
         let df = sample();
         let s = df.series("a").unwrap();
-        assert_eq!(s.name.as_deref(), Some("a"));
-        assert_eq!(s.data.as_f64().unwrap(), &[1.0, 2.0, 3.0]);
-        assert!(Arc::ptr_eq(&s.index, df.index()));
+        assert_eq!(s.name(), Some("a"));
+        assert_eq!(s.data().as_f64().unwrap(), &[1.0, 2.0, 3.0]);
+        assert!(Arc::ptr_eq(s.index(), df.index()));
         assert!(df.series("missing").is_err());
     }
 
@@ -190,7 +190,7 @@
         let mut empty = DataFrame::new(vec![], vec![], None).unwrap();
         empty.set_column("x", Column::f64(vec![1.0, 2.0])).unwrap();
         assert_eq!(empty.height(), 2);
-        assert_eq!(empty.index().as_ref(), &Index::range(2));
+        assert_eq!(empty.index().as_ref(), &Index::new(None, crate::IndexKind::Range { start: 0, len: 2 }).unwrap());
 
         // replace in place, then add a second column
         let mut df = sample();
@@ -571,7 +571,7 @@
         let df = DataFrame::new(
             vec!["c".into()],
             vec![Column::f64(vec![1.0])],
-            Some(Index::datetime(vec![ns], Tz::Utc)),
+            Some(Index::new(None, crate::IndexKind::Datetime(vec![ns], Tz::Utc)).unwrap()),
         )
         .unwrap();
 
@@ -593,7 +593,7 @@
         let naive = DataFrame::new(
             vec!["c".into()],
             vec![Column::f64(vec![1.0])],
-            Some(Index::datetime(vec![ns], Tz::Naive)),
+            Some(Index::new(None, crate::IndexKind::Datetime(vec![ns], Tz::Naive)).unwrap()),
         )
         .unwrap();
         assert!(naive.tz_convert(Tz::Utc).is_err());
@@ -679,7 +679,7 @@
         let df = DataFrame::new(
             vec!["c".into()],
             vec![Column::f64(vec![1.0])],
-            Some(Index::datetime(vec![ns], Tz::Utc)),
+            Some(Index::new(None, crate::IndexKind::Datetime(vec![ns], Tz::Utc)).unwrap()),
         )
         .unwrap();
         assert!(df
@@ -689,22 +689,23 @@
 
     /// Localizing keeps every sub-second digit (each instant goes through
     /// `Tz::localize_from`, never whole civil seconds), so sub-second rows stay
-    /// distinct; a NaT label stays NaT.
+    /// distinct; a NaT label is rejected at checked construction.
     #[test]
     fn tz_localize_keeps_subseconds_and_nat() {
         use crate::tz::Tz;
         let a = crate::datetime::parse_ns("2026-03-08 06:59:59.123456789").unwrap();
         let df = DataFrame::new(
             vec!["c".into()],
-            vec![Column::f64(vec![1.0, 2.0, 3.0])],
-            Some(Index::datetime(vec![a, a + 1, crate::datetime::NAT], Tz::Naive)),
+            vec![Column::f64(vec![1.0, 2.0])],
+            Some(Index::new(None, crate::IndexKind::Datetime(vec![a, a + 1], Tz::Naive)).unwrap()),
         )
         .unwrap();
         let sh = df.tz_localize(Tz::parse("+08:00").unwrap()).unwrap();
+        assert!(Index::new(None, crate::IndexKind::Datetime(vec![a, a + 1, crate::datetime::NAT], Tz::Naive)).is_err());
         let eight_h = 8 * 3_600_000_000_000;
         match sh.index().kind() {
             IndexKind::Datetime(v, _) => {
-                assert_eq!(v, &vec![a - eight_h, a + 1 - eight_h, crate::datetime::NAT])
+                assert_eq!(v, &vec![a - eight_h, a + 1 - eight_h])
             }
             other => panic!("{other:?}"),
         }
@@ -731,4 +732,36 @@
         // an empty plan is a no-op (and skips the invalidation).
         df.fold_forming_row(1, &bar, 0, &[]).unwrap();
         assert_eq!(df.columns()[0].get_f64(1), 5.0);
+    }
+
+
+    #[test]
+    fn adding_to_a_zero_column_projection_preserves_the_shared_datetime_index() {
+        let index = Index::new(Some("time".into()),
+            IndexKind::Datetime(vec![10, 20], crate::Tz::fixed(3600).unwrap())).unwrap();
+        let source = DataFrame::new(vec!["close".into()], vec![Column::i64(vec![1, 2])], Some(index)).unwrap();
+        let shared = Arc::clone(source.index());
+        let mut projected = source.project(&[], 0, source.height()).unwrap();
+        assert_eq!((projected.width(), projected.height()), (0, 2));
+        projected.set_column("replacement", Column::i64(vec![3, 4])).unwrap();
+        assert!(Arc::ptr_eq(projected.index(), &shared));
+        assert_eq!(projected.index().to_i64_labels(), vec![10, 20]);
+        assert_eq!(projected.index().name(), Some("time"));
+        assert_eq!(projected.index().tz(), crate::Tz::fixed(3600).unwrap());
+        assert_eq!(projected.column("replacement").unwrap().as_i64().unwrap(), &[3, 4]);
+    }
+
+    #[test]
+    fn replacement_before_an_unmaterializable_tail_preserves_write_metadata() {
+        let index = Index::new(None, IndexKind::Range { start: 0, len: i64::MAX as usize + 1 }).unwrap();
+        let mut target = DataFrame::new(vec![], vec![], Some(index)).unwrap();
+        target.invalidate_computed_on_write("close");
+        let before_stale = target.stale_by;
+        let before_index = Arc::clone(target.index());
+        let rows = DataFrame::new(vec![], vec![],
+            Some(Index::new(None, IndexKind::Int64(vec![i64::MAX, -1])).unwrap())).unwrap();
+        assert!(matches!(target.append(&rows), Err(VolasError::Overflow(_))));
+        assert_eq!(target.stale_by, before_stale);
+        assert!(Arc::ptr_eq(target.index(), &before_index));
+        assert_eq!(target.height(), i64::MAX as usize + 1);
     }

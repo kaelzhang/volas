@@ -69,9 +69,12 @@ def test_equals_datetime_and_str_index_value_semantics():
 
 
 def test_tz_aware_nat_renders_nat():
-    # a tz-aware DatetimeIndex containing NaT formats as 'NaT' (format_ns_tz guard),
-    # not a 1677 civil date
-    ps = pd.DataFrame({'v': [1, 2]},
-                      index=pd.to_datetime(['2021-01-01', 'NaT']).tz_localize('America/New_York'))
-    vf = volas.DataFrame.from_pandas(ps)
-    assert 'NaT' in repr(vf)
+    # Missing timestamps remain missing column values, never a 1677 civil date.
+    times = pd.to_datetime(['2021-01-01', 'NaT']).tz_localize('America/New_York')
+    vf = volas.DataFrame.from_pandas(pd.DataFrame({'time': times, 'v': [1, 2]}))
+    assert '<NA>' in repr(vf)
+    assert np.isnat(vf['time'].to_numpy()[1])
+    assert vf['time'].isna().to_list() == [False, True]
+    # The same missing instant cannot label a row.
+    with pytest.raises(ValueError, match="without NaT"):
+        volas.DataFrame.from_pandas(pd.DataFrame({'v': [1, 2]}, index=times))

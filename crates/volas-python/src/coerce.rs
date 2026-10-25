@@ -149,7 +149,7 @@ pub(crate) fn pyany_to_column(v: &Bound<'_, PyAny>) -> PyResult<Column> {
     // through to the array path below, invoking Series.__array__ and re-importing
     // the lossy float64 export — contract C1/C2 (parity with `df['x'] = series`).
     if let Ok(s) = v.extract::<PyRef<PySeries>>() {
-        return Ok(s.inner.data.clone());
+        return Ok(s.inner.data().clone());
     }
     if let Some(col) = masked_array_column(v)? {
         return Ok(col);

@@ -2,12 +2,8 @@
 // source. Its `rust` code blocks are compiled + run as doctests by `cargo test`.
 #![doc = include_str!("../README.md")]
 
-/// The full `volas-core` surface (data model, ops enums, numeric helpers), for the
-/// less-common types not re-exported at the top level.
-pub use volas_core as core;
-
 pub use volas_core::{
-    Column, DType, DataFrame, Index, IndexKind, Label, Result, Scalar, Series, SliceBound, Tz,
+    Column, ColumnView, DType, DataFrame, Index, IndexKind, Label, Result, Scalar, Series, SliceBound, Tz, Validity,
     VolasError,
 };
 pub use volas_io::{read_csv, ReadCsvOptions};
@@ -32,5 +28,30 @@ pub mod compute {
 /// Time-frame cumulation (OHLCV resampling): aggregate finer bars into a coarser
 /// [`TimeFrame`].
 pub mod time {
-    pub use volas_time::{aggregate_period, cumulate, Agg, AggSpec, Cumulator, OpenPeriod, TimeFrame};
+    pub use volas_time::{aggregate_period, cumulate, Agg, AggSpec, Cumulator, OpenPeriod, RawFineInput, TimeFrame};
 }
+
+/// Checked values cannot be assembled through raw storage variants.
+///
+/// ```compile_fail
+/// use volas::{Column, Validity};
+/// let _ = Column::I64(vec![1].into(), Validity::from_valid_iter(2, [true, false]));
+/// ```
+///
+/// Series structure is private, so a caller cannot bypass its length check.
+///
+/// ```compile_fail
+/// use std::sync::Arc;
+/// use volas::{Column, Index, Series};
+/// let _ = Series { name: None, data: Column::i64(vec![1]),
+///     index: Arc::new(Index::new(None, volas::IndexKind::Range { start: 0, len: 2 }).unwrap()) };
+/// ```
+///
+/// The checked constructor reports the same mismatch as an error.
+///
+/// ```
+/// use std::sync::Arc;
+/// use volas::{Column, Index, Series};
+/// assert!(Series::new(None, Column::i64(vec![1]), Arc::new(Index::new(None, volas::IndexKind::Range { start: 0, len: 2 }).unwrap())).is_err());
+/// ```
+mod invariant_examples {}

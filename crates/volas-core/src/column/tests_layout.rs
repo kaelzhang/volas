@@ -24,8 +24,8 @@ fn a_checked_constructor_rejects_a_mask_of_another_length() {
 
 #[test]
 fn a_frame_rejects_a_column_whose_mask_does_not_cover_it() {
-    // the public variant bypasses the checked constructor; the frame does not
-    let forged = Column::I64(Buffer::from_vec(vec![1, 2, 3]), na(97, &[5]));
+    // Crate-local corruption is rejected defensively; external code cannot construct it.
+    let forged = Column { data: ColumnData::I64(Buffer::from_vec(vec![1, 2, 3]), na(97, &[5])) };
     assert!(matches!(forged.check_layout(), Err(VolasError::Shape(_))));
     let err = crate::DataFrame::new(vec!["x".into()], vec![forged], None).unwrap_err();
     assert_eq!(
@@ -35,7 +35,7 @@ fn a_frame_rejects_a_column_whose_mask_does_not_cover_it() {
     assert!(Column::f64(vec![1.0]).check_layout().is_ok());
     // nor through set_column, which leaves the frame unchanged
     let mut df = crate::DataFrame::new(vec!["a".into()], vec![Column::f64(vec![1.0, 2.0, 3.0])], None).unwrap();
-    let forged = Column::I64(Buffer::from_vec(vec![1, 2, 3]), na(2, &[1]));
+    let forged = Column { data: ColumnData::I64(Buffer::from_vec(vec![1, 2, 3]), na(2, &[1])) };
     assert!(matches!(df.set_column("x", forged), Err(VolasError::Shape(_))));
     assert_eq!(df.width(), 1);
 }
@@ -163,4 +163,64 @@ fn default_rank_keeps_missing_and_orders_large_integers_exactly() {
             }
         }
     }
+}
+
+#[test]
+fn adopted_buffers_validate_storage_pairing_and_keep_the_allocation() {
+    let i64_values = Buffer::from_vec(vec![7_i64, 9]);
+    let ptr = i64_values.as_ptr();
+    let ints = Column::from_i64_buffer(i64_values, na(2, &[1])).unwrap();
+    let ColumnView::I64(values, validity) = ints.view() else { panic!("int64 view") };
+    assert_eq!(values.as_ptr(), ptr);
+    assert_eq!((values[0], validity.null_count()), (7, 1));
+    let cases = [
+        Column::from_i64_buffer(Buffer::from_vec(vec![1]), na(2, &[1])),
+        Column::from_i32_buffer(Buffer::from_vec(vec![1]), na(2, &[1])),
+        Column::from_bool_buffer(Buffer::from_vec(vec![true]), na(2, &[1])),
+        Column::from_str_buffer(StrBuffer::from_vec(vec!["x".into()]), na(2, &[1])),
+    ];
+    for result in cases {
+        assert_eq!(result.unwrap_err(), VolasError::Shape(
+            "validity mask covers 2 values but the column has 1".into()
+        ));
+    }
+    let views = [
+        Column::from_f64_buffer(Buffer::from_vec(vec![1.0])),
+        Column::from_f32_buffer(Buffer::from_vec(vec![1.0])),
+        Column::from_i64_buffer(Buffer::from_vec(vec![1]), Validity::dense()).unwrap(),
+        Column::from_i32_buffer(Buffer::from_vec(vec![1]), Validity::dense()).unwrap(),
+        Column::from_bool_buffer(Buffer::from_vec(vec![true]), Validity::dense()).unwrap(),
+        Column::from_str_buffer(StrBuffer::from_vec(vec!["x".into()]), Validity::dense()).unwrap(),
+        Column::from_datetime_buffer(Buffer::from_vec(vec![1])),
+    ];
+    for column in views {
+        match column.view() {
+            ColumnView::F64(v) => assert_eq!(v[0], 1.0),
+            ColumnView::F32(v) => assert_eq!(v[0], 1.0),
+            ColumnView::I64(v, mask) => assert_eq!((v[0], mask.null_count()), (1, 0)),
+            ColumnView::I32(v, mask) => assert_eq!((v[0], mask.null_count()), (1, 0)),
+            ColumnView::Bool(v, mask) => assert_eq!((v[0], mask.null_count()), (true, 0)),
+            ColumnView::Str(v, mask) => assert_eq!((v.get(0), mask.null_count()), ("x", 0)),
+            ColumnView::Datetime(v) => assert_eq!(v[0], 1),
+        }
+    }
+}
+
+#[test]
+fn consuming_typed_exports_move_unique_buffers_and_convert_other_dtypes() {
+    let floats = Column::f64(vec![1.0, 2.0]);
+    let ptr = floats.as_f64().unwrap().as_ptr();
+    let values = floats.into_f64_vec();
+    assert_eq!(values.as_ptr(), ptr);
+    assert_eq!(Column::i64(vec![1]).into_f64_vec(), vec![1.0]);
+    let ints = Column::i64(vec![1, 2]);
+    let ptr = ints.as_i64().unwrap().as_ptr();
+    let values = ints.into_i64_vec().unwrap();
+    assert_eq!(values.as_ptr(), ptr);
+    assert_eq!(Column::i32(vec![2]).into_i64_vec().unwrap(), vec![2]);
+    let bools = Column::bool(vec![true, false]);
+    let ptr = bools.as_bool().unwrap().as_ptr();
+    let values = bools.into_bool_vec().unwrap();
+    assert_eq!(values.as_ptr(), ptr);
+    assert!(Column::f64(vec![1.0]).into_bool_vec().is_err());
 }

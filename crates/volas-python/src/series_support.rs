@@ -1,6 +1,7 @@
 //! Free helpers backing the Series surface (arith / compare / logical
 //! resolution, the typed-scalar fill, slicing, and small constructors).
 
+use volas_core::ColumnView;
 use std::sync::Arc;
 
 use numpy::PyReadonlyArray1;
@@ -19,10 +20,10 @@ pub(crate) fn slice_series(s: &Series, slice: &Bound<'_, PySlice>) -> PyResult<P
     let info = slice.indices(len as isize)?;
     let (start, stop, step) = (info.start, info.stop, info.step);
     let positions = strided(start, stop, step);
-    let data = s.data.take(&positions);
-    let index = Arc::new(s.index.take(&positions));
+    let index = Arc::new(s.index().take(&positions).map_err(pyerr)?);
+    let data = s.data().take(&positions);
     Ok(PySeries {
-        inner: Series::new(s.name.clone(), data, index),
+        inner: Series::new(s.name().map(str::to_owned), data, index).map_err(pyerr)?,
     })
 }
 
@@ -35,8 +36,8 @@ pub(crate) fn slice_series(s: &Series, slice: &Bound<'_, PySlice>) -> PyResult<P
 /// `+ 2.0 -> float64`, matching pandas. Anything else is unsupported.
 pub(crate) fn series_rhs_col(s: &Series, other: &Bound<'_, PyAny>) -> PyResult<Column> {
     if let Ok(o) = other.extract::<PyRef<PySeries>>() {
-        require_aligned(&s.index, &o.inner.index)?;
-        Ok(o.inner.data.clone())
+        require_aligned(s.index(), o.inner.index())?;
+        Ok(o.inner.data().clone())
     } else if other.is_none()
         || other.is(crate::scalar::na(other.py()).bind(other.py()))
         || other.get_type().name().map(|n| n == "NAType").unwrap_or(false)
@@ -44,7 +45,7 @@ pub(crate) fn series_rhs_col(s: &Series, other: &Bound<'_, PyAny>) -> PyResult<C
         // F7: an NA scalar operand poisons the whole result (known op unknown =
         // unknown), dtype-preserved — consistent with column-NA propagation and
         // with accepting np.nan. Broadcast an all-NA column of the series' dtype.
-        Ok(Column::na_of(s.data.dtype(), s.len()))
+        Ok(Column::na_of(s.data().dtype(), s.len()))
     } else if let Ok(b) = other.extract::<bool>() {
         Ok(Column::i64(vec![b as i64; s.len()]))
     } else if let Ok(i) = other.extract::<i64>() {
@@ -88,18 +89,18 @@ pub(crate) fn indexes_equal(a: &Index, b: &Index) -> PyResult<bool> {
 }
 
 /// A new F64 `Series` carrying `s`'s name and index.
-pub(crate) fn f64_series(s: &Series, out: Vec<f64>) -> PySeries {
-    PySeries {
-        inner: Series::new(s.name.clone(), Column::f64(out), Arc::clone(&s.index)),
-    }
+pub(crate) fn f64_series(s: &Series, out: Vec<f64>) -> PyResult<PySeries> {
+    Ok(PySeries {
+        inner: Series::new(s.name().map(str::to_owned), Column::f64(out), Arc::clone(s.index())).map_err(pyerr)?,
+    })
 }
 
 /// A new `Series` carrying `s`'s name and index over an already-built column.
 /// Used by the dtype-preserving transforms (the typed Column ops decide dtype).
-pub(crate) fn col_to_series(s: &Series, data: Column) -> PySeries {
-    PySeries {
-        inner: Series::new(s.name.clone(), data, Arc::clone(&s.index)),
-    }
+pub(crate) fn col_to_series(s: &Series, data: Column) -> PyResult<PySeries> {
+    Ok(PySeries {
+        inner: Series::new(s.name().map(str::to_owned), data, Arc::clone(s.index())).map_err(pyerr)?,
+    })
 }
 
 /// The pandas `describe` row labels (the index of a describe result).
@@ -111,10 +112,10 @@ pub(crate) fn describe_labels() -> Vec<String> {
 }
 
 /// A new Bool `Series` carrying `s`'s name and index.
-pub(crate) fn bool_series(s: &Series, out: Vec<bool>) -> PySeries {
-    PySeries {
-        inner: Series::new(s.name.clone(), Column::bool(out), Arc::clone(&s.index)),
-    }
+pub(crate) fn bool_series(s: &Series, out: Vec<bool>) -> PyResult<PySeries> {
+    Ok(PySeries {
+        inner: Series::new(s.name().map(str::to_owned), Column::bool(out), Arc::clone(s.index())).map_err(pyerr)?,
+    })
 }
 
 /// A Series `+ - *` op against `other` (scalar / aligned Series), dtype-preserving
@@ -127,23 +128,23 @@ pub(crate) fn series_arith(
     swap: bool,
 ) -> PyResult<PySeries> {
     let rhs = series_rhs_col(s, other)?;
-    let (lhs, rhs) = if swap { (&rhs, &s.data) } else { (&s.data, &rhs) };
-    Ok(col_to_series(s, lhs.binary(rhs, op).map_err(pyerr)?))
+    let (lhs, rhs) = if swap { (&rhs, s.data()) } else { (s.data(), &rhs) };
+    col_to_series(s, lhs.binary(rhs, op).map_err(pyerr)?)
 }
 
 /// A Series `/` op (always float). `swap` reflects it (`__rtruediv__`).
 pub(crate) fn series_div(s: &Series, other: &Bound<'_, PyAny>, swap: bool) -> PyResult<PySeries> {
     let rhs = series_rhs_col(s, other)?;
-    let (lhs, rhs) = if swap { (&rhs, &s.data) } else { (&s.data, &rhs) };
-    Ok(col_to_series(s, lhs.div(rhs).map_err(pyerr)?))
+    let (lhs, rhs) = if swap { (&rhs, s.data()) } else { (s.data(), &rhs) };
+    col_to_series(s, lhs.div(rhs).map_err(pyerr)?)
 }
 
 /// A Series `//` op (floor division, dtype-preserving). `swap` reflects it
 /// (`__rfloordiv__`).
 pub(crate) fn series_floordiv(s: &Series, other: &Bound<'_, PyAny>, swap: bool) -> PyResult<PySeries> {
     let rhs = series_rhs_col(s, other)?;
-    let (lhs, rhs) = if swap { (&rhs, &s.data) } else { (&s.data, &rhs) };
-    Ok(col_to_series(s, lhs.floordiv(rhs).map_err(pyerr)?))
+    let (lhs, rhs) = if swap { (&rhs, s.data()) } else { (s.data(), &rhs) };
+    col_to_series(s, lhs.floordiv(rhs).map_err(pyerr)?)
 }
 
 /// Element-wise comparison -> bool Series (positional), dtype-aware via
@@ -153,7 +154,7 @@ pub(crate) fn series_floordiv(s: &Series, other: &Bound<'_, PyAny>, swap: bool) 
 /// column, a parsed timestamp for a datetime column, a number for a numeric one).
 pub(crate) fn series_cmp(s: &Series, other: &Bound<'_, PyAny>, op: CmpOp) -> PyResult<PySeries> {
     let rhs = compare_rhs_col(s, other)?;
-    Ok(col_to_series(s, s.data.compare(&rhs, op).map_err(pyerr)?))
+    col_to_series(s, s.data().compare(&rhs, op).map_err(pyerr)?)
 }
 
 /// Build the right operand of a comparison as a column matching the left column's
@@ -161,10 +162,10 @@ pub(crate) fn series_cmp(s: &Series, other: &Bound<'_, PyAny>, op: CmpOp) -> PyR
 /// broadcast and typed by the left dtype.
 pub(crate) fn compare_rhs_col(s: &Series, other: &Bound<'_, PyAny>) -> PyResult<Column> {
     if let Ok(o) = other.extract::<PyRef<PySeries>>() {
-        require_aligned(&s.index, &o.inner.index)?;
-        return Ok(o.inner.data.clone());
+        require_aligned(s.index(), o.inner.index())?;
+        return Ok(o.inner.data().clone());
     }
-    cmp_scalar_col(other, s.data.dtype(), s.len())
+    cmp_scalar_col(other, s.data().dtype(), s.len())
 }
 
 /// Broadcast a comparison scalar to `n` rows, typed for a `dtype` column: a `str`
@@ -249,13 +250,13 @@ impl BoolMask<'_> {
 /// so the caller can fall through to its label / position / column handling.
 pub(crate) fn bool_mask_key<'a, 'py>(
     key: &Bound<'py, PyAny>,
-    labels: impl FnOnce() -> std::borrow::Cow<'a, Index>,
+    labels: impl FnOnce() -> PyResult<std::borrow::Cow<'a, Index>>,
 ) -> PyResult<Option<BoolMask<'py>>> {
     if let Ok(s) = key.extract::<PyRef<PySeries>>() {
-        return Ok(match &s.inner.data {
-            Column::Bool(..) => {
-                require_aligned(&labels(), &s.inner.index)?;
-                Some(BoolMask::Owned(bool_mask_vec(&s.inner.data)?))
+        return Ok(match s.inner.data().view() {
+            ColumnView::Bool(..) => {
+                require_aligned(labels()?.as_ref(), s.inner.index())?;
+                Some(BoolMask::Owned(bool_mask_vec(s.inner.data())?))
             },
             _ => None,
         });
@@ -287,22 +288,22 @@ pub(crate) fn where_other_resolve(
         // datetime -> NaT, int/bool -> their NA), so a str/datetime `where` keeps
         // its kept values instead of funneling them to NaN.
         None => {
-            let dt = s.data.dtype();
+            let dt = s.data().dtype();
             Ok((Column::na_of(dt, n), dt))
         }
         // an explicit `None` / `NaN` / `volas.NA` fill is the same dtype-preserving
         // NA as the default, so `where(mask, volas.NA)` keeps the column's dtype.
         Some(o) if is_na_like_py(o) => {
-            let dt = s.data.dtype();
+            let dt = s.data().dtype();
             Ok((Column::na_of(dt, n), dt))
         }
         Some(o) => {
             if let Ok(ser) = o.extract::<PyRef<PySeries>>() {
-                require_aligned(&s.index, &ser.inner.index)?;
-                let dt = ser.inner.data.dtype();
-                return Ok((ser.inner.data.clone(), dt));
+                require_aligned(s.index(), ser.inner.index())?;
+                let dt = ser.inner.data().dtype();
+                return Ok((ser.inner.data().clone(), dt));
             }
-            scalar_fill_col(o, s.data.dtype(), n)
+            scalar_fill_col(o, s.data().dtype(), n)
         }
     }
 }
@@ -387,10 +388,10 @@ pub(crate) fn scalar_fill_col(
 
 /// Element-wise boolean logic -> bool Series (both operands coerced to bool).
 pub(crate) fn series_logical(s: &Series, other: &Bound<'_, PyAny>, op: BoolOp) -> PyResult<PySeries> {
-    let n = s.data.len();
+    let n = s.data().len();
     let rhs: Column = if let Ok(o) = other.extract::<PyRef<PySeries>>() {
-        require_aligned(&s.index, &o.inner.index)?;
-        o.inner.data.clone()
+        require_aligned(s.index(), o.inner.index())?;
+        o.inner.data().clone()
     } else if is_na_like_py(other) {
         // a missing scalar (None / NaN / volas.NA / pd.NA) is an unknown truth
         // value: Kleene NA, never a present `NaN != 0 == True` (contract #27)
@@ -405,7 +406,7 @@ pub(crate) fn series_logical(s: &Series, other: &Bound<'_, PyAny>, op: BoolOp) -
         ));
     };
     // Kleene three-valued logic, propagating volas.NA.
-    Ok(col_to_series(s, s.data.logical(&rhs, op).map_err(pyerr)?))
+    col_to_series(s, s.data().logical(&rhs, op).map_err(pyerr)?)
 }
 
 pub(crate) fn strided(start: isize, stop: isize, step: isize) -> Vec<usize> {

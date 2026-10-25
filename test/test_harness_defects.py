@@ -152,9 +152,8 @@ def test_a_naive_bar_onto_an_aware_frame_raises():
 
 
 def test_a_nat_bar_onto_a_plain_frame_raises():
-    bar = volas.DataFrame({'close': [4.0]}, index=np.array(['NaT'], 'datetime64[ns]'))
-    with pytest.raises(ValueError):
-        _dated().append(bar)
+    with pytest.raises(ValueError, match='without NaT'):
+        volas.DataFrame({'close': [4.0]}, index=np.array(['NaT'], 'datetime64[ns]'))
 
 
 def test_tz_localize_keeps_subseconds():

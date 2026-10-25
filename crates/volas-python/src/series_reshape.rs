@@ -1,6 +1,7 @@
 //! `Series` structural ops (sort, head/tail, unique, value_counts, dedup,
 //! reset_index, rename, to_frame, monotonicity checks).
 
+use volas_core::ColumnView;
 use std::sync::Arc;
 
 use pyo3::exceptions::{PyTypeError, PyValueError};
@@ -21,29 +22,29 @@ impl PySeries {
     /// collapse a nullable int/bool to float64 + NaN). One missing slot is kept if
     /// the series has any NA; the result carries a fresh `RangeIndex` (the distinct
     /// values have no row correspondence to the original).
-    pub(crate) fn unique(&self) -> PySeries {
-        let idx = self.inner.data.unique_indices();
-        PySeries {
+    pub(crate) fn unique(&self) -> PyResult<PySeries> {
+        let idx = self.inner.data().unique_indices();
+        Ok(PySeries {
             inner: Series::new(
-                self.inner.name.clone(),
-                self.inner.data.take(&idx),
-                Arc::new(Index::range(idx.len())),
-            ),
-        }
+                self.inner.name().map(str::to_owned),
+                self.inner.data().take(&idx),
+                Arc::new(Index::new(None, volas_core::IndexKind::Range { start: 0, len: idx.len() }).map_err(pyerr)?),
+            ).map_err(pyerr)?,
+        })
     }
 
     /// Sort by value (pandas `sort_values`), stable; `na_position` places the
     /// missing values `'last'` (default) or `'first'`; the index follows.
     #[pyo3(signature = (ascending = true, na_position = "last"))]
     pub(crate) fn sort_values(&self, ascending: bool, na_position: &str) -> PyResult<PySeries> {
-        let perm = self.inner.data.argsort(ascending);
+        let perm = self.inner.data().argsort(ascending);
         let perm = match na_position {
             "last" => perm,
             "first" => {
                 // argsort sinks NA last; rotate the NA block to the front, both
                 // halves keeping their stable order.
                 let (mut nas, present): (Vec<usize>, Vec<usize>) =
-                    perm.into_iter().partition(|&i| !self.inner.data.is_valid(i));
+                    perm.into_iter().partition(|&i| !self.inner.data().is_valid(i));
                 nas.extend(present);
                 nas
             }
@@ -53,13 +54,13 @@ impl PySeries {
                 )))
             }
         };
-        Ok(self.reindexed(&perm))
+        self.reindexed(&perm)
     }
 
     /// First `n` rows (pandas `head` = `iloc[:n]`, so a negative `n` drops the
     /// last `-n` rows — Python slicing semantics).
     #[pyo3(signature = (n = 5))]
-    pub(crate) fn head(&self, n: isize) -> PySeries {
+    pub(crate) fn head(&self, n: isize) -> PyResult<PySeries> {
         let (a, b) = head_tail_window(n, self.inner.len(), true);
         self.sliced(a, b)
     }
@@ -67,7 +68,7 @@ impl PySeries {
     /// Last `n` rows (pandas `tail` = `iloc[-n:]`, so a negative `n` drops the
     /// first `-n` rows — Python slicing semantics).
     #[pyo3(signature = (n = 5))]
-    pub(crate) fn tail(&self, n: isize) -> PySeries {
+    pub(crate) fn tail(&self, n: isize) -> PyResult<PySeries> {
         let (a, b) = head_tail_window(n, self.inner.len(), false);
         self.sliced(a, b)
     }
@@ -96,7 +97,7 @@ impl PySeries {
         let mut counts: std::collections::HashMap<String, i64> = std::collections::HashMap::new();
         let mut sample: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
         for i in 0..n {
-            let Some(key) = cell_key(&self.inner.data, i) else { continue };
+            let Some(key) = cell_key(self.inner.data(), i) else { continue };
             match counts.get_mut(&key) {
                 Some(c) => *c += 1,
                 None => {
@@ -115,13 +116,13 @@ impl PySeries {
             }
         }
         let positions: Vec<usize> = order.iter().map(|k| sample[k]).collect();
-        let labels = self.inner.data.take(&positions);
-        let index = match &labels {
-            Column::I64(v, _) => Index::int64(v.to_vec()),
-            Column::I32(v, _) => Index::int64(v.iter().map(|&x| x as i64).collect()),
-            Column::Bool(v, _) => Index::int64(v.iter().map(|&b| b as i64).collect()),
-            Column::Str(v, _) => Index::str(v.to_vec()),
-            Column::Datetime(v) => Index::datetime(v.to_vec(), self.inner.index.tz()),
+        let labels = self.inner.data().take(&positions);
+        let index = match labels.view() {
+            ColumnView::I64(v, _) => Index::new(None, volas_core::IndexKind::Int64(v.to_vec())).map_err(pyerr)?,
+            ColumnView::I32(v, _) => Index::new(None, volas_core::IndexKind::Int64(v.iter().map(|&x| x as i64).collect())).map_err(pyerr)?,
+            ColumnView::Bool(v, _) => Index::new(None, volas_core::IndexKind::Int64(v.iter().map(|&b| b as i64).collect())).map_err(pyerr)?,
+            ColumnView::Str(v, _) => Index::new(None, volas_core::IndexKind::Str(v.to_vec())).map_err(pyerr)?,
+            ColumnView::Datetime(v) => Index::new(None, volas_core::IndexKind::Datetime(v.to_vec(), self.inner.index().tz())).map_err(pyerr)?,
             _ => {
                 return Err(PyTypeError::new_err(
                     "value_counts needs discrete labels; volas has no float index — \
@@ -135,16 +136,16 @@ impl PySeries {
         } else {
             Column::i64(order.iter().map(|k| counts[k]).collect())
         };
-        Ok(PySeries { inner: Series::new(None, data, Arc::new(index)) })
+        Ok(PySeries { inner: Series::new(None, data, Arc::new(index)).map_err(pyerr)? })
     }
 
     /// The most frequent value(s), ascending, on a fresh RangeIndex (pandas `mode`).
-    pub(crate) fn mode(&self) -> PySeries {
+    pub(crate) fn mode(&self) -> PyResult<PySeries> {
         let n = self.inner.len();
         let mut counts: std::collections::HashMap<String, i64> = std::collections::HashMap::new();
         let mut sample: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
         for i in 0..n {
-            let Some(key) = cell_key(&self.inner.data, i) else { continue };
+            let Some(key) = cell_key(self.inner.data(), i) else { continue };
             *counts.entry(key.clone()).or_insert(0) += 1;
             sample.entry(key).or_insert(i);
         }
@@ -155,9 +156,9 @@ impl PySeries {
             .map(|(k, _)| sample[k])
             .collect();
         positions.sort_unstable();
-        let data = self.inner.data.take(&positions);
+        let data = self.inner.data().take(&positions);
         let h = positions.len();
-        PySeries { inner: Series::new(self.inner.name.clone(), data, Arc::new(Index::range(h))) }
+        Ok(PySeries { inner: Series::new(self.inner.name().map(str::to_owned), data, Arc::new(Index::new(None, volas_core::IndexKind::Range { start: 0, len: h }).map_err(pyerr)?)).map_err(pyerr)? })
     }
 
     /// The `n` largest values, descending (pandas `nlargest`).
@@ -165,9 +166,9 @@ impl PySeries {
         if n < 0 {
             return Err(PyValueError::new_err("n must be >= 0"));
         }
-        self.inner.data.require_numeric().map_err(pyerr)?;
+        self.inner.data().require_numeric().map_err(pyerr)?;
         let sorted = self.sort_values(false, "last")?;
-        Ok(slice_head(&sorted.inner, n as usize))
+        slice_head(&sorted.inner, n as usize)
     }
 
     /// The `n` smallest values, ascending (pandas `nsmallest`).
@@ -175,46 +176,46 @@ impl PySeries {
         if n < 0 {
             return Err(PyValueError::new_err("n must be >= 0"));
         }
-        self.inner.data.require_numeric().map_err(pyerr)?;
+        self.inner.data().require_numeric().map_err(pyerr)?;
         let sorted = self.sort_values(true, "last")?;
-        Ok(slice_head(&sorted.inner, n as usize))
+        slice_head(&sorted.inner, n as usize)
     }
 
     /// Drop duplicate values, keeping the `keep` occurrence (`'first'` |
     /// `'last'`; pandas `drop_duplicates`).
     #[pyo3(signature = (keep = "first"))]
     pub(crate) fn drop_duplicates(&self, keep: &str) -> PyResult<PySeries> {
-        let dup = duplicated_mask_keep(&self.inner.data, keep)?;
+        let dup = duplicated_mask_keep(self.inner.data(), keep)?;
         let positions: Vec<usize> = (0..self.inner.len()).filter(|&i| !dup[i]).collect();
-        let data = self.inner.data.take(&positions);
-        let index = Arc::new(self.inner.index.take(&positions));
-        Ok(PySeries { inner: Series::new(self.inner.name.clone(), data, index) })
+        let index = Arc::new(self.inner.index().take(&positions).map_err(pyerr)?);
+        let data = self.inner.data().take(&positions);
+        Ok(PySeries { inner: Series::new(self.inner.name().map(str::to_owned), data, index).map_err(pyerr)? })
     }
 
     /// True for each duplicate occurrence other than the `keep` one (`'first'` |
     /// `'last'`; pandas `duplicated`).
     #[pyo3(signature = (keep = "first"))]
     pub(crate) fn duplicated(&self, keep: &str) -> PyResult<PySeries> {
-        Ok(bool_series(&self.inner, duplicated_mask_keep(&self.inner.data, keep)?))
+        bool_series(&self.inner, duplicated_mask_keep(self.inner.data(), keep)?)
     }
 
     /// Whether the values are monotonically non-decreasing, NA-free (pandas).
     #[getter]
     pub(crate) fn is_monotonic_increasing(&self) -> bool {
-        self.inner.data.is_monotonic(true)
+        self.inner.data().is_monotonic(true)
     }
 
     /// Whether the values are monotonically non-increasing, NA-free (pandas).
     #[getter]
     pub(crate) fn is_monotonic_decreasing(&self) -> bool {
-        self.inner.data.is_monotonic(false)
+        self.inner.data().is_monotonic(false)
     }
 
     /// Whether every value is distinct (pandas `is_unique`); NA cells count as
     /// one shared "missing" value.
     #[getter]
     pub(crate) fn is_unique(&self) -> bool {
-        !duplicated_mask_keep(&self.inner.data, "first")
+        !duplicated_mask_keep(self.inner.data(), "first")
             .expect("'first' is valid")
             .iter()
             .any(|&d| d)
@@ -228,19 +229,19 @@ impl PySeries {
         if drop {
             let s = PySeries {
                 inner: Series::new(
-                    self.inner.name.clone(),
-                    self.inner.data.clone(),
-                    Arc::new(Index::range(h)),
-                ),
+                    self.inner.name().map(str::to_owned),
+                    self.inner.data().clone(),
+                    Arc::new(Index::new(None, volas_core::IndexKind::Range { start: 0, len: h }).map_err(pyerr)?),
+                ).map_err(pyerr)?,
             };
             return Ok(Py::new(py, s)?.into_any());
         }
-        let label = self.inner.index.name().unwrap_or("index").to_string();
-        let vname = self.inner.name.clone().unwrap_or_else(|| "0".to_string());
+        let label = self.inner.index().name().unwrap_or("index").to_string();
+        let vname = self.inner.name().map(str::to_owned).unwrap_or_else(|| "0".to_string());
         let df = volas_core::DataFrame::new(
             vec![label, vname],
-            vec![self.inner.index.to_column(), self.inner.data.clone()],
-            Some(Index::range(h)),
+            vec![self.inner.index().to_column(), self.inner.data().clone()],
+            Some(Index::new(None, volas_core::IndexKind::Range { start: 0, len: h }).map_err(pyerr)?),
         )
         .map_err(pyerr)?;
         Ok(Py::new(py, PyDataFrame::plain(df))?.into_any())
@@ -248,36 +249,36 @@ impl PySeries {
 
     /// Sort by index labels (pandas `sort_index`).
     #[pyo3(signature = (ascending = true))]
-    pub(crate) fn sort_index(&self, ascending: bool) -> PySeries {
-        let perm = self.inner.index.argsort(ascending);
-        let data = self.inner.data.take(&perm);
-        let index = Arc::new(self.inner.index.take(&perm));
-        PySeries { inner: Series::new(self.inner.name.clone(), data, index) }
+    pub(crate) fn sort_index(&self, ascending: bool) -> PyResult<PySeries> {
+        let perm = self.inner.index().argsort(ascending);
+        let index = Arc::new(self.inner.index().take(&perm).map_err(pyerr)?);
+        let data = self.inner.data().take(&perm);
+        Ok(PySeries { inner: Series::new(self.inner.name().map(str::to_owned), data, index).map_err(pyerr)? })
     }
 
     /// A copy with a new name (pandas scalar `rename`).
     #[pyo3(signature = (name = None))]
-    pub(crate) fn rename(&self, name: Option<String>) -> PySeries {
-        PySeries {
-            inner: Series::new(name, self.inner.data.clone(), Arc::clone(&self.inner.index)),
-        }
+    pub(crate) fn rename(&self, name: Option<String>) -> PyResult<PySeries> {
+        Ok(PySeries {
+            inner: self.inner.with_name(name),
+        })
     }
 
     /// An independent copy (pandas `copy`; columns are copy-on-write).
-    pub(crate) fn copy(&self) -> PySeries {
-        PySeries { inner: self.inner.clone() }
+    pub(crate) fn copy(&self) -> PyResult<PySeries> {
+        Ok(PySeries { inner: self.inner.clone() })
     }
 
     /// This series as a 1-column DataFrame (pandas `to_frame`).
     #[pyo3(signature = (name = None))]
     pub(crate) fn to_frame(&self, name: Option<String>) -> PyResult<PyDataFrame> {
         let col_name = name
-            .or_else(|| self.inner.name.clone())
+            .or_else(|| self.inner.name().map(str::to_owned))
             .unwrap_or_else(|| "0".to_string());
         let df = volas_core::DataFrame::new(
             vec![col_name],
-            vec![self.inner.data.clone()],
-            Some((*self.inner.index).clone()),
+            vec![self.inner.data().clone()],
+            Some(self.inner.index().as_ref().clone()),
         )
         .map_err(pyerr)?;
         Ok(PyDataFrame::plain(df))

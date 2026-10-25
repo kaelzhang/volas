@@ -261,7 +261,7 @@ impl PyDataFrame {
     /// vacated cells are missing (`volas.NA` for int/bool).
     #[pyo3(signature = (n = 1))]
     pub(crate) fn shift(&self, n: isize) -> PyResult<PyDataFrame> {
-        self.map_cols(|s| Ok(s.shift(n)))
+        self.map_cols(|s| s.shift(n))
     }
     /// Column-wise rank (pandas `rank`); always float.
     #[pyo3(signature = (method = "average", ascending = true, pct = false, na_option = "keep"))]

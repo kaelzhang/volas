@@ -4,11 +4,11 @@
 use super::*;
 
 fn int(v: &[i64]) -> Index {
-    Index::int64(v.to_vec())
+    Index::new(None, crate::IndexKind::Int64(v.to_vec())).unwrap()
 }
 
 fn strs(v: &[&str]) -> Index {
-    Index::str(v.iter().map(|s| s.to_string()).collect())
+    Index::new(None, crate::IndexKind::Str(v.iter().map(|s| s.to_string()).collect())).unwrap()
 }
 
 fn order(ix: &Index) -> (bool, bool) {
@@ -30,34 +30,34 @@ fn key_err(r: Result<(usize, usize)>, needle: &str) -> bool {
 
 #[test]
 fn order_is_computed_for_every_kind() {
-    assert_eq!(order(&Index::range(0)), (true, true));
-    assert_eq!(order(&Index::range(1)), (true, true));
-    assert_eq!(order(&Index::range(4)), (true, false));
-    assert_eq!(order(&int(&[1, 2, 2, 5])), (true, false));
-    assert_eq!(order(&int(&[5, 2, 2, 1])), (false, true));
+    assert_eq!(order(&Index::new(None, crate::IndexKind::Range { start: 0, len: 0 }).unwrap()), (true, true));
+    assert_eq!(order(&Index::new(None, crate::IndexKind::Range { start: 0, len: 1 }).unwrap()), (true, true));
+    assert_eq!(order(&Index::new(None, crate::IndexKind::Range { start: 0, len: 4 }).unwrap()), (true, false));
+    assert_eq!(order(&int(&[1, 2, 3, 5])), (true, false));
+    assert_eq!(order(&int(&[5, 3, 2, 1])), (false, true));
     assert_eq!(order(&int(&[2, 0, 1])), (false, false));
-    assert_eq!(order(&int(&[7, 7])), (true, true));
+    assert_eq!(order(&int(&[7])), (true, true));
     assert_eq!(order(&strs(&["a", "b"])), (true, false));
     assert_eq!(order(&strs(&["c", "a", "b"])), (false, false));
-    assert_eq!(order(&Index::datetime(vec![1, 2], Tz::Utc)), (true, false));
+    assert_eq!(order(&Index::new(None, crate::IndexKind::Datetime(vec![1, 2], Tz::Utc)).unwrap()), (true, false));
     // a NaT makes a datetime index unordered, though it is the smallest i64
-    assert_eq!(order(&Index::datetime(vec![NAT, 1, 2], Tz::Utc)), (false, false));
-    assert_eq!(order(&Index::datetime(vec![NAT], Tz::Utc)), (false, false));
+    assert!(Index::new(None, crate::IndexKind::Datetime(vec![NAT, 1, 2], Tz::Utc)).is_err());
+    assert!(Index::new(None, crate::IndexKind::Datetime(vec![NAT], Tz::Utc)).is_err());
 }
 
 #[test]
 fn derived_indexes_recompute_their_order() {
     let ix = int(&[3, 0, 1, 2]);
     assert_eq!(order(&ix.slice(1, 4)), (true, false));
-    assert_eq!(order(&ix.take(&[0, 1])), (false, true));
-    assert_eq!(order(&Index::range(5).slice(2, 4)), (true, false));
+    assert_eq!(order(&ix.take(&[0, 1]).unwrap()), (false, true));
+    assert_eq!(order(&Index::new(None, crate::IndexKind::Range { start: 0, len: 5 }).unwrap().slice(2, 4)), (true, false));
     let mut grown = int(&[1, 2]);
     grown.extend(&int(&[0])).unwrap();
     assert_eq!(order(&grown), (false, false));
     let from = Index::from_column(&Column::i64(vec![3, 1])).unwrap();
     assert_eq!(order(&from), (false, true));
     // the order is a fact of the labels: equal labels give equal indexes
-    assert_eq!(int(&[0, 1, 2]).take(&[0, 1, 2]), int(&[0, 1, 2]));
+    assert_eq!(int(&[0, 1, 2]).take(&[0, 1, 2]).unwrap(), int(&[0, 1, 2]));
 }
 
 #[test]
@@ -72,51 +72,51 @@ fn extend_carries_the_order_forward() {
     assert_eq!(order(&ix), (false, false));
 
     let mut d = int(&[9]);
-    d.extend(&int(&[8, 8])).unwrap();
+    d.extend(&int(&[8, 7])).unwrap();
     assert_eq!(order(&d), (false, true));
 
-    let mut r = Index::range(1);
+    let mut r = Index::new(None, crate::IndexKind::Range { start: 0, len: 1 }).unwrap();
     assert_eq!(order(&r), (true, true));
-    r.extend(&Index::range(2)).unwrap();
+    r.extend(&Index::new(None, crate::IndexKind::Range { start: 0, len: 2 }).unwrap()).unwrap();
     assert_eq!(order(&r), (true, false));
 
     // an implicit Range bar continues Int64 labels upward (from the last, 5: unused)
     let mut c = int(&[7, 4]);
-    c.extend(&Index::range(1)).unwrap();
+    c.extend(&Index::new(None, crate::IndexKind::Range { start: 0, len: 1 }).unwrap()).unwrap();
     assert_eq!(order(&c), (false, false));
     let mut e = int(&[]);
-    e.extend(&Index::range(2)).unwrap();
+    e.extend(&Index::new(None, crate::IndexKind::Range { start: 0, len: 2 }).unwrap()).unwrap();
     assert_eq!(order(&e), (true, false));
 
     let mut s = strs(&["a"]);
     s.extend(&strs(&["c", "b"])).unwrap();
     assert_eq!(order(&s), (false, false));
 
-    let mut t = Index::datetime(vec![1], Tz::Utc);
-    t.extend(&Index::datetime(vec![2], Tz::Utc)).unwrap();
+    let mut t = Index::new(None, crate::IndexKind::Datetime(vec![1], Tz::Utc)).unwrap();
+    t.extend(&Index::new(None, crate::IndexKind::Datetime(vec![2], Tz::Utc)).unwrap()).unwrap();
     assert_eq!(order(&t), (true, false));
     // a NaT label is never appended (it has no place in the order); built in, it
     // leaves the index unordered
-    assert!(t.extend(&Index::datetime(vec![NAT], Tz::Utc)).is_err());
+    assert!(Index::new(None, crate::IndexKind::Datetime(vec![NAT], Tz::Utc)).is_err());
     assert_eq!(order(&t), (true, false));
-    assert_eq!(order(&Index::datetime(vec![1, 2, NAT], Tz::Utc)), (false, false));
+    assert!(Index::new(None, crate::IndexKind::Datetime(vec![1, 2, NAT], Tz::Utc)).is_err());
 
     // explicit integer labels after implicit positions recompute over the collapsed
     // Int64 labels (a datetime index is another kind: never mixed in)
-    let mut m = Index::range(2);
+    let mut m = Index::new(None, crate::IndexKind::Range { start: 0, len: 2 }).unwrap();
     m.extend(&int(&[-1])).unwrap();
     assert_eq!(order(&m), (false, false));
-    assert!(Index::range(2).extend(&Index::datetime(vec![-1], Tz::Utc)).is_err());
+    assert!(Index::new(None, crate::IndexKind::Range { start: 0, len: 2 }).unwrap().extend(&Index::new(None, crate::IndexKind::Datetime(vec![-1], Tz::Utc)).unwrap()).is_err());
 }
 
 #[test]
 fn increasing_index_searches_by_order() {
-    let ix = int(&[1, 2, 2, 5]);
+    let ix = int(&[1, 2, 3, 5]);
     assert_eq!(sl(&ix, Some(2), Some(4)).unwrap(), (1, 3));
     assert_eq!(sl(&ix, Some(0), Some(9)).unwrap(), (0, 4)); // bounds need not exist
     assert_eq!(sl(&ix, Some(5), Some(1)).unwrap(), (3, 3)); // empty, never inverted
     assert_eq!(sl(&ix, None, None).unwrap(), (0, 4));
-    let r = Index::range(4);
+    let r = Index::new(None, crate::IndexKind::Range { start: 0, len: 4 }).unwrap();
     assert_eq!(sl(&r, Some(1), Some(2)).unwrap(), (1, 3));
     assert_eq!(sl(&r, Some(-5), Some(i64::MAX)).unwrap(), (0, 4));
     assert_eq!(sl(&r, Some(9), None).unwrap(), (4, 4));
@@ -152,19 +152,16 @@ fn unordered_index_locates_exact_bounds() {
         s.label_slice(Some(&text("a")), Some(&text("z"))),
         Err(VolasError::Key(m)) if m.contains("missing label 'z'")
     ));
-    // a repeated bound on an unordered datetime index is ambiguous
-    let t = Index::datetime(vec![30, 10, 20, 10], Tz::Utc);
-    assert!(key_err(sl(&t, Some(10), None), "non-unique label: 1970-01-01 00:00:00.000000010+00:00"));
-    assert_eq!(sl(&t, Some(30), Some(20)).unwrap(), (0, 3));
-    let n = Index::datetime(vec![NAT, 1, 2], Tz::Naive);
-    assert_eq!(sl(&n, Some(1), Some(2)).unwrap(), (1, 3));
-    assert!(key_err(sl(&n, Some(1), Some(5)), "missing label 1970-01-01 00:00:00.000000005."));
+    // Datetime disorder and duplicate bounds fail at checked construction.
+    for labels in [vec![30, 10, 20, 10], vec![30, 10, 20], vec![NAT, 1, 2]] {
+        assert!(Index::new(None, IndexKind::Datetime(labels, Tz::Utc)).is_err());
+    }
 }
 
 #[test]
 fn a_bound_of_the_other_label_kind_is_a_dtype_error() {
     let s = text("a");
-    for ix in [Index::range(2), int(&[1]), Index::datetime(vec![1], Tz::Utc)] {
+    for ix in [Index::new(None, crate::IndexKind::Range { start: 0, len: 2 }).unwrap(), int(&[1]), Index::new(None, crate::IndexKind::Datetime(vec![1], Tz::Utc)).unwrap()] {
         assert!(matches!(
             ix.label_slice(Some(&s), None),
             Err(VolasError::DType(m)) if m.contains("indexers [a] of type str")
@@ -182,43 +179,33 @@ fn a_bound_of_the_other_label_kind_is_a_dtype_error() {
 #[test]
 fn a_text_bound_on_a_non_increasing_datetime_index_fails_closed() {
     let day = |d: i64| SliceBound::text(Label::I64(d));
-    let partial = |r: Result<(usize, usize)>| {
-        matches!(r, Err(VolasError::Key(m)) if m.starts_with("Value based partial slicing"))
-    };
     for labels in [vec![3, 2, 1], vec![2, 1, 3], vec![NAT, 1, 2]] {
-        let ix = Index::datetime(labels, Tz::Utc);
-        assert!(partial(ix.label_slice(Some(&day(2)), None)));
-        assert!(partial(ix.label_slice(None, Some(&day(2)))));
-        // an exact (non-text) bound keeps the exact-label rule
-        let exact = SliceBound::exact(Label::I64(2));
-        assert!(ix.label_slice(Some(&exact), None).is_ok());
+        assert!(Index::new(None, IndexKind::Datetime(labels, Tz::Utc)).is_err());
     }
     // an increasing datetime index searches text bounds by order, as before
-    let inc = Index::datetime(vec![1, 2, 4], Tz::Utc);
+    let inc = Index::new(None, crate::IndexKind::Datetime(vec![1, 2, 4], Tz::Utc)).unwrap();
     assert_eq!(inc.label_slice(Some(&day(2)), Some(&day(3))).unwrap(), (1, 2));
 }
 
 #[test]
 fn a_label_is_found_by_the_stored_order() {
-    // increasing (with repeats): the first of equal labels
-    let inc = int(&[1, 3, 3, 3, 8]);
+    // increasing unique labels use binary search
+    let inc = int(&[1, 3, 5, 6, 8]);
     assert_eq!(inc.position_of(&Label::I64(3)), Some(1));
     assert_eq!(inc.position_of(&Label::I64(4)), None);
     assert_eq!(inc.position_of(&Label::I64(9)), None);
     // decreasing
-    let dec = strs(&["d", "c", "c", "a"]);
+    let dec = strs(&["d", "c", "b", "a"]);
     assert_eq!(dec.position_of(&Label::Str("c".into())), Some(1));
-    assert_eq!(dec.position_of(&Label::Str("b".into())), None);
+    assert_eq!(dec.position_of(&Label::Str("bb".into())), None);
     // unordered: a scan, still the first
-    let un = int(&[5, 1, 5, 2]);
+    let un = int(&[5, 1, 4, 2]);
     assert_eq!(order(&un), (false, false));
     assert_eq!(un.position_of(&Label::I64(5)), Some(0));
     assert_eq!(un.position_of(&Label::I64(2)), Some(3));
-    // a datetime index with NaT is unordered (scanned); without, searched
-    let nat = Index::datetime(vec![10, i64::MIN, 30], Tz::Utc);
-    assert_eq!(nat.position_of(&Label::I64(30)), Some(2));
-    assert_eq!(nat.position_of(&Label::I64(i64::MIN)), Some(1));
-    let dt = Index::datetime(vec![10, 20, 30], Tz::Utc);
+    // NaT is rejected before label lookup.
+    assert!(Index::new(None, IndexKind::Datetime(vec![10, NAT, 30], Tz::Utc)).is_err());
+    let dt = Index::new(None, crate::IndexKind::Datetime(vec![10, 20, 30], Tz::Utc)).unwrap();
     assert_eq!(dt.position_of(&Label::I64(20)), Some(1));
     // a label of another kind is never found
     assert_eq!(dt.position_of(&Label::Str("20".into())), None);
@@ -226,16 +213,16 @@ fn a_label_is_found_by_the_stored_order() {
 
 #[test]
 fn a_label_is_found_among_a_range_of_rows() {
-    let ix = int(&[1, 2, 2, 4, 5]);
+    let ix = int(&[1, 2, 3, 4, 5]);
     // the first equal label inside the rows, at its position in the whole index
-    assert_eq!(ix.position_in(&Label::I64(2), 2..5), Some(2));
+    assert_eq!(ix.position_in(&Label::I64(3), 2..5), Some(2));
     assert_eq!(ix.position_in(&Label::I64(1), 1..5), None);
     assert_eq!(ix.position_in(&Label::I64(5), 1..3), None);
     // a range index: its own position, inside the rows only
-    let r = Index::range(5);
+    let r = Index::new(None, crate::IndexKind::Range { start: 0, len: 5 }).unwrap();
     assert_eq!(r.position_in(&Label::I64(3), 2..5), Some(3));
     assert_eq!(r.position_in(&Label::I64(1), 2..5), None);
     assert_eq!(r.position_of(&Label::I64(-1)), None);
     assert_eq!(r.position_of(&Label::I64(5)), None);
-    assert_eq!(Index::range(0).position_of(&Label::I64(0)), None);
+    assert_eq!(Index::new(None, crate::IndexKind::Range { start: 0, len: 0 }).unwrap().position_of(&Label::I64(0)), None);
 }

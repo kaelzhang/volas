@@ -24,10 +24,17 @@ print(csv)
 19  2020-01-01 00:19:00  327.0  327.2  322.0  323.0  15086985
 ```
 
-> Note that duplicated records of the same timestamp are not cumulated. All
-> records except the latest one are discarded.
+Datetime row labels must strictly increase and contain no NaT. A plain frame
+cannot hold these duplicate timestamps. Normalize the raw rows before promoting
+`date` to the index; the final retransmission is the value of that fine bar.
+For Rust raw feeds, `RawFineInput::new(names, columns, timestamps, tz, index_name)`
+checks non-decreasing, NaT-free input and keeps the last consecutive equal-timestamp
+row. Ingest it with `Cumulator::from_raw` / `append_raw`; the ordinary frame entry
+uses the validated index's stored order fact. In Python, send updates through
+`append`, whose existing replacement / fold rules preserve a legal frame.
 
-Read the same csv, but parse the `date` column into a `DatetimeIndex`:
+After normalizing the raw records to their final row per timestamp, read that csv
+and parse `date` into a `DatetimeIndex`:
 
 ```py
 df = read_csv(
@@ -455,7 +462,9 @@ key is `UTC`. String `"UTC"` and numeric UTC offsets remain fixed specifications
 trading day — DST-aware for a named zone — while the raw `.index` numpy export
 stays UTC (matching pandas `.values`).
 
-Rust callers of `volas_time::aggregate_period` must supply a non-empty,
-nondecreasing DatetimeIndex without NaT, with every bar in the same grid period.
-Duplicate timestamps keep the last bar. Invalid inputs return `VolasError::Value`;
-`Agg::reduce` also rejects empty or out-of-range row selections.
+Rust callers of `volas_time::aggregate_period` must supply a non-empty frame
+with a checked, strictly increasing, NaT-free DatetimeIndex and every bar in the
+same grid period. Duplicate timestamps are accepted only by `RawFineInput`,
+which keeps the last consecutive re-send before checked frame construction.
+Invalid period inputs return `VolasError::Value`; `Agg::reduce` also rejects empty
+or out-of-range row selections.

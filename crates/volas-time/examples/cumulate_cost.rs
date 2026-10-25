@@ -57,7 +57,7 @@ fn measure<T>(name: &str, n: usize, repeat: usize, mut f: impl FnMut() -> T) {
 fn bars(n: usize, step: i64) -> DataFrame {
     let names: Vec<_> = ["open", "high", "low", "close", "volume"].map(String::from).to_vec();
     let columns = names.iter().map(|_| Column::f64((0..n).map(|i| i as f64 + 1.0).collect())).collect();
-    DataFrame::new(names, columns, Some(Index::datetime((0..n).map(|i| i as i64 * step).collect(), Tz::Utc))).unwrap()
+    DataFrame::new(names, columns, Some(Index::new(None, volas_core::IndexKind::Datetime((0..n).map(|i| i as i64 * step).collect(), Tz::Utc)).unwrap())).unwrap()
 }
 
 fn main() {

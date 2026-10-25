@@ -6,6 +6,8 @@ from __future__ import annotations
 
 import math
 
+import numpy as np
+
 import pandas as pd
 import pytest
 
@@ -28,6 +30,21 @@ def test_frame_reductions_match_pandas():
     assert df.quantile(0.5).loc["a"] == pf.quantile(0.5)["a"]
     assert df.idxmax().loc["a"] == 2 and df.idxmin().loc["a"] == 0
     assert bool(df.any().loc["a"]) and bool(df.all().loc["a"])
+
+
+@pytest.mark.parametrize("labels", [
+    None,
+    np.array([30, 10, 20], dtype="int64"),
+    np.array(["c", "a", "b"]),
+    np.array(["2026-01-01", "2026-01-02", "2026-01-03"], dtype="datetime64[ns]"),
+], ids=["range", "integer", "string", "datetime"])
+def test_extreme_labels_are_values_and_may_repeat_or_go_backwards(labels):
+    frame = volas.DataFrame({"a": [1, 9, 3], "b": [4, 2, 1], "c": [0, 9, 8]}, index=labels)
+    original = np.arange(3) if labels is None else labels
+    maximum, minimum = frame.idxmax(), frame.idxmin()
+    np.testing.assert_array_equal(maximum.to_numpy(), original[[1, 0, 1]])
+    np.testing.assert_array_equal(minimum.to_numpy(), original[[0, 2, 0]])
+    assert maximum.index.tolist() == minimum.index.tolist() == ["a", "b", "c"]
 
 
 # --- Series utilities --------------------------------------------------------

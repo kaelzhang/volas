@@ -132,28 +132,31 @@ class TfMachine(FrameMachine):
         after_seed = not self.store.fine
         ts = [self._next(last, 'same', after_seed), self._next(last, 'next', after_seed) + 60 * NS]
         ts[1] = max(ts[1], ts[0] + 60 * NS)  # a frame never repeats a label
-        if kind == 'out_of_order':
-            if not self.store.fine:
-                return
-            ts = [last - 60 * NS, last + 60 * NS]
-            ts.sort(reverse=True)  # the second bar precedes the first: validated before any fold
+
+        def rejected_bar():
+            # Input admission is part of the rejected operation: an invalid
+            # ordinary frame fails before append, under the same atomic snapshot.
+            if kind == 'out_of_order':
+                return build.frame(schema, rows, [last + 60 * NS, last - 60 * NS])
+            if kind == 'nat':
+                from .machine_plain import _nat_index
+                return _nat_index(build.frame(schema, rows[:1], ts[:1]), schema)
+            if kind == 'range_index':
+                return build.frame(schema, rows, None)
             bar = build.frame(schema, rows, ts)
-        elif kind == 'nat':
-            bar = build.frame(schema, rows[:1], ts[:1])
-            from .machine_plain import _nat_index
-            bar = _nat_index(bar, schema)
-        elif kind == 'range_index':
-            bar = build.frame(schema, rows, None)
-        elif kind == 'extra_column':
-            bar = build.frame(schema, rows, ts)
-            bar['zz_extra'] = [0.0] * len(bar)
-        else:
-            # a value the close column cannot hold exactly (the lossless conversion raises)
-            bar = build.frame(schema, rows, ts)
-            bar['close'] = (np.full(len(bar), 2**53 + 1, dtype='int64') if schema.dtype('close') in ('float64', 'float32')
-                            else np.full(len(bar), 0.5))
+            if kind == 'extra_column':
+                bar['zz_extra'] = [0.0] * len(bar)
+            else:
+                # A close value its dtype cannot hold exactly is still rejected
+                # by append's lossless conversion after valid index admission.
+                bar['close'] = (np.full(len(bar), 2**53 + 1, dtype='int64')
+                                if schema.dtype('close') in ('float64', 'float32')
+                                else np.full(len(bar), 0.5))
+            return bar
+
         expect = TypeError if kind == 'dtype' else ValueError
-        self.attempt(lambda: self.df.append(bar), expect_error=expect, label=f'fold rejected {kind}')
+        self.attempt(lambda: self.df.append(rejected_bar()), expect_error=expect,
+                     label=f'fold rejected {kind}')
 
 
     # --- writes (docs/cumulation.md, "Writing to a time-frame frame") ----------------------

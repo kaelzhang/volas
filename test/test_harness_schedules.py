@@ -116,7 +116,19 @@ def test_a_stale_frame_rejects_every_bulk_reader(reader):
     with pytest.raises(ValueError, match='stale'):
         BULK_READERS[reader](df)
     df.fulfill()
-    BULK_READERS[reader](df)
+    invalid_order = False
+    if reader in ('nlargest', 'nsmallest'):
+        values = np.array([row['close'] for row in rows])
+        order = np.argsort(-values if reader == 'nlargest' else values, kind='stable')[:2]
+        labels = np.asarray(index)[order]
+        invalid_order = np.any(labels[1:] <= labels[:-1])
+    if invalid_order:
+        # Freshness is checked first; after refresh, index admission owns
+        # the independent error for a value ordering that reverses time.
+        with pytest.raises(ValueError, match='monotonic'):
+            BULK_READERS[reader](df)
+    else:
+        BULK_READERS[reader](df)
 
 
 def test_windowed_range_index_labels_continue_across_compaction():

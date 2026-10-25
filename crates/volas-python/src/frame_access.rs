@@ -78,7 +78,7 @@ impl PyDataFrame {
         value: &Bound<'_, PyAny>,
     ) -> PyResult<()> {
         // Boolean-mask assignment with a scalar fill: df[mask] = v
-        if let Some(mask) = bool_mask_key(key, || self.meta().labels().index())? {
+        if let Some(mask) = bool_mask_key(key, || Ok(self.meta().labels().index()))? {
             return self.assign_row_mask(&mask.values(), value);
         }
         if let Ok(cond) = key.extract::<PyRef<PyDataFrame>>() {
@@ -93,15 +93,15 @@ impl PyDataFrame {
         let rows = self.logical_range().1;
         let values = if let Ok(s) = value.extract::<PyRef<PySeries>>() {
             match &self.window {
-                None => require_aligned(self.inner.index(), &s.inner.index)?,
+                None => require_aligned(self.inner.index(), s.inner.index())?,
                 Some(_) => self
                     .meta()
                     .labels()
                     .index()
-                    .require_aligned(&s.inner.index)
+                    .require_aligned(s.inner.index())
                     .map_err(pyerr)?,
             }
-            s.inner.data.clone()
+            s.inner.data().clone()
         } else if let Some(one) = scalar_cell(value)? {
             one.take(&vec![0; rows])
         } else {
@@ -141,7 +141,7 @@ impl PyDataFrame {
         // windowed frame's hidden margin is never selectable (a zero-cost borrow
         // when unbounded).
         // boolean mask (Series or numpy)
-        if let Some(mask) = bool_mask_key(key, || self.meta().labels().index())? {
+        if let Some(mask) = bool_mask_key(key, || Ok(self.meta().labels().index()))? {
             let bits = mask.values();
             let height = self.logical_range().1;
             if bits.len() != height
@@ -164,7 +164,7 @@ impl PyDataFrame {
         // result sliced to the logical M view.
         if let Ok(name) = key.extract::<String>() {
             let (resolved, col) = self.materialize_refresh(&name)?;
-            return Ok(Py::new(py, self.present_series(resolved, col))?.into_any());
+            return Ok(Py::new(py, self.present_series(resolved, col)?)?.into_any());
         }
         // list of names / directives — each entry auto-refreshes exactly like the
         // single-name form, so `df[['ma:3']]` and `df['ma:3']` stay consistent.
@@ -373,7 +373,7 @@ impl PyDataFrame {
                 None => 0,
             };
             let retained = volas_core::Retained { from, shown };
-            self.inner.append_retaining(rows, retained).map_err(pyerr)?;
+            self.inner.append_retaining(rows, retained, &volas_directive::Replayer).map_err(pyerr)?;
         }
         self.maybe_compact();
         Ok(())

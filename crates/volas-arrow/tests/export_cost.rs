@@ -53,7 +53,7 @@ fn unknown_and_foreign_nan_facts_are_conservative() {
     let memory = Arc::new(vec![-0f64, f64::NAN]);
     let ptr = NonNull::new(memory.as_ptr() as *mut f64).unwrap();
     // SAFETY: the guard owns an immutable allocation for the entire borrow lifetime.
-    let c = Column::F64(unsafe { Buffer::from_foreign(ptr, 2, memory.clone()) });
+    let c = Column::from_f64_buffer(unsafe { Buffer::from_foreign(ptr, 2, memory.clone()) });
     assert_eq!(volas_arrow::column_to_arrow(&c).null_count(), 1);
     assert_eq!(c.known_has_nan(), None);
     let a = volas_arrow::column_to_arrow(&c);

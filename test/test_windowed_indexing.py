@@ -267,7 +267,12 @@ def test_reset_index(pair):
 def test_sort_index(pair):
     wf, oracle = pair
     _eq_frame(wf.sort_index(), oracle.sort_index())
-    _eq_frame(wf.sort_index(ascending=False), oracle.sort_index(ascending=False))
+    if np.issubdtype(wf.index.dtype, np.datetime64):
+        for source in (wf, oracle):
+            with pytest.raises(ValueError, match='monotonic'):
+                source.sort_index(ascending=False)
+    else:
+        _eq_frame(wf.sort_index(ascending=False), oracle.sort_index(ascending=False))
 
 
 def test_drop_row_label(pair):
@@ -373,8 +378,19 @@ def test_columnwise_transforms_keep_logical_index(pair, op):
 
 def test_nlargest_nsmallest(pair):
     wf, oracle = pair
-    _eq_frame(wf.nlargest(5, 'close'), oracle.nlargest(5, 'close'))
-    _eq_frame(wf.nsmallest(5, 'high'), oracle.nsmallest(5, 'high'))
+    for method, column in [('nlargest', 'close'), ('nsmallest', 'high')]:
+        values = oracle[column].to_numpy()
+        # Determine the selected labels independently of the checked frame API.
+        order = np.argsort(-values if method == 'nlargest' else values, kind='stable')[:5]
+        selected = oracle.index[order]
+        invalid = (np.issubdtype(selected.dtype, np.datetime64)
+                   and np.any(selected[1:] <= selected[:-1]))
+        if invalid:
+            for source in (wf, oracle):
+                with pytest.raises(ValueError, match='monotonic'):
+                    getattr(source, method)(5, column)
+        else:
+            _eq_frame(getattr(wf, method)(5, column), getattr(oracle, method)(5, column))
 
 
 def test_duplicated_and_drop_duplicates(pair):

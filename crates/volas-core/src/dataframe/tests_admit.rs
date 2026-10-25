@@ -21,7 +21,7 @@ fn every_dtype(n: usize, at: i64) -> DataFrame {
             Column::str((0..n).map(|k| format!("s{}", k as i64 + at)).collect()),
             Column::datetime((0..n).map(|k| k as i64 + at).collect()),
         ],
-        Some(Index::int64((0..n as i64).map(|k| 10 * k).collect())),
+        Some(Index::new(None, crate::IndexKind::Int64((0..n as i64).map(|k| 10 * k).collect())).unwrap()),
     )
     .unwrap()
 }
@@ -146,34 +146,36 @@ fn labelled(labels: Index, v: f64) -> DataFrame {
 
 #[test]
 fn string_labels_follow_the_same_rule() {
-    let mut df = labelled(Index::str(vec!["b".into(), "d".into()]), 1.0);
-    df.append(&labelled(Index::str(vec!["d".into()]), 2.0))
+    let mut df = labelled(Index::new(None, crate::IndexKind::Str(vec!["b".into(), "d".into()])).unwrap(), 1.0);
+    df.append(&labelled(Index::new(None, crate::IndexKind::Str(vec!["d".into()])).unwrap(), 2.0))
         .unwrap();
     assert_eq!((df.height(), df.column("x").unwrap().get_f64(1)), (2, 2.0));
     // a label before the last that no row has is appended; one an earlier row has raises
-    df.append(&labelled(Index::str(vec!["c".into()]), 3.0))
+    df.append(&labelled(Index::new(None, crate::IndexKind::Str(vec!["c".into()])).unwrap(), 3.0))
         .unwrap();
     assert_eq!(df.height(), 3);
     let err = df
-        .append(&labelled(Index::str(vec!["b".into()]), 4.0))
+        .append(&labelled(Index::new(None, crate::IndexKind::Str(vec!["b".into()])).unwrap(), 4.0))
         .unwrap_err();
     assert!(err.to_string().contains("\"b\""), "{err}");
     // a batch whose row precedes the one before it without repeating a label is appended
-    df.append(&labelled(Index::str(vec!["z".into(), "y".into()]), 5.0))
+    df.append(&labelled(Index::new(None, crate::IndexKind::Str(vec!["z".into(), "y".into()])).unwrap(), 5.0))
         .unwrap();
     assert_eq!(df.height(), 5);
 }
 
 #[test]
 fn a_datetime_index_only_increases() {
-    let mut df = labelled(Index::datetime(vec![10, 20], Tz::Naive), 1.0);
-    let batch = labelled(Index::datetime(vec![20, 30, 30, 40], Tz::Naive), 2.0);
+    let mut df = labelled(Index::new(None, crate::IndexKind::Datetime(vec![10, 20], Tz::Naive)).unwrap(), 1.0);
+    assert!(Index::new(None, crate::IndexKind::Datetime(vec![50, 45], Tz::Naive)).is_err());
+    assert!(Index::new(None, crate::IndexKind::Datetime(vec![20, 30, 30, 40], Tz::Naive)).is_err());
+    let batch = labelled(Index::new(None, crate::IndexKind::Datetime(vec![20, 30, 40], Tz::Naive)).unwrap(), 2.0);
     df.append(&batch).unwrap();
     assert_eq!(df.height(), 4); // 20 replaced, 30 appended then replaced, 40 appended
                                 // earlier than the last: an error, a new label or not, single or in a batch
-    for labels in [vec![15], vec![20], vec![50, 45]] {
+    for labels in [vec![15], vec![20]] {
         let err = df
-            .append(&labelled(Index::datetime(labels, Tz::Naive), 3.0))
+            .append(&labelled(Index::new(None, crate::IndexKind::Datetime(labels, Tz::Naive)).unwrap(), 3.0))
             .unwrap_err();
         assert!(err.to_string().contains("only increases"), "{err}");
         assert_eq!(df.height(), 4);
@@ -182,26 +184,27 @@ fn a_datetime_index_only_increases() {
 
 #[test]
 fn integer_batches_replace_and_raise_atomically() {
-    let mut df = labelled(Index::int64(vec![10, 20]), 1.0);
-    let batch = labelled(Index::int64(vec![20, 30, 30, 25]), 2.0);
+    let mut df = labelled(Index::new(None, crate::IndexKind::Int64(vec![10, 20])).unwrap(), 1.0);
+    assert!(Index::new(None, crate::IndexKind::Int64(vec![20, 30, 30, 25])).is_err());
+    let batch = labelled(Index::new(None, crate::IndexKind::Int64(vec![20, 30, 25])).unwrap(), 2.0);
     df.append(&batch).unwrap();
     assert_eq!(df.height(), 4); // 20 replaced, 30 appended then replaced, 25 appended
     let before = df.height();
-    let bad = labelled(Index::int64(vec![40, 10]), 3.0);
+    let bad = labelled(Index::new(None, crate::IndexKind::Int64(vec![40, 10])).unwrap(), 3.0);
     let err = df.append(&bad).unwrap_err();
     assert!(err.to_string().contains("10"), "{err}");
     assert_eq!(df.height(), before);
     // after a smaller label, a label above the last can still be an earlier row's:
     // the index stays unique, singly and in a batch
-    df.append(&labelled(Index::int64(vec![5]), 4.0)).unwrap(); // [10, 20, 30, 25, 5]
+    df.append(&labelled(Index::new(None, crate::IndexKind::Int64(vec![5])).unwrap(), 4.0)).unwrap(); // [10, 20, 30, 25, 5]
     for labels in [vec![20], vec![7, 30]] {
-        let err = df.append(&labelled(Index::int64(labels), 5.0)).unwrap_err();
+        let err = df.append(&labelled(Index::new(None, crate::IndexKind::Int64(labels)).unwrap(), 5.0)).unwrap_err();
         assert!(err.to_string().contains("earlier row"), "{err}");
         assert_eq!(df.height(), before + 1);
     }
     // an empty frame takes the rows as they come; a mismatched label kind never compares
-    let mut empty = labelled(Index::int64(vec![]), 0.0);
-    empty.append(&labelled(Index::int64(vec![5]), 1.0)).unwrap();
+    let mut empty = labelled(Index::new(None, crate::IndexKind::Int64(vec![])).unwrap(), 0.0);
+    empty.append(&labelled(Index::new(None, crate::IndexKind::Int64(vec![5])).unwrap(), 1.0)).unwrap();
     assert_eq!(empty.height(), 1);
     assert!(!label_precedes(&Label::I64(1), &Label::Str("a".into())));
 }
@@ -216,7 +219,7 @@ fn a_rejected_column_leaves_every_column_and_the_index_as_they_were() {
     let bad = DataFrame::new(
         bad.names().to_vec(),
         bad.columns().to_vec(),
-        Some(Index::int64(vec![99])),
+        Some(Index::new(None, crate::IndexKind::Int64(vec![99])).unwrap()),
     )
     .unwrap();
     let err = df.append(&bad).unwrap_err();
@@ -226,20 +229,20 @@ fn a_rejected_column_leaves_every_column_and_the_index_as_they_were() {
     let lossy = frame(
         &["i64"],
         vec![Column::f64(vec![2.5])],
-        Index::int64(vec![99]),
+        Index::new(None, crate::IndexKind::Int64(vec![99])).unwrap(),
     );
     assert!(matches!(df.append(&lossy), Err(VolasError::DType(_))));
     let big = frame(
         &["i32"],
         vec![Column::i64(vec![1 << 40])],
-        Index::int64(vec![99]),
+        Index::new(None, crate::IndexKind::Int64(vec![99])).unwrap(),
     );
     assert!(matches!(df.append(&big), Err(VolasError::Overflow(_))));
     assert_eq!(snapshot(&df), before);
     let exact = frame(
         &["i64", "f64"],
         vec![Column::f64(vec![3.0]), Column::i64(vec![4])],
-        Index::int64(vec![99]),
+        Index::new(None, crate::IndexKind::Int64(vec![99])).unwrap(),
     );
     df.append(&exact).unwrap();
     assert_eq!(
@@ -257,43 +260,43 @@ fn a_rejected_index_leaves_the_columns_unchanged() {
     let mut df = frame(
         &["x"],
         vec![Column::f64(vec![1.0, 2.0])],
-        Index::datetime(vec![1, 2], Tz::Utc),
+        Index::new(None, crate::IndexKind::Datetime(vec![1, 2], Tz::Utc)).unwrap(),
     );
     let before = snapshot(&df);
     for bad in [
-        labelled(Index::str(vec!["x".into()]), 3.0),
-        labelled(Index::range(1), 3.0),
-        labelled(Index::int64(vec![3]), 3.0),
-        labelled(Index::datetime(vec![3], Tz::Naive), 3.0),
-        labelled(Index::datetime(vec![i64::MIN], Tz::Utc), 3.0),
-        labelled(Index::range(0), 3.0), // zero rows, but still the wrong kind (A-8)
+        labelled(Index::new(None, crate::IndexKind::Str(vec!["x".into()])).unwrap(), 3.0),
+        labelled(Index::new(None, crate::IndexKind::Range { start: 0, len: 1 }).unwrap(), 3.0),
+        labelled(Index::new(None, crate::IndexKind::Int64(vec![3])).unwrap(), 3.0),
+        labelled(Index::new(None, crate::IndexKind::Datetime(vec![3], Tz::Naive)).unwrap(), 3.0),
+
+        labelled(Index::new(None, crate::IndexKind::Range { start: 0, len: 0 }).unwrap(), 3.0), // zero rows, but still the wrong kind (A-8)
     ] {
         assert!(df.append(&bad).is_err());
         assert_eq!(snapshot(&df), before);
     }
     // the same-label replacement checks the index kind too (A-6)
-    let mut ints = labelled(Index::int64(vec![1, 2, 3]), 1.0);
+    let mut ints = labelled(Index::new(None, crate::IndexKind::Int64(vec![1, 2, 3])).unwrap(), 1.0);
     let before = snapshot(&ints);
     assert!(ints
-        .append(&labelled(Index::datetime(vec![3], Tz::Naive), 9.0))
+        .append(&labelled(Index::new(None, crate::IndexKind::Datetime(vec![3], Tz::Naive)).unwrap(), 9.0))
         .is_err());
     assert_eq!(snapshot(&ints), before);
-    let mut naive = labelled(Index::datetime(vec![1, 2], Tz::Naive), 1.0);
+    let mut naive = labelled(Index::new(None, crate::IndexKind::Datetime(vec![1, 2], Tz::Naive)).unwrap(), 1.0);
     assert!(naive
-        .append(&labelled(Index::datetime(vec![2], Tz::Utc), 9.0))
+        .append(&labelled(Index::new(None, crate::IndexKind::Datetime(vec![2], Tz::Utc)).unwrap(), 9.0))
         .is_err());
     assert_eq!(naive.column("x").unwrap().get_f64(1), 1.0);
     // unlabelled rows continue the labels, never onto an existing one
-    let mut unsorted = labelled(Index::int64(vec![1, 0]), 1.0);
+    let mut unsorted = labelled(Index::new(None, crate::IndexKind::Int64(vec![1, 0])).unwrap(), 1.0);
     let err = unsorted
-        .append(&labelled(Index::range(1), 2.0))
+        .append(&labelled(Index::new(None, crate::IndexKind::Range { start: 0, len: 1 }).unwrap(), 2.0))
         .unwrap_err();
     assert!(err.to_string().contains("already in the index"), "{err}");
     assert_eq!(unsorted.height(), 2);
     // an empty positional frame is still positional: timestamps are another index kind
-    let mut empty = labelled(Index::range(0), 0.0);
+    let mut empty = labelled(Index::new(None, crate::IndexKind::Range { start: 0, len: 0 }).unwrap(), 0.0);
     assert!(empty
-        .append(&labelled(Index::datetime(vec![5], Tz::Utc), 1.0))
+        .append(&labelled(Index::new(None, crate::IndexKind::Datetime(vec![5], Tz::Utc)).unwrap(), 1.0))
         .is_err());
     assert_eq!(empty.height(), 0);
 }
@@ -308,14 +311,14 @@ fn a_rejected_batch_writes_no_row() {
             Column::str(vec!["a".into(), "b".into()]),
             Column::f64(vec![1.0, 2.0]),
         ],
-        Index::int64(vec![1, 2]),
+        Index::new(None, crate::IndexKind::Int64(vec![1, 2])).unwrap(),
     );
     df.set_computed("x", std::sync::Arc::new(()), Reach { lookback: 0, resume: 0, continuation: 0, history: History::Window });
     let before = snapshot(&df);
     let batch = frame(
         &["s", "x"],
         vec![Column::i64(vec![7, 8]), Column::f64(vec![9.0, 10.0])],
-        Index::int64(vec![2, 3]),
+        Index::new(None, crate::IndexKind::Int64(vec![2, 3])).unwrap(),
     );
     assert!(df.append(&batch).is_err());
     assert_eq!(snapshot(&df), before);
@@ -326,14 +329,14 @@ fn cached_directive_columns_are_never_appended() {
     let mut df = frame(
         &["open", "close", "ema:12"],
         vec![Column::f64(vec![1.0]); 3],
-        Index::range(1),
+        Index::new(None, crate::IndexKind::Range { start: 0, len: 1 }).unwrap(),
     );
     df.set_computed("ema:12", std::sync::Arc::new(()), Reach { lookback: 12, resume: 0, continuation: 12, history: History::Window });
     let before = snapshot(&df);
     let rows = frame(
         &["close", "ema:12"],
         vec![Column::f64(vec![2.0]); 2],
-        Index::range(1),
+        Index::new(None, crate::IndexKind::Range { start: 0, len: 1 }).unwrap(),
     );
     let err = df.append(&rows).unwrap_err();
     assert_eq!(
@@ -347,7 +350,7 @@ fn cached_directive_columns_are_never_appended() {
     df.append(&frame(
         &["close"],
         vec![Column::f64(vec![2.0])],
-        Index::range(1),
+        Index::new(None, crate::IndexKind::Range { start: 0, len: 1 }).unwrap(),
     ))
     .unwrap();
     assert!(df.has_stale_computed());
@@ -355,21 +358,21 @@ fn cached_directive_columns_are_never_appended() {
     let mut wide = frame(
         &["a", "b", "c1", "c2"],
         vec![Column::f64(vec![1.0]); 4],
-        Index::range(1),
+        Index::new(None, crate::IndexKind::Range { start: 0, len: 1 }).unwrap(),
     );
     wide.set_computed("c1", std::sync::Arc::new(()), Reach { lookback: 0, resume: 0, continuation: 0, history: History::Window });
     wide.set_computed("c2", std::sync::Arc::new(()), Reach { lookback: 0, resume: 0, continuation: 0, history: History::Window });
     wide.append(&frame(
         &["b"],
         vec![Column::f64(vec![2.0])],
-        Index::range(1),
+        Index::new(None, crate::IndexKind::Range { start: 0, len: 1 }).unwrap(),
     ))
     .unwrap();
     assert!(wide
         .append(&frame(
             &["c2"],
             vec![Column::f64(vec![2.0])],
-            Index::range(1)
+            Index::new(None, crate::IndexKind::Range { start: 0, len: 1 }).unwrap()
         ))
         .is_err());
     assert_eq!(wide.height(), 2);
@@ -383,12 +386,12 @@ fn cached_directive_columns_are_never_appended() {
 
 #[test]
 fn an_extra_column_is_rejected() {
-    let mut df = labelled(Index::range(1), 1.0);
+    let mut df = labelled(Index::new(None, crate::IndexKind::Range { start: 0, len: 1 }).unwrap(), 1.0);
     let err = df
         .append(&frame(
             &["y"],
             vec![Column::f64(vec![2.0])],
-            Index::range(1),
+            Index::new(None, crate::IndexKind::Range { start: 0, len: 1 }).unwrap(),
         ))
         .unwrap_err();
     assert!(
@@ -401,7 +404,7 @@ fn ints(names: &[&str], rows: &[Vec<i64>]) -> DataFrame {
     let cols = (0..names.len())
         .map(|j| Column::i64(rows.iter().map(|r| r[j]).collect()))
         .collect();
-    frame(names, cols, Index::range(rows.len()))
+    frame(names, cols, Index::new(None, crate::IndexKind::Range { start: 0, len: rows.len() }).unwrap())
 }
 
 #[test]
@@ -487,11 +490,11 @@ fn refolding_the_forming_row_is_the_period_reduce() {
 
 #[test]
 fn a_new_row_never_replaces_or_precedes_the_last() {
-    let mut df = labelled(Index::datetime(vec![10, 20], Tz::Utc), 1.0);
+    let mut df = labelled(Index::new(None, crate::IndexKind::Datetime(vec![10, 20], Tz::Utc)).unwrap(), 1.0);
     let before = snapshot(&df);
     for label in [20, 15] {
         let err = df
-            .append_new(&labelled(Index::datetime(vec![label], Tz::Utc), 9.0))
+            .append_new(&labelled(Index::new(None, crate::IndexKind::Datetime(vec![label], Tz::Utc)).unwrap(), 9.0))
             .unwrap_err();
         assert!(
             err.to_string().contains("does not follow the last row"),
@@ -499,15 +502,13 @@ fn a_new_row_never_replaces_or_precedes_the_last() {
         );
         assert_eq!(snapshot(&df), before);
     }
-    assert!(df
-        .append_new(&labelled(Index::datetime(vec![30, 30], Tz::Utc), 9.0))
-        .is_err());
-    df.append_new(&labelled(Index::datetime(vec![30, 40], Tz::Utc), 9.0))
+    assert!(Index::new(None, crate::IndexKind::Datetime(vec![30, 30], Tz::Utc)).is_err());
+    df.append_new(&labelled(Index::new(None, crate::IndexKind::Datetime(vec![30, 40], Tz::Utc)).unwrap(), 9.0))
         .unwrap();
     assert_eq!(df.height(), 4);
-    let mut empty = labelled(Index::datetime(vec![], Tz::Utc), 0.0);
+    let mut empty = labelled(Index::new(None, crate::IndexKind::Datetime(vec![], Tz::Utc)).unwrap(), 0.0);
     empty
-        .append_new(&labelled(Index::datetime(vec![5], Tz::Utc), 1.0))
+        .append_new(&labelled(Index::new(None, crate::IndexKind::Datetime(vec![5], Tz::Utc)).unwrap(), 1.0))
         .unwrap();
     assert_eq!(empty.height(), 1);
 }

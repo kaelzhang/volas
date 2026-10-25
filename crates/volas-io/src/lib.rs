@@ -1,6 +1,8 @@
 //! File readers for volas. Currently a high-performance CSV reader built on the
 //! `csv` crate, with per-column type inference.
 
+#[cfg(test)]
+use volas_core::ColumnView;
 use std::collections::HashSet;
 use std::fmt::Write;
 use std::path::Path;
@@ -90,7 +92,7 @@ impl CsvTable {
             .zip(self.cells)
             .map(|(name, cells)| match dates.iter().find(|(n, _)| n == name) {
                 Some((_, parse)) => date_column(&cells, parse, &na),
-                None => Ok(infer_column(cells, &na)),
+                None => infer_column(cells, &na),
             })
             .collect::<Result<Vec<Column>>>()?;
         DataFrame::new(self.headers, columns, None)
@@ -242,10 +244,10 @@ fn float_prefix(ints: &[i64], cells: &StrBuffer, valid: &Validity) -> Option<Vec
 /// Infer i64 -> f64 -> bool -> str, preserving the original untrimmed strings
 /// on fallback. The final numeric vector is built as the tokens are inspected;
 /// no validation pass followed by a second parse of every token.
-fn infer_column(cells: StrBuffer, na: &HashSet<String>) -> Column {
+fn infer_column(cells: StrBuffer, na: &HashSet<String>) -> Result<Column> {
     let n = cells.len();
     if n == 0 {
-        return Column::Str(cells, Validity::dense());
+        return Column::from_str_buffer(cells, Validity::dense());
     }
     let mut inferred = Inferred::Pending;
     let mut valid = Validity::dense();
@@ -253,7 +255,7 @@ fn infer_column(cells: StrBuffer, na: &HashSet<String>) -> Column {
     for (i, cell) in cells.iter().enumerate() {
         let t = cell.trim();
         if na.contains(t) {
-            valid.set(i, n, false);
+            valid.set(i, n, false)?;
             inferred.missing();
             continue;
         }
@@ -308,10 +310,10 @@ fn infer_column(cells: StrBuffer, na: &HashSet<String>) -> Column {
         };
     }
     match inferred {
-        Inferred::Int(v) => Column::i64_with(v, valid).expect("CSV validity covers every row"),
-        Inferred::Pending => Column::f64(vec![f64::NAN; n]),
-        Inferred::Float(v) => Column::f64(v),
-        Inferred::Bool(v) => Column::bool_with(v, valid).expect("CSV validity covers every row"),
+        Inferred::Int(v) => Column::i64_with(v, valid),
+        Inferred::Pending => Ok(Column::f64(vec![f64::NAN; n])),
+        Inferred::Float(v) => Ok(Column::f64(v)),
+        Inferred::Bool(v) => Column::bool_with(v, valid),
         Inferred::Text => {
             // Keep the original text, but normalize missing payloads to the same
             // empty spans as the nullable string constructor.
@@ -320,7 +322,7 @@ fn infer_column(cells: StrBuffer, na: &HashSet<String>) -> Column {
             } else {
                 cells
             };
-            Column::Str(cells, valid)
+            Column::from_str_buffer(cells, valid)
         }
     }
 }
@@ -352,7 +354,7 @@ mod tests {
     }
 
     fn infer(cells: &[&str]) -> Column {
-        infer_column(cells.iter().copied().collect(), &default_na())
+        infer_column(cells.iter().copied().collect(), &default_na()).unwrap()
     }
 
     #[test]
@@ -370,7 +372,7 @@ mod tests {
             vec!["NA", "1", "true"],
         ] {
             let c = infer(&tokens);
-            let Column::Str(text, val) = c else { panic!("expected text") };
+            let ColumnView::Str(text, val) = c.view() else { panic!("expected text") };
             for (i, token) in tokens.iter().enumerate() {
                 if *token == "NA" {
                     assert!(!val.is_valid(i));
@@ -399,8 +401,8 @@ mod tests {
         // F35: an integral column with NA tokens stays int64 + validity (the
         // native-NA model, matching the constructor) — no legacy float demotion.
         for cells in [&["1", "", "3"][..], &["1", "NA", "null"][..]] {
-            match infer(cells) {
-                Column::I64(v, val) => {
+            match infer(cells).view() {
+                ColumnView::I64(v, val) => {
                     assert_eq!(v[0], 1);
                     assert!(!val.is_valid(1));
                 }
@@ -414,22 +416,22 @@ mod tests {
         // a str column marks NA tokens (blank / NA / null) as missing via validity,
         // keeping present cells — so a parse_dates column with blanks -> NaT.
         let c = infer(&["x", "", "z", "NA"]);
-        assert!(matches!(c, Column::Str(..)));
+        assert!(matches!(c.view(), ColumnView::Str(..)));
         assert!(c.is_valid(0) && !c.is_valid(1) && c.is_valid(2) && !c.is_valid(3));
     }
 
     #[test]
     fn all_na_column_is_f64_all_nan() {
-        match infer(&["NA", "null", ""]) {
-            Column::F64(v) => assert!(v.iter().all(|x| x.is_nan())),
+        match infer(&["NA", "null", ""]).view() {
+            ColumnView::F64(v) => assert!(v.iter().all(|x| x.is_nan())),
             other => panic!("expected F64, got {other:?}"), // LCOV_EXCL_LINE
         }
     }
 
     #[test]
     fn scientific_and_negative_are_f64() {
-        match infer(&["-1.5", "1e3"]) {
-            Column::F64(v) => assert_eq!(v.to_vec(), vec![-1.5, 1000.0]),
+        match infer(&["-1.5", "1e3"]).view() {
+            ColumnView::F64(v) => assert_eq!(v.to_vec(), vec![-1.5, 1000.0]),
             other => panic!("expected F64, got {other:?}"), // LCOV_EXCL_LINE
         }
     }
@@ -448,21 +450,21 @@ mod tests {
         assert_eq!(col.dtype(), volas_core::DType::Bool);
         assert!(col.is_valid(0) && !col.is_valid(1) && col.as_bool().unwrap() == [true, false, false]);
         let na: HashSet<String> = ["True".to_string()].into();
-        let col = infer_column(["True", "False"].into_iter().collect(), &na);
+        let col = infer_column(["True", "False"].into_iter().collect(), &na).unwrap();
         assert!(!col.is_valid(0) && !col.as_bool().unwrap()[1]);
     }
 
     #[test]
     fn integers_float64_cannot_hold_stay_text() {
         // past int64, and past 2^53 next to a float: never rounded
-        assert!(matches!(infer(&["9223372036854775809"]), Column::Str(..)));
-        assert!(matches!(infer(&["9007199254740993", "1.5"]), Column::Str(..)));
+        assert!(matches!(infer(&["9223372036854775809"]).view(), ColumnView::Str(..)));
+        assert!(matches!(infer(&["9007199254740993", "1.5"]).view(), ColumnView::Str(..)));
         // exact integer literals (any spelling) next to a float are float64
         assert!(infer(&["9007199254740992", "-007", "+0", "1.5", "18446744073709551616"])
             .equals(&Column::f64(vec![9007199254740992.0, -7.0, 0.0, 1.5, 18446744073709551616.0])));
         // a `nan` spelling that is not an NA token is text
         let na: HashSet<String> = HashSet::new();
-        assert!(matches!(infer_column(["1", "nan"].into_iter().collect(), &na), Column::Str(..)));
+        assert!(matches!(infer_column(["1", "nan"].into_iter().collect(), &na).unwrap().view(), ColumnView::Str(..)));
         assert_eq!(float_token("-", &mut String::new()), None);
         assert_eq!(float_token("1e3", &mut String::new()), Some(1000.0));
     }
@@ -478,7 +480,7 @@ mod tests {
     #[test]
     fn empty_column_is_str() {
         assert_eq!(
-            infer_column(StrBuffer::from_vec(Vec::new()), &default_na()),
+            infer_column(StrBuffer::from_vec(Vec::new()), &default_na()).unwrap(),
             Column::str(Vec::new())
         );
     }
@@ -490,8 +492,8 @@ mod tests {
             ..Default::default()
         });
         // "NA" is no longer missing -> the column is object/string, not float.
-        match infer_column(["1", "NA"].into_iter().collect(), &na) {
-            Column::Str(v, _) => assert_eq!(v.to_vec(), vec!["1".to_string(), "NA".to_string()]),
+        match infer_column(["1", "NA"].into_iter().collect(), &na).unwrap().view() {
+            ColumnView::Str(v, _) => assert_eq!(v.to_vec(), vec!["1".to_string(), "NA".to_string()]),
             other => panic!("expected Str, got {other:?}"), // LCOV_EXCL_LINE
         }
     }
@@ -502,8 +504,8 @@ mod tests {
             na_values: vec!["MISSING".into()],
             ..Default::default()
         });
-        match infer_column(["1", "MISSING"].into_iter().collect(), &na) {
-            Column::I64(v, val) => {
+        match infer_column(["1", "MISSING"].into_iter().collect(), &na).unwrap().view() {
+            ColumnView::I64(v, val) => {
                 assert_eq!(v[0], 1);
                 assert!(!val.is_valid(1));          // F35: custom NA token -> int64 + NA
             }

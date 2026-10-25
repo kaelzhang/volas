@@ -358,10 +358,10 @@ fn unchanged_missing_float_folds_keep_shared_buffers_and_facts() {
             col.combine_at(3, op, &input, 0).unwrap();
             assert_eq!(col.known_has_nonfinite(), Some(true), "{op:?}");
             assert_eq!(col.known_has_nan(), Some(true), "{op:?}");
-            if let (Column::F64(a), Column::F64(b)) = (&col, &snapshot) {
+            if let (Column { data: ColumnData::F64(a) }, Column { data: ColumnData::F64(b) }) = (&col, &snapshot) {
                 assert_eq!(a.as_ptr(), b.as_ptr(), "{op:?}");
             }
-            if let (Column::F32(a), Column::F32(b)) = (&col, &snapshot) {
+            if let (Column { data: ColumnData::F32(a) }, Column { data: ColumnData::F32(b) }) = (&col, &snapshot) {
                 assert_eq!(a.as_ptr(), b.as_ptr(), "{op:?}");
             }
         }

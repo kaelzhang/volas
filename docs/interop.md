@@ -21,7 +21,9 @@ how a missing value crosses into pandas — see
 breakdown.
 
 `from_pandas` keeps index labels and their name, including non-default
-`RangeIndex` labels and frames containing only an index. Column labels become
+`RangeIndex` labels and frames containing only an index. Import checks labels:
+datetime labels must strictly increase without NaT, and integer/string labels
+must be unique; invalid inputs raise `ValueError`. Column labels become
 strings; labels that collide after stringification (such as `1` and `'1'`) raise
 `ValueError`. Signed int32 extension columns, including `int32[pyarrow]`, keep
 int32 width. The `numpy_nullable` backend exports text as pandas `string` with

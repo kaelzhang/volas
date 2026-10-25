@@ -10,6 +10,8 @@
 //! imported column or view survives. Conversion layouts still copy.
 //! Exports share read-only data buffers; bool and validity are repacked.
 
+#[cfg(test)]
+use volas_core::ColumnView;
 use std::any::Any;
 use std::panic::RefUnwindSafe;
 use std::ptr::NonNull;
@@ -139,14 +141,14 @@ mod tests {
         // same for f32 (export null + the f32-with-nulls import branch)
         let f32 = column_to_arrow(&Column::f32(vec![1.5, f32::NAN]));
         assert_eq!(f32.null_count(), 1);
-        match column_from_arrow(&f32).unwrap() {
-            Column::F32(b) => assert!(b[1].is_nan() && b[0] == 1.5),
+        match column_from_arrow(&f32).unwrap().view() {
+            ColumnView::F32(b) => assert!(b[1].is_nan() && b[0] == 1.5),
             _ => unreachable!(), // LCOV_EXCL_LINE
         }
         // a dense (null-free) f32 imports via the borrow branch
         let dense_f32: ArrayRef = Arc::new(arrow_array::Float32Array::from(vec![1.0f32, 2.0]));
-        match column_from_arrow(&dense_f32).unwrap() {
-            Column::F32(b) => assert_eq!(&b[..], &[1.0, 2.0]),
+        match column_from_arrow(&dense_f32).unwrap().view() {
+            ColumnView::F32(b) => assert_eq!(&b[..], &[1.0, 2.0]),
             _ => unreachable!(), // LCOV_EXCL_LINE
         }
     }
@@ -174,8 +176,8 @@ mod tests {
     #[test]
     fn str_roundtrip_borrows_the_byte_buffer() {
         let col = Column::str_with(vec!["alpha".into(), "".into(), "ω".into()], na_at(3, &[1])).unwrap();
-        let data_ptr = match &col {
-            Column::Str(sb, _) => sb.buffers().1.as_ptr(),
+        let data_ptr = match col.view() {
+            ColumnView::Str(sb, _) => sb.buffers().1.as_ptr(),
             _ => unreachable!(), // LCOV_EXCL_LINE
         };
         let arr = column_to_arrow(&col);
@@ -332,8 +334,8 @@ mod tests {
         );
         // a typeless `Null` column carries no dtype → an all-NA f64 column.
         let nulls: ArrayRef = Arc::new(NullArray::new(3));
-        match column_from_arrow(&nulls).unwrap() {
-            Column::F64(b) => assert!(b.len() == 3 && b.iter().all(|x| x.is_nan())),
+        match column_from_arrow(&nulls).unwrap().view() {
+            ColumnView::F64(b) => assert!(b.len() == 3 && b.iter().all(|x| x.is_nan())),
             _ => unreachable!(), // LCOV_EXCL_LINE
         }
     }
@@ -364,8 +366,8 @@ mod tests {
         let full = LargeStringArray::from(vec!["aa", "bbb", "cccc", "d"]);
         let sliced: ArrayRef = Arc::new(full.slice(1, 2)); // ["bbb", "cccc"] — a middle slice
         let col = column_from_arrow(&sliced).unwrap();
-        let mut sb: StrBuffer = match col {
-            Column::Str(sb, _) => sb,
+        let mut sb: StrBuffer = match col.view() {
+            ColumnView::Str(sb, _) => sb.clone(),
             _ => unreachable!(), // LCOV_EXCL_LINE
         };
         assert_eq!(sb.iter().collect::<Vec<_>>(), ["bbb", "cccc"]); // reads correct
@@ -390,7 +392,7 @@ mod tests {
             // SAFETY: `array`/`schema` are a fresh, valid C-Data pair from `to_ffi`.
             let back = unsafe { column_from_c_data(array, &schema).unwrap() };
             // floats carry NaN, which `!=` itself — compare via dtype + null structure there
-            if matches!(col, Column::F64(_)) {
+            if matches!(col.view(), ColumnView::F64(_)) {
                 assert!(back.as_f64().unwrap()[1].is_nan());
                 assert_eq!(back.as_f64().unwrap()[0], 1.0);
             } else {
@@ -465,15 +467,15 @@ mod tests {
     #[test]
     fn f32_roundtrip_is_zero_copy() {
         let col = Column::f32(vec![1.5, f32::NAN, 3.5]);
-        let src = match &col {
-            Column::F32(b) => b.as_ptr(),
+        let src = match col.view() {
+            ColumnView::F32(b) => b.as_ptr(),
             _ => unreachable!(), // LCOV_EXCL_LINE
         };
         let arr = column_to_arrow(&col);
         assert_eq!(arr.as_primitive::<arrow_array::types::Float32Type>().values().as_ptr(), src);
         let back = column_from_arrow(&arr).unwrap();
-        match &back {
-            Column::F32(b) => {
+        match back.view() {
+            ColumnView::F32(b) => {
                 assert_eq!(b[0], 1.5);
                 assert!(b[1].is_nan());
             }
@@ -481,8 +483,8 @@ mod tests {
         }
         // an external f32 null bitmap collapses to NaN
         let ext: ArrayRef = Arc::new(arrow_array::Float32Array::from(vec![Some(2.0), None]));
-        match column_from_arrow(&ext).unwrap() {
-            Column::F32(b) => assert!(b[1].is_nan()),
+        match column_from_arrow(&ext).unwrap().view() {
+            ColumnView::F32(b) => assert!(b[1].is_nan()),
             _ => unreachable!(), // LCOV_EXCL_LINE
         }
     }
@@ -567,7 +569,7 @@ mod tests {
             )
         };
         let col = column_from_arrow(&(Arc::new(arr) as ArrayRef)).unwrap();
-        let Column::Str(sb, validity) = &col else { unreachable!() }; // LCOV_EXCL_LINE
+        let ColumnView::Str(sb, validity) = col.view() else { unreachable!() }; // LCOV_EXCL_LINE
         let (offsets, data) = sb.buffers();
         for w in offsets.as_slice().windows(2) {
             let span = &data.as_slice()[w[0] as usize..w[1] as usize];

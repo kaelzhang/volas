@@ -10,8 +10,8 @@
 //! by steps that cannot fail on admitted rows. So a rejected row set leaves the frame
 //! exactly as it was: columns, index, validity and cache cursors.
 
+use crate::column::ColumnData;
 use std::borrow::Cow;
-use std::collections::HashSet;
 use std::sync::Arc;
 
 use crate::column::Column;
@@ -19,7 +19,7 @@ use crate::column::CombineOp;
 use crate::error::{Result, VolasError};
 use crate::index::{IndexKind, Label};
 
-use super::DataFrame;
+use super::{DataFrame, Replay};
 
 /// The rows a frame keeps (see [`DataFrame::append_retaining`]): those from `from` on
 /// are retained, those from `shown` on are visible.
@@ -32,13 +32,14 @@ pub struct Retained {
 }
 
 /// What [`DataFrame::append`] does with each admitted row.
+#[derive(Clone, Copy)]
 enum Route {
     /// Every row is appended (no label repeats the last).
     Append,
     /// The one row replaces the current last row (the live re-sent bar).
     ReplaceLast,
-    /// Per row: `true` replaces the current last row, `false` appends.
-    Rows(Vec<bool>),
+    /// The first incoming row replaces the last, and every remaining row appends.
+    ReplaceThenAppend,
 }
 
 /// Rows admitted for a frame (`DataFrame::admit_rows`), with whether they carry its
@@ -185,7 +186,8 @@ impl DataFrame {
     /// decided before the first write, so on an error the frame is unchanged. Deciding
     /// a datetime row is O(1); an integer / string row looks its label up.
     pub fn append(&mut self, other: &DataFrame) -> Result<()> {
-        self.append_retaining(other, Retained { from: 0, shown: 0 })
+        let admitted = self.admit_rows(other)?;
+        self.commit_rows(&admitted.rows, admitted.leads, Retained { from: 0, shown: 0 })
     }
 
     /// [`append`](Self::append) to a frame that retains only its rows from
@@ -193,9 +195,38 @@ impl DataFrame {
     /// rows before count as dropped, whenever they are physically compacted) and shows
     /// them from `retained.shown` on: an integer / string label stays unique over the
     /// retained rows only, and a clash with a retained but hidden row says so.
-    pub fn append_retaining(&mut self, other: &DataFrame, retained: Retained) -> Result<()> {
+    /// Reusing a dropped label physically compacts that prefix through `replay`
+    /// before the new rows are committed, so even physical indexes stay unique.
+    pub fn append_retaining(&mut self, other: &DataFrame, retained: Retained, replay: &dyn Replay) -> Result<()> {
+        if retained.from > retained.shown || retained.shown > self.height {
+            return Err(VolasError::Shape("retained rows must satisfy from <= shown <= frame height".into()));
+        }
         let admitted = self.admit_rows(other)?;
-        self.commit_rows(&admitted.rows, admitted.leads, retained)
+        let route = self.route(&admitted.rows, retained)?;
+        let appends = match route {
+            Route::ReplaceLast => return self.write_last_row(&admitted.rows, 0, admitted.leads),
+            Route::ReplaceThenAppend => Cow::Owned(admitted.rows.slice_data(1, admitted.rows.height)),
+            Route::Append => Cow::Borrowed(admitted.rows.as_ref()),
+        };
+        if !self.index.reuses_dropped_labels(&appends.index, retained.from) {
+            return self.commit_route(&admitted.rows, admitted.leads, route);
+        }
+        // A reused label cannot coexist with its dropped physical predecessor.
+        // Compact through the derivation owner, keeping recursive checkpoints,
+        // on a candidate so a rejected commit leaves the original untouched.
+        let rows = match self.index.explicit_continuation(&admitted.rows.index)? {
+            Some(index) => Cow::Owned(admitted.rows.same_schema(admitted.rows.columns.clone(), index, admitted.rows.origin)),
+            None => Cow::Borrowed(admitted.rows.as_ref()),
+        };
+        let mut candidate = self.clone();
+        let from = match route {
+            Route::ReplaceThenAppend => retained.from.min(self.height - 1),
+            _ => retained.from,
+        };
+        candidate.compact_tail(self.height - from, replay);
+        candidate.commit_route(&rows, admitted.leads, route)?;
+        *self = candidate;
+        Ok(())
     }
 
     /// [`append`](Self::append) of rows already admitted against a frame with this
@@ -210,18 +241,20 @@ impl DataFrame {
     /// Route admitted rows (`leads`: they carry this frame's leading columns) by label
     /// and write them.
     fn commit_rows(&mut self, rows: &DataFrame, leads: bool, retained: Retained) -> Result<()> {
-        match self.route(rows, retained)? {
+        let route = self.route(rows, retained)?;
+        self.commit_route(rows, leads, route)
+    }
+
+    fn commit_route(&mut self, rows: &DataFrame, leads: bool, route: Route) -> Result<()> {
+        match route {
             Route::Append => self.push_rows(rows, leads),
             Route::ReplaceLast => self.write_last_row(rows, 0, leads),
-            Route::Rows(replaces) => {
-                for (k, replace) in replaces.into_iter().enumerate() {
-                    if replace {
-                        self.write_last_row(rows, k, leads)?;
-                    } else {
-                        self.push_rows(&rows.slice_data(k, k + 1), leads)?;
-                    }
-                }
-                Ok(())
+            Route::ReplaceThenAppend => {
+                // Validate the append's index before replacing any values.
+                let tail = rows.slice_data(1, rows.height);
+                self.index.check_extension(&tail.index)?;
+                self.write_last_row(rows, 0, leads)?;
+                self.push_rows(&tail, leads)
             }
         }
     }
@@ -282,53 +315,35 @@ impl DataFrame {
                 return Ok(Route::Append);
             }
         }
-        let mut replaces = Vec::with_capacity(rows.height);
-        // Ordered labels can repeat only next to each other (the replacement
-        // case below). Otherwise remember the incoming labels once, rather than
-        // looking through the whole preceding batch for every row.
-        let mut seen = (!datetime && !rows.index.labels_are_ordered())
-            .then(|| HashSet::with_capacity(rows.height));
-        for k in 0..rows.height {
+        // The input Index is unique: only its first row can replace the
+        // target's last row. Raw consecutive re-sends belong to cumulation.
+        let first_replaces = self.height > 0 && rows.height > 0
+            && rows.index.label_at(0) == self.index.label_at(self.height - 1);
+        for k in usize::from(first_replaces)..rows.height {
             let label = rows.index.label_at(k);
-            let prev = if k > 0 {
-                Some(rows.index.label_at(k - 1))
-            } else {
-                self.height.checked_sub(1).map(|i| self.index.label_at(i))
-            };
-            let replace = prev.as_ref() == Some(&label);
-            if !replace && datetime && prev.as_ref().is_some_and(|p| label_precedes(&label, p)) {
+            if datetime {
+                if self.height > 0 && label_precedes(&label, &self.index.label_at(self.height - 1)) {
+                    return Err(VolasError::Value(format!(
+                        "cannot append a row labelled {}: a datetime index only increases (only the last row can be replaced)",
+                        label_text(&label)
+                    )));
+                }
+                break; // the incoming index already proves every later row increases
+            }
+            if let Some(held) = held(&label) {
+                if held < retained.shown {
+                    return Err(VolasError::Value(format!(
+                        "cannot append label {}: an earlier row with that label is still retained in the window's hidden margin (max_lookback)",
+                        label_text(&label)
+                    )));
+                }
                 return Err(VolasError::Value(format!(
-                    "cannot append a row labelled {}: a datetime index only increases \
-                     (only the last row can be replaced)",
+                    "cannot append a row labelled {}: an earlier row has that label (only the last row can be replaced)",
                     label_text(&label)
                 )));
             }
-            let seen_before = seen.as_mut().is_some_and(|seen| !seen.insert(label.clone()));
-            if !replace && !datetime {
-                let held = held(&label);
-                if held.is_some_and(|p| p < retained.shown) {
-                    return Err(VolasError::Value(format!(
-                        "cannot append label {}: an earlier row with that label is still \
-                         retained in the window's hidden margin (max_lookback)",
-                        label_text(&label)
-                    )));
-                }
-                let earlier = held.is_some() || seen_before;
-                if earlier {
-                    return Err(VolasError::Value(format!(
-                        "cannot append a row labelled {}: an earlier row has that label \
-                         (only the last row can be replaced)",
-                        label_text(&label)
-                    )));
-                }
-            }
-            replaces.push(replace);
         }
-        Ok(if replaces.contains(&true) {
-            Route::Rows(replaces)
-        } else {
-            Route::Append
-        })
+        Ok(if first_replaces { Route::ReplaceThenAppend } else { Route::Append })
     }
 
     /// Append admitted rows (see `admit_rows`) at the end — the commit step:
@@ -529,7 +544,7 @@ impl DataFrame {
         }
         for &(dst_col, src_col, _) in ops {
             let from = &src.columns[src_col];
-            if matches!(from, Column::F64(_) | Column::F32(_)) || from.is_valid(0) {
+            if matches!(from, Column { data: ColumnData::F64(_) } | Column { data: ColumnData::F32(_) }) || from.is_valid(0) {
                 self.columns[dst_col].set_last_from(from, 0)?;
             } else {
                 self.columns[dst_col].set_last_na();
@@ -660,7 +675,7 @@ fn label_text(label: &Label) -> String {
 /// float bar): a float column of the source's own dtype takes every aggregation.
 #[inline]
 fn cannot_fail(dst: &Column, src: &Column) -> bool {
-    dst.dtype().is_float() && std::mem::discriminant(dst) == std::mem::discriminant(src)
+    dst.dtype().is_float() && dst.dtype() == src.dtype()
 }
 
 #[cfg(test)]

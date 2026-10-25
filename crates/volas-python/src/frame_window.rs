@@ -42,7 +42,7 @@ fn frame_window(
 ) -> PyResult<PyDataFrame> {
     let wrapper = PyDataFrame::plain(frame.clone());
     wrapper.map_cols(|s| {
-        s.inner.data.require_numeric().map_err(pyerr)?;
+        s.inner.data().require_numeric().map_err(pyerr)?;
         op(s)
     })
 }

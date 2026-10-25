@@ -10,12 +10,12 @@
 //! lossless common dtype (never rounded, never made missing), and a replacement whose
 //! dtype cannot hold the lead's values exactly is refused before it is written.
 
+use crate::column::ColumnData;
 use std::sync::Arc;
 
 use crate::column::Column;
 use crate::error::{Result, VolasError};
 use crate::fxhash::FxHashMap;
-use crate::index::Index;
 
 use super::{ComputedMeta, DataFrame, History};
 
@@ -45,7 +45,7 @@ fn join(head: Column, tail: &Column) -> Result<Column> {
     let mut out = match a == b {
         true => head,
         false => {
-            let numeric = |c: &Column| c.dtype().is_numeric() || matches!(c, Column::Bool(..));
+            let numeric = |c: &Column| c.dtype().is_numeric() || matches!(c, Column { data: ColumnData::Bool(..) });
             if !numeric(&head) || !numeric(tail) {
                 return Err(VolasError::DType(format!("{a} and {b} values have no common dtype")));
             }
@@ -170,7 +170,7 @@ impl DataFrame {
                 let values = crate::buffer::Buffer::from_shared_known_range(
                     Arc::clone(&owner), range, clean, finite,
                 ).expect("copied prefix slab range");
-                Column::F64(values)
+                Column { data: ColumnData::F64(values) }
             };
             let from = if i < raw { i * (rows + lead_rows) } else { i * rows + raw * lead_rows };
             let visible = if i < raw { from + lead_rows } else { from };
@@ -208,7 +208,7 @@ impl DataFrame {
                         Arc::clone(&owner), range, col.known_has_nan() == Some(false),
                         col.known_has_nonfinite() == Some(false),
                     ).expect("copied lead slab range");
-            Column::F64(buffer)
+            Column { data: ColumnData::F64(buffer) }
         })).collect();
         let lead = Lead { name_to_idx: Arc::clone(&self.name_to_idx), columns, height: rows, from: 0, to: rows };
         (owner, Some(lead))
@@ -242,7 +242,7 @@ impl DataFrame {
             return Some(Lead { name_to_idx, columns, height: self.height, from: start - own, to: start });
         }
         if older == 0 && data_count > 1
-            && self.columns.iter().all(|col| matches!(col, Column::F64(_)))
+            && self.columns.iter().all(|col| matches!(col, Column { data: ColumnData::F64(_) }))
         {
             // One bounded copy for the raw float lead, not a separate Vec and Arc
             // per column. The visible columns remain independent value copies.
@@ -260,7 +260,7 @@ impl DataFrame {
                     offset += own;
                     let buffer = crate::buffer::Buffer::from_shared_range(Arc::clone(&owner), from..offset)
                         .expect("copied slab range");
-                    Column::F64(buffer)
+                    Column { data: ColumnData::F64(buffer) }
                 })
             }).collect();
             return Some(Lead { name_to_idx, columns, height: own, from: 0, to: own });
@@ -300,7 +300,7 @@ impl DataFrame {
     /// lead. Every numeric widening is exact by dtype except int64 into float64;
     /// only that pair scans present cells, with no conversion or allocation.
     pub(super) fn check_lead_values(&self, name: &str, col: &Column, from: usize, end: usize) -> Result<()> {
-        let Column::I64(values, valid) = col else { return Ok(()) };
+        let Column { data: ColumnData::I64(values, valid) } = col else { return Ok(()) };
         let Some(held) = self.lead.as_ref().filter(|lead| lead.len() > 0).and_then(|lead| lead.column(name)) else {
             return Ok(());
         };
@@ -322,7 +322,7 @@ impl DataFrame {
         cells: impl IntoIterator<Item = (&'a Column, usize)>,
     ) -> Result<()> {
         let value = dst.checked_fold_value(row, op, restart, cells)?;
-        if let (Column::I64(..), Some(value), Some(lead)) = (dst, value, &self.lead) {
+        if let (Column { data: ColumnData::I64(..) }, Some(value), Some(lead)) = (dst, value, &self.lead) {
             if lead.len() > 0 && crate::numeric::i64_to_f64_exact(value).is_none() {
                 let name = &self.names[col];
                 if lead.column(name).is_some_and(|held| held.dtype().is_float()) {
@@ -374,7 +374,7 @@ impl DataFrame {
             .zip(&frame.columns)
             .map(|(name, col)| join(lead.tail(name, take, col.dtype()), col).expect("checked when the column was written"))
             .collect();
-        DataFrame::new(frame.names.to_vec(), columns, Some(Index::range(take + frame.height)))
+        DataFrame::new(frame.names.to_vec(), columns, None)
             .expect("equal-length columns")
             .with_origin(frame.origin - take)
     }

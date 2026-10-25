@@ -1,6 +1,7 @@
 //! `Series` element-wise transforms + missing-value handling (cumulatives, shift,
 //! fillna/ffill, clip/round/rank, the math/trig functions, rolling/ewm, where/mask).
 
+use volas_core::ColumnView;
 use std::sync::Arc;
 
 use pyo3::exceptions::PyValueError;
@@ -22,9 +23,9 @@ impl PySeries {
         let keys: std::collections::HashSet<String> =
             (0..probe.len()).filter_map(|i| cell_key(&probe, i)).collect();
         let out: Vec<bool> = (0..self.inner.len())
-            .map(|i| cell_key(&self.inner.data, i).is_some_and(|k| keys.contains(&k)))
+            .map(|i| cell_key(self.inner.data(), i).is_some_and(|k| keys.contains(&k)))
             .collect();
-        Ok(bool_series(&self.inner, out))
+        bool_series(&self.inner, out)
     }
 
     /// Range membership -> bool Series (pandas `between`); `inclusive` selects
@@ -37,7 +38,7 @@ impl PySeries {
         right: &Bound<'_, PyAny>,
         inclusive: &str,
     ) -> PyResult<PySeries> {
-        self.inner.data.require_numeric().map_err(pyerr)?;
+        self.inner.data().require_numeric().map_err(pyerr)?;
         let (lo, hi) = match inclusive {
             "both" => (CmpOp::Ge, CmpOp::Le),
             "left" => (CmpOp::Ge, CmpOp::Lt),
@@ -53,8 +54,8 @@ impl PySeries {
         // missing cell compares false on both sides
         let above = series_cmp(&self.inner, left, lo)?;
         let below = series_cmp(&self.inner, right, hi)?;
-        let (a, b) = (above.inner.data.as_bool().expect("bool"), below.inner.data.as_bool().expect("bool"));
-        Ok(bool_series(&self.inner, a.iter().zip(b).map(|(&x, &y)| x && y).collect()))
+        let (a, b) = (above.inner.data().as_bool().expect("bool"), below.inner.data().as_bool().expect("bool"));
+        bool_series(&self.inner, a.iter().zip(b).map(|(&x, &y)| x && y).collect())
     }
 
     /// Replace every cell equal to `to_replace` with `value`, dtype-preserving
@@ -66,36 +67,36 @@ impl PySeries {
         value: &Bound<'_, PyAny>,
     ) -> PyResult<PySeries> {
         let n = self.inner.len();
-        let dtype = self.inner.data.dtype();
+        let dtype = self.inner.data().dtype();
         let old = if is_na_like_py(to_replace) {
             Column::na_of(dtype, 1)
         } else {
             let is_text = to_replace.extract::<String>().is_ok();
             if dtype != volas_core::DType::Datetime && (dtype == volas_core::DType::Utf8) != is_text {
-                return Ok(col_to_series(&self.inner, self.inner.data.clone()));
+                return col_to_series(&self.inner, self.inner.data().clone());
             }
             cmp_scalar_col(to_replace, dtype, 1)?
         };
         let old_key = cell_key(&old, 0);
         let positions: Vec<usize> = (0..n)
-            .filter(|&i| cell_key(&self.inner.data, i) == old_key)
+            .filter(|&i| cell_key(self.inner.data(), i) == old_key)
             .collect();
         if positions.is_empty() {
-            return Ok(col_to_series(&self.inner, self.inner.data.clone()));
+            return col_to_series(&self.inner, self.inner.data().clone());
         }
-        let newc = scalar_to_column(value, self.inner.data.dtype())?;
-        let mut data = self.inner.data.clone();
+        let newc = scalar_to_column(value, self.inner.data().dtype())?;
+        let mut data = self.inner.data().clone();
         data.scatter(&positions, &newc).map_err(pyerr)?;
-        Ok(col_to_series(&self.inner, data))
+        col_to_series(&self.inner, data)
     }
 
     /// Linear interpolation across interior missing values (pandas
     /// `interpolate(method='linear')`); leading/trailing gaps stay missing.
     pub(crate) fn interpolate(&self) -> PyResult<PySeries> {
-        self.inner.data.require_numeric().map_err(pyerr)?;
+        self.inner.data().require_numeric().map_err(pyerr)?;
         let v = self.f64_domain("interpolate")?;
         let n = v.len();
-        let valid: Vec<bool> = (0..n).map(|i| self.inner.data.is_valid(i)).collect();
+        let valid: Vec<bool> = (0..n).map(|i| self.inner.data().is_valid(i)).collect();
         let mut out = v.clone();
         let mut last: Option<usize> = None;
         for i in 0..n {
@@ -121,7 +122,7 @@ impl PySeries {
                 last = Some(i);
             }
         }
-        Ok(col_to_series(&self.inner, Column::f64(out)))
+        col_to_series(&self.inner, Column::f64(out))
     }
 
     /// A fixed-window rolling aggregator (pandas `rolling(window, min_periods,
@@ -151,7 +152,7 @@ impl PySeries {
                 "min_periods must be <= window",
             ));
         }
-        self.inner.data.require_numeric().map_err(pyerr)?;
+        self.inner.data().require_numeric().map_err(pyerr)?;
         Ok(crate::window::PyRolling {
             series: self.inner.clone(),
             spec: crate::window::WinSpec {
@@ -169,7 +170,7 @@ impl PySeries {
         if min_periods < 0 {
             return Err(PyValueError::new_err("min_periods must be >= 0"));
         }
-        self.inner.data.require_numeric().map_err(pyerr)?;
+        self.inner.data().require_numeric().map_err(pyerr)?;
         Ok(crate::window::PyExpanding {
             series: self.inner.clone(),
             spec: crate::window::WinSpec {
@@ -198,7 +199,7 @@ impl PySeries {
         if min_periods < 0 {
             return Err(PyValueError::new_err("min_periods must be >= 0"));
         }
-        self.inner.data.require_numeric().map_err(pyerr)?;
+        self.inner.data().require_numeric().map_err(pyerr)?;
         Ok(crate::window::PyEwm {
             series: self.inner.clone(),
             alpha: crate::window::resolve_alpha(com, span, halflife, alpha)?,
@@ -221,8 +222,8 @@ impl PySeries {
     /// Returns:
     ///     Series: a new series of the same length.
     #[pyo3(signature = (n = 1))]
-    pub(crate) fn shift(&self, n: isize) -> PySeries {
-        col_to_series(&self.inner, self.inner.data.shift(n))
+    pub(crate) fn shift(&self, n: isize) -> PyResult<PySeries> {
+        col_to_series(&self.inner, self.inner.data().shift(n))
     }
 
     /// Discrete difference ``x[i] - x[i-n]`` (equivalent to ``s - s.shift(n)``).
@@ -235,7 +236,7 @@ impl PySeries {
     ///     Series: a new series of the same length.
     #[pyo3(signature = (n = 1))]
     pub(crate) fn diff(&self, n: isize) -> PyResult<PySeries> {
-        Ok(col_to_series(&self.inner, self.inner.data.diff(n).map_err(pyerr)?))
+        col_to_series(&self.inner, self.inner.data().diff(n).map_err(pyerr)?)
     }
 
     /// Replace a missing cell with `value` (pandas `fillna`), typed to the
@@ -257,7 +258,7 @@ impl PySeries {
         let mut budget = limit.unwrap_or(usize::MAX);
         let keep: Vec<bool> = (0..self.inner.len())
             .map(|i| {
-                if self.inner.data.is_valid(i) {
+                if self.inner.data().is_valid(i) {
                     true
                 } else if budget > 0 {
                     budget -= 1;
@@ -271,78 +272,77 @@ impl PySeries {
     }
 
     /// Forward-fill NaN cells from the last valid value (pandas `ffill`).
-    pub(crate) fn ffill(&self) -> PySeries {
+    pub(crate) fn ffill(&self) -> PyResult<PySeries> {
         self.fill_dir(true)
     }
 
     /// Backward-fill NaN cells from the next valid value (pandas `bfill`).
-    pub(crate) fn bfill(&self) -> PySeries {
+    pub(crate) fn bfill(&self) -> PyResult<PySeries> {
         self.fill_dir(false)
     }
 
     /// Boolean mask of missing (`volas.NA`) values, across every dtype (a float
     /// `NaN`, an int/bool validity hole, a datetime `NaT`).
-    pub(crate) fn isna(&self) -> PySeries {
-        let c = &self.inner.data;
+    pub(crate) fn isna(&self) -> PyResult<PySeries> {
+        let c = self.inner.data();
         bool_series(&self.inner, (0..c.len()).map(|i| !c.is_valid(i)).collect())
     }
 
     /// Boolean mask of present (non-missing) values.
-    pub(crate) fn notna(&self) -> PySeries {
-        let c = &self.inner.data;
+    pub(crate) fn notna(&self) -> PyResult<PySeries> {
+        let c = self.inner.data();
         bool_series(&self.inner, (0..c.len()).map(|i| c.is_valid(i)).collect())
     }
 
     /// Drop missing (NaN) elements (carries their index labels with them).
-    pub(crate) fn dropna(&self) -> PySeries {
-        let c = &self.inner.data;
+    pub(crate) fn dropna(&self) -> PyResult<PySeries> {
+        let c = self.inner.data();
         let keep: Vec<usize> = (0..c.len()).filter(|&i| c.is_valid(i)).collect();
-        let data = self.inner.data.take(&keep);
-        let index = Arc::new(self.inner.index.take(&keep));
-        PySeries {
-            inner: Series::new(self.inner.name.clone(), data, index),
-        }
+        let index = Arc::new(self.inner.index().take(&keep).map_err(pyerr)?);
+        let data = self.inner.data().take(&keep);
+        Ok(PySeries {
+            inner: Series::new(self.inner.name().map(str::to_owned), data, index).map_err(pyerr)?,
+        })
     }
 
     /// Cast to a dtype (`'float64'` / `'int64'` / `'bool'` / `'str'` /
     /// `'datetime64[ns]'` / ...), pandas `astype`.
     pub(crate) fn astype(&self, dtype: &str) -> PyResult<PySeries> {
         let col = if let Some(unit) = datetime_unit_of(dtype) {
-            match &self.inner.data {
-                Column::Datetime(_) | Column::Str(_, _) => {
-                    self.inner.data.to_datetime().map_err(pyerr)?
+            match self.inner.data().view() {
+                ColumnView::Datetime(_) | ColumnView::Str(_, _) => {
+                    self.inner.data().to_datetime().map_err(pyerr)?
                 }
-                _ => self.inner.data.epoch_to_datetime(unit).map_err(pyerr)?,
+                _ => self.inner.data().epoch_to_datetime(unit).map_err(pyerr)?,
             }
         } else {
-            self.inner
-                .data
+            self.inner.data()
                 .cast(parse_dtype(dtype)?)
                 .map_err(pyerr)?
         };
         Ok(PySeries {
-            inner: Series::new(self.inner.name.clone(), col, Arc::clone(&self.inner.index)),
+            inner: Series::new(self.inner.name().map(str::to_owned), col, Arc::clone(self.inner.index())).map_err(pyerr)?,
         })
     }
 
     /// Cumulative sum (pandas `cumsum`, skipna=True), dtype-preserving.
     pub(crate) fn cumsum(&self) -> PyResult<PySeries> {
-        Ok(col_to_series(&self.inner, self.inner.data.cumsum().map_err(pyerr)?))
+        col_to_series(&self.inner, self.inner.data().cumsum().map_err(pyerr)?)
     }
 
     /// Cumulative maximum (pandas `cummax`, skipna=True), dtype-preserving.
     pub(crate) fn cummax(&self) -> PyResult<PySeries> {
-        Ok(col_to_series(&self.inner, self.inner.data.cummax().map_err(pyerr)?))
+        col_to_series(&self.inner, self.inner.data().cummax().map_err(pyerr)?)
     }
 
     /// Cumulative minimum (pandas `cummin`, skipna=True), dtype-preserving.
     pub(crate) fn cummin(&self) -> PyResult<PySeries> {
-        Ok(col_to_series(&self.inner, self.inner.data.cummin().map_err(pyerr)?))
+        col_to_series(&self.inner, self.inner.data().cummin().map_err(pyerr)?)
     }
 
     /// Cumulative product (pandas `cumprod`, skipna=True), dtype-preserving.
     pub(crate) fn cumprod(&self) -> PyResult<PySeries> {
-        Ok(col_to_series(&self.inner, self.inner.data.cumprod().map_err(pyerr)?))
+        col_to_series(&self.inner, self.inner.data().cumprod().map_err(pyerr)?)
     }
 
     /// Round each value to `decimals` places (any int; pandas `round`), dtype-preserving:
@@ -351,7 +351,7 @@ impl PySeries {
     #[pyo3(signature = (decimals = DecimalPlaces(0)))]
     pub(crate) fn round(&self, decimals: DecimalPlaces) -> PyResult<PySeries> {
         let decimals = decimals.0;
-        Ok(col_to_series(&self.inner, self.inner.data.round(decimals).map_err(pyerr)?))
+        col_to_series(&self.inner, self.inner.data().round(decimals).map_err(pyerr)?)
     }
 
     /// Numerical rank (pandas `rank`, 1-based, NaN kept as NaN). Ties resolve by
@@ -375,16 +375,16 @@ impl PySeries {
             "dense" => stats::RankMethod::Dense,
             other => return Err(PyValueError::new_err(format!("rank: unknown method '{other}'"))),
         };
-        let ranks = self.inner.data.rank_with_na(
+        let ranks = self.inner.data().rank_with_na(
             m, ascending, pct,
             match na_option { "top" => Some(true), "bottom" => Some(false), _ => None },
         );
-        Ok(f64_series(&self.inner, ranks))
+        f64_series(&self.inner, ranks)
     }
 
     /// Element-wise absolute value (pandas `abs`), dtype-preserving.
     pub(crate) fn abs(&self) -> PyResult<PySeries> {
-        Ok(col_to_series(&self.inner, self.inner.data.abs().map_err(pyerr)?))
+        col_to_series(&self.inner, self.inner.data().abs().map_err(pyerr)?)
     }
 
     /// Clip values into `[lower, upper]` (either bound optional), dtype-preserving;
@@ -401,7 +401,7 @@ impl PySeries {
                 )));
             }
         }
-        Ok(col_to_series(&self.inner, self.inner.data.clip(lower, upper).map_err(pyerr)?))
+        col_to_series(&self.inner, self.inner.data().clip(lower, upper).map_err(pyerr)?)
     }
 
     /// pandas `Series.where`: keep self where `cond` is True, else `other`

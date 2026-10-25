@@ -31,19 +31,19 @@ use crate::validity::Validity;
 macro_rules! numeric_dispatch {
     ($col:expr, $slice:ident => $body:expr) => {
         match $col {
-            Column::F64(buf) => {
+            Column { data: ColumnData::F64(buf) } => {
                 let $slice: &[f64] = buf.as_slice();
                 Ok($body)
             }
-            Column::F32(buf) => {
+            Column { data: ColumnData::F32(buf) } => {
                 let $slice: &[f32] = buf.as_slice();
                 Ok($body)
             }
-            Column::I64(buf, _) => {
+            Column { data: ColumnData::I64(buf, _) } => {
                 let $slice: &[i64] = buf.as_slice();
                 Ok($body)
             }
-            Column::I32(buf, _) => {
+            Column { data: ColumnData::I32(buf, _) } => {
                 let $slice: &[i32] = buf.as_slice();
                 Ok($body)
             }
@@ -59,7 +59,12 @@ macro_rules! numeric_dispatch {
 /// owned (`Arc`-shared, cheap clone, copy-on-write mutation) or a zero-copy borrow
 /// of foreign (Arrow / NumPy) memory.
 #[derive(Clone, Debug, PartialEq)]
-pub enum Column {
+pub struct Column {
+    pub(crate) data: ColumnData,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) enum ColumnData {
     /// 64-bit floats; `NaN` denotes missing.
     F64(Buffer<f64>),
     /// 32-bit floats (narrow storage); `NaN` denotes missing.
@@ -149,6 +154,8 @@ impl CmpOp {
     }
 }
 
+mod view;
+pub use view::ColumnView;
 mod build;
 mod cast;
 mod fold;
@@ -161,13 +168,13 @@ impl Column {
     /// Number of elements.
     pub fn len(&self) -> usize {
         match self {
-            Column::F64(v) => v.len(),
-            Column::F32(v) => v.len(),
-            Column::Bool(v, _) => v.len(),
-            Column::I64(v, _) => v.len(),
-            Column::I32(v, _) => v.len(),
-            Column::Str(v, _) => v.len(),
-            Column::Datetime(v) => v.len(),
+            Column { data: ColumnData::F64(v) } => v.len(),
+            Column { data: ColumnData::F32(v) } => v.len(),
+            Column { data: ColumnData::Bool(v, _) } => v.len(),
+            Column { data: ColumnData::I64(v, _) } => v.len(),
+            Column { data: ColumnData::I32(v, _) } => v.len(),
+            Column { data: ColumnData::Str(v, _) } => v.len(),
+            Column { data: ColumnData::Datetime(v) } => v.len(),
         }
     }
 
@@ -179,13 +186,13 @@ impl Column {
     /// The logical dtype of the column.
     pub fn dtype(&self) -> DType {
         match self {
-            Column::F64(_) => DType::F64,
-            Column::F32(_) => DType::F32,
-            Column::Bool(_, _) => DType::Bool,
-            Column::I64(_, _) => DType::I64,
-            Column::I32(_, _) => DType::I32,
-            Column::Str(_, _) => DType::Utf8,
-            Column::Datetime(_) => DType::Datetime,
+            Column { data: ColumnData::F64(_) } => DType::F64,
+            Column { data: ColumnData::F32(_) } => DType::F32,
+            Column { data: ColumnData::Bool(_, _) } => DType::Bool,
+            Column { data: ColumnData::I64(_, _) } => DType::I64,
+            Column { data: ColumnData::I32(_, _) } => DType::I32,
+            Column { data: ColumnData::Str(_, _) } => DType::Utf8,
+            Column { data: ColumnData::Datetime(_) } => DType::Datetime,
         }
     }
 
@@ -194,13 +201,13 @@ impl Column {
     /// or a datetime `NaT` (`i64::MIN`). `i` is assumed in bounds.
     pub fn is_valid(&self, i: usize) -> bool {
         match self {
-            Column::F64(v) => !v[i].is_nan(),
-            Column::F32(v) => !v[i].is_nan(),
-            Column::Bool(_, val)
-            | Column::I64(_, val)
-            | Column::I32(_, val)
-            | Column::Str(_, val) => val.is_valid(i),
-            Column::Datetime(v) => v[i] != i64::MIN,
+            Column { data: ColumnData::F64(v) } => !v[i].is_nan(),
+            Column { data: ColumnData::F32(v) } => !v[i].is_nan(),
+            Column { data: ColumnData::Bool(_, val) }
+            | Column { data: ColumnData::I64(_, val) }
+            | Column { data: ColumnData::I32(_, val) }
+            | Column { data: ColumnData::Str(_, val) } => val.is_valid(i),
+            Column { data: ColumnData::Datetime(v) } => v[i] != i64::MIN,
         }
     }
 
@@ -211,11 +218,11 @@ impl Column {
     /// callers only reach this for integer-like columns.
     pub(crate) fn get_i64(&self, i: usize) -> i64 {
         match self {
-            Column::I64(v, _) => v[i],
-            Column::I32(v, _) => v[i] as i64,
-            Column::Datetime(v) => v[i],
-            Column::Bool(v, _) => v[i] as i64,
-            Column::F64(_) | Column::F32(_) | Column::Str(..) => {
+            Column { data: ColumnData::I64(v, _) } => v[i],
+            Column { data: ColumnData::I32(v, _) } => v[i] as i64,
+            Column { data: ColumnData::Datetime(v) } => v[i],
+            Column { data: ColumnData::Bool(v, _) } => v[i] as i64,
+            Column { data: ColumnData::F64(_) } | Column { data: ColumnData::F32(_) } | Column { data: ColumnData::Str(..) } => {
                 unreachable!("an integer reading of a {} cell", self.dtype()) // LCOV_EXCL_LINE
             }
         }
@@ -226,24 +233,24 @@ impl Column {
     #[cfg(debug_assertions)]
     pub(crate) fn debug_check(&self, name: &str) {
         match self {
-            Column::Bool(v, val) => val.debug_check(v.len(), name),
-            Column::I64(v, val) => val.debug_check(v.len(), name),
-            Column::I32(v, val) => val.debug_check(v.len(), name),
-            Column::Str(v, val) => val.debug_check(v.len(), name),
-            Column::F64(_) | Column::F32(_) | Column::Datetime(_) => {}
+            Column { data: ColumnData::Bool(v, val) } => val.debug_check(v.len(), name),
+            Column { data: ColumnData::I64(v, val) } => val.debug_check(v.len(), name),
+            Column { data: ColumnData::I32(v, val) } => val.debug_check(v.len(), name),
+            Column { data: ColumnData::Str(v, val) } => val.debug_check(v.len(), name),
+            Column { data: ColumnData::F64(_) } | Column { data: ColumnData::F32(_) } | Column { data: ColumnData::Datetime(_) } => {}
         }
     }
 
     /// Count of missing (`volas.NA`) values.
     pub fn null_count(&self) -> usize {
         match self {
-            Column::F64(v) => v.iter().filter(|x| x.is_nan()).count(),
-            Column::F32(v) => v.iter().filter(|x| x.is_nan()).count(),
-            Column::Bool(_, val)
-            | Column::I64(_, val)
-            | Column::I32(_, val)
-            | Column::Str(_, val) => val.null_count(),
-            Column::Datetime(v) => v.iter().filter(|&&x| x == i64::MIN).count(),
+            Column { data: ColumnData::F64(v) } => v.iter().filter(|x| x.is_nan()).count(),
+            Column { data: ColumnData::F32(v) } => v.iter().filter(|x| x.is_nan()).count(),
+            Column { data: ColumnData::Bool(_, val) }
+            | Column { data: ColumnData::I64(_, val) }
+            | Column { data: ColumnData::I32(_, val) }
+            | Column { data: ColumnData::Str(_, val) } => val.null_count(),
+            Column { data: ColumnData::Datetime(v) } => v.iter().filter(|&&x| x == i64::MIN).count(),
         }
     }
 
@@ -252,11 +259,11 @@ impl Column {
     /// strings are values here, not NaNs from a numeric conversion.
     pub fn has_missing(&self) -> bool {
         match self {
-            Column::F64(v) => v.has_nan(),
-            Column::F32(v) => v.has_nan(),
-            Column::Bool(_, val) | Column::I64(_, val) | Column::I32(_, val)
-            | Column::Str(_, val) => val.has_nulls(),
-            Column::Datetime(v) => v.contains(&i64::MIN),
+            Column { data: ColumnData::F64(v) } => v.has_nan(),
+            Column { data: ColumnData::F32(v) } => v.has_nan(),
+            Column { data: ColumnData::Bool(_, val) } | Column { data: ColumnData::I64(_, val) } | Column { data: ColumnData::I32(_, val) }
+            | Column { data: ColumnData::Str(_, val) } => val.has_nulls(),
+            Column { data: ColumnData::Datetime(v) } => v.contains(&i64::MIN),
         }
     }
 
@@ -266,8 +273,8 @@ impl Column {
     /// values, not a side mask).
     fn with_validity(self, validity: Validity) -> Column {
         match self {
-            Column::I64(v, _) => Column::I64(v, validity),
-            Column::I32(v, _) => Column::I32(v, validity),
+            Column { data: ColumnData::I64(v, _) } => Column { data: ColumnData::I64(v, validity) },
+            Column { data: ColumnData::I32(v, _) } => Column { data: ColumnData::I32(v, validity) },
             // bool transforms build their column with the mask directly; float /
             // str / datetime carry missing in the values, so leave them unchanged.
             other => other,
@@ -278,17 +285,17 @@ impl Column {
     /// carries its missing in `NaN`, not a mask).
     fn validity(&self) -> Option<&Validity> {
         match self {
-            Column::Bool(_, val)
-            | Column::I64(_, val)
-            | Column::I32(_, val)
-            | Column::Str(_, val) => Some(val),
+            Column { data: ColumnData::Bool(_, val) }
+            | Column { data: ColumnData::I64(_, val) }
+            | Column { data: ColumnData::I32(_, val) }
+            | Column { data: ColumnData::Str(_, val) } => Some(val),
             _ => None,
         }
     }
 
     /// Borrow the underlying `f64` slice, if this is an `F64` column.
     pub fn as_f64(&self) -> Option<&[f64]> {
-        if let Column::F64(v) = self {
+        if let Column { data: ColumnData::F64(v) } = self {
             Some(v.as_slice())
         } else {
             None
@@ -297,7 +304,7 @@ impl Column {
 
     /// Borrow the underlying `bool` slice, if this is a `Bool` column.
     pub fn as_bool(&self) -> Option<&[bool]> {
-        if let Column::Bool(v, _) = self {
+        if let Column { data: ColumnData::Bool(v, _) } = self {
             Some(v.as_slice())
         } else {
             None
@@ -306,7 +313,7 @@ impl Column {
 
     /// Borrow the underlying `i64` slice, if this is an `I64` column.
     pub fn as_i64(&self) -> Option<&[i64]> {
-        if let Column::I64(v, _) = self {
+        if let Column { data: ColumnData::I64(v, _) } = self {
             Some(v.as_slice())
         } else {
             None
@@ -315,7 +322,7 @@ impl Column {
 
     /// The `i`-th string of a `Str` column as `&str`, if this is a `Str` column.
     pub fn str_at(&self, i: usize) -> Option<&str> {
-        if let Column::Str(v, _) = self {
+        if let Column { data: ColumnData::Str(v, _) } = self {
             Some(v.get(i))
         } else {
             None
@@ -324,7 +331,7 @@ impl Column {
 
     /// Borrow the underlying epoch-ns slice, if this is a `Datetime` column.
     pub fn as_datetime(&self) -> Option<&[i64]> {
-        if let Column::Datetime(v) = self {
+        if let Column { data: ColumnData::Datetime(v) } = self {
             Some(v.as_slice())
         } else {
             None
@@ -337,11 +344,11 @@ impl Column {
     /// the values change.
     pub fn has_nan(&self) -> bool {
         match self {
-            Column::F64(v) => v.has_nan(),
-            Column::F32(v) => v.has_nan(),
-            Column::Bool(_, val) | Column::I64(_, val) | Column::I32(_, val) => val.has_nulls(),
-            Column::Str(v, _) => !v.is_empty(),
-            Column::Datetime(v) => v.contains(&i64::MIN),
+            Column { data: ColumnData::F64(v) } => v.has_nan(),
+            Column { data: ColumnData::F32(v) } => v.has_nan(),
+            Column { data: ColumnData::Bool(_, val) } | Column { data: ColumnData::I64(_, val) } | Column { data: ColumnData::I32(_, val) } => val.has_nulls(),
+            Column { data: ColumnData::Str(v, _) } => !v.is_empty(),
+            Column { data: ColumnData::Datetime(v) } => v.contains(&i64::MIN),
         }
     }
 
@@ -349,20 +356,20 @@ impl Column {
     /// bool column (its validity says), for a float column once its buffer remembers.
     pub fn known_has_nan(&self) -> Option<bool> {
         match self {
-            Column::F64(v) => v.known_has_nan(),
-            Column::F32(v) => v.known_has_nan(),
-            Column::Bool(_, val) | Column::I64(_, val) | Column::I32(_, val) => {
+            Column { data: ColumnData::F64(v) } => v.known_has_nan(),
+            Column { data: ColumnData::F32(v) } => v.known_has_nan(),
+            Column { data: ColumnData::Bool(_, val) } | Column { data: ColumnData::I64(_, val) } | Column { data: ColumnData::I32(_, val) } => {
                 Some(val.has_nulls())
             }
-            Column::Str(..) | Column::Datetime(_) => None,
+            Column { data: ColumnData::Str(..) } | Column { data: ColumnData::Datetime(_) } => None,
         }
     }
 
     /// Whether an input column contains a missing computation value (including ±inf).
     pub fn has_nonfinite(&self) -> bool {
         match self {
-            Column::F64(v) => v.has_nonfinite(),
-            Column::F32(v) => v.has_nonfinite(),
+            Column { data: ColumnData::F64(v) } => v.has_nonfinite(),
+            Column { data: ColumnData::F32(v) } => v.has_nonfinite(),
             _ => self.has_nan(),
         }
     }
@@ -370,8 +377,8 @@ impl Column {
     /// The all-finite computation fact, if already known without scanning.
     pub fn known_has_nonfinite(&self) -> Option<bool> {
         match self {
-            Column::F64(v) => v.known_has_nonfinite(),
-            Column::F32(v) => v.known_has_nonfinite(),
+            Column { data: ColumnData::F64(v) } => v.known_has_nonfinite(),
+            Column { data: ColumnData::F32(v) } => v.known_has_nonfinite(),
             _ => self.known_has_nan(),
         }
     }
@@ -381,13 +388,13 @@ impl Column {
     /// `f64`.
     pub fn to_f64_vec(&self) -> Vec<f64> {
         match self {
-            Column::F64(v) => v.to_vec(),
-            Column::F32(v) => v.iter().map(|&x| x as f64).collect(),
-            Column::Bool(v, val) => mask_f64(v.iter().map(|&b| if b { 1.0 } else { 0.0 }), val),
-            Column::I64(v, val) => mask_f64(v.iter().map(|&i| i as f64), val),
-            Column::I32(v, val) => mask_f64(v.iter().map(|&i| i as f64), val),
-            Column::Str(v, _) => vec![f64::NAN; v.len()],
-            Column::Datetime(v) => v
+            Column { data: ColumnData::F64(v) } => v.to_vec(),
+            Column { data: ColumnData::F32(v) } => v.iter().map(|&x| x as f64).collect(),
+            Column { data: ColumnData::Bool(v, val) } => mask_f64(v.iter().map(|&b| if b { 1.0 } else { 0.0 }), val),
+            Column { data: ColumnData::I64(v, val) } => mask_f64(v.iter().map(|&i| i as f64), val),
+            Column { data: ColumnData::I32(v, val) } => mask_f64(v.iter().map(|&i| i as f64), val),
+            Column { data: ColumnData::Str(v, _) } => vec![f64::NAN; v.len()],
+            Column { data: ColumnData::Datetime(v) } => v
                 .iter()
                 .map(|&i| if i == i64::MIN { f64::NAN } else { i as f64 })
                 .collect(),
@@ -408,7 +415,7 @@ impl Column {
     /// The check of [`to_f64_domain`](Self::to_f64_domain) alone, for a reader that
     /// converts later (or never, for an `F64` column it borrows).
     pub fn check_f64_domain(&self, op: &str) -> Result<()> {
-        if let Column::I64(v, val) = self {
+        if let Column { data: ColumnData::I64(v, val) } = self {
             if let Some(x) = present(v, val).find(|&x| !in_f64_domain(x)) {
                 return Err(outside_f64_domain(x, op));
             }
@@ -421,26 +428,26 @@ impl Column {
     /// [`truth_at`](Self::truth_at)). NumPy export goes through `to_f64_vec`.
     pub fn get_f64(&self, i: usize) -> f64 {
         match self {
-            Column::F64(v) => v[i],
-            Column::F32(v) => v[i] as f64,
-            Column::Bool(v, _) => {
+            Column { data: ColumnData::F64(v) } => v[i],
+            Column { data: ColumnData::F32(v) } => v[i] as f64,
+            Column { data: ColumnData::Bool(v, _) } => {
                 if v[i] {
                     1.0
                 } else {
                     0.0
                 }
             }
-            Column::I64(v, _) => v[i] as f64,
-            Column::I32(v, _) => v[i] as f64,
-            Column::Str(_, _) => f64::NAN,
-            Column::Datetime(v) => v[i] as f64,
+            Column { data: ColumnData::I64(v, _) } => v[i] as f64,
+            Column { data: ColumnData::I32(v, _) } => v[i] as f64,
+            Column { data: ColumnData::Str(_, _) } => f64::NAN,
+            Column { data: ColumnData::Datetime(v) } => v[i] as f64,
         }
     }
 
     /// The column as `bool` values (a `Bool` column directly; else an error).
     fn as_bool_vec(&self) -> Result<Vec<bool>> {
         match self {
-            Column::Bool(v, _) => Ok(v.to_vec()),
+            Column { data: ColumnData::Bool(v, _) } => Ok(v.to_vec()),
             other => Err(VolasError::DType(format!(
                 "expected a bool column, got {}",
                 other.dtype()
@@ -454,7 +461,7 @@ impl Column {
     /// established the values fit.
     fn as_i64_vec(&self) -> Result<Vec<i64>> {
         match self {
-            Column::I64(v, _) => Ok(v.to_vec()),
+            Column { data: ColumnData::I64(v, _) } => Ok(v.to_vec()),
             _ => self
                 .to_f64_vec()
                 .iter()
@@ -476,7 +483,7 @@ impl Column {
     /// Used by `select` so a str `where` / `mask` keeps its values dtype-preserving.
     fn as_str_vec(&self) -> Result<Vec<String>> {
         match self {
-            Column::Str(v, _) => Ok(v.to_vec()),
+            Column { data: ColumnData::Str(v, _) } => Ok(v.to_vec()),
             other => Err(VolasError::DType(format!(
                 "cannot select a {} column as str",
                 other.dtype()
@@ -487,7 +494,7 @@ impl Column {
     /// The column's epoch-ns values (a `Datetime` column directly); errors otherwise.
     fn as_datetime_vec(&self) -> Result<Vec<i64>> {
         match self {
-            Column::Datetime(v) => Ok(v.to_vec()),
+            Column { data: ColumnData::Datetime(v) } => Ok(v.to_vec()),
             other => Err(VolasError::DType(format!(
                 "cannot select a {} column as datetime",
                 other.dtype()
@@ -499,8 +506,8 @@ impl Column {
     /// otherwise via lossless narrowing (errors if out of range / non-integral).
     fn as_i32_vec(&self) -> Result<Vec<i32>> {
         match self {
-            Column::I32(v, _) => Ok(v.to_vec()),
-            Column::Bool(v, _) => Ok(v.iter().map(|&b| b as i32).collect()),
+            Column { data: ColumnData::I32(v, _) } => Ok(v.to_vec()),
+            Column { data: ColumnData::Bool(v, _) } => Ok(v.iter().map(|&b| b as i32).collect()),
             _ => self
                 .to_f64_vec()
                 .iter()
@@ -521,7 +528,7 @@ impl Column {
     /// The column as `f32` values (an `F32` column directly; else converted).
     pub fn to_f32_vec(&self) -> Vec<f32> {
         match self {
-            Column::F32(v) => v.to_vec(),
+            Column { data: ColumnData::F32(v) } => v.to_vec(),
             _ => self.to_f64_vec().iter().map(|&x| x as f32).collect(),
         }
     }
@@ -529,16 +536,16 @@ impl Column {
     /// Render each value as a `String` (for `astype(str)`).
     fn to_string_vec(&self) -> Vec<String> {
         match self {
-            Column::Str(v, _) => v.to_vec(),
-            Column::F64(v) => v.iter().map(|x| x.to_string()).collect(),
-            Column::F32(v) => v.iter().map(|x| x.to_string()).collect(),
-            Column::I64(v, _) => v.iter().map(|x| x.to_string()).collect(),
-            Column::I32(v, _) => v.iter().map(|x| x.to_string()).collect(),
-            Column::Bool(v, _) => v
+            Column { data: ColumnData::Str(v, _) } => v.to_vec(),
+            Column { data: ColumnData::F64(v) } => v.iter().map(|x| x.to_string()).collect(),
+            Column { data: ColumnData::F32(v) } => v.iter().map(|x| x.to_string()).collect(),
+            Column { data: ColumnData::I64(v, _) } => v.iter().map(|x| x.to_string()).collect(),
+            Column { data: ColumnData::I32(v, _) } => v.iter().map(|x| x.to_string()).collect(),
+            Column { data: ColumnData::Bool(v, _) } => v
                 .iter()
                 .map(|&b| if b { "True" } else { "False" }.to_string())
                 .collect(),
-            Column::Datetime(v) => v.iter().map(|&ns| datetime::format_ns(ns)).collect(),
+            Column { data: ColumnData::Datetime(v) } => v.iter().map(|&ns| datetime::format_ns(ns)).collect(),
         }
     }
 }

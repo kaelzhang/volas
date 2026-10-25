@@ -50,7 +50,7 @@ fn same_pass_foreign_snapshots_do_not_allocate_per_anchor() {
         let ptr = NonNull::new(data.as_ptr() as *mut f64).unwrap();
         // SAFETY: data owns the immutable allocation and the buffer retains its Arc.
         let foreign = unsafe { Buffer::from_foreign(ptr, data.len(), data.clone()) };
-        let frames = [Column::f64(data.as_ref().clone()), Column::F64(foreign)].map(|col| {
+        let frames = [Column::f64(data.as_ref().clone()), Column::from_f64_buffer(foreign)].map(|col| {
             DataFrame::new(vec!["close".into()], vec![col], None).unwrap()
         });
         for name in ["ema:20", "ma:20", "crsi", "close>ma:20"] {

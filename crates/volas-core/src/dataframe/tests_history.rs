@@ -1,5 +1,6 @@
 //! The checkpoint of a cached column's history: where it lives and how it moves.
 
+use crate::column::ColumnData;
 use super::*;
 use super::derive::NoReplay;
 
@@ -334,10 +335,10 @@ fn a_short_live_window_does_not_keep_a_unique_owned_seed_allocation() {
     assert_eq!(df.height(), keep);
     assert_eq!(df.columns[0].to_f64_vec()[0], (seed - keep) as f64);
     assert_eq!(df.columns[1].to_f64_vec()[0], (seed - keep) as f64);
-    let Column::F64(wide) = &mut df.columns[0] else { unreachable!() };
+    let Column { data: ColumnData::F64(wide) } = &mut df.columns[0] else { unreachable!() };
     assert!(!wide.is_borrowed());
     assert!(wide.make_mut().capacity() <= 2 * keep, "release the unique wide seed capacity");
-    let Column::F32(narrow) = &mut df.columns[1] else { unreachable!() };
+    let Column { data: ColumnData::F32(narrow) } = &mut df.columns[1] else { unreachable!() };
     assert!(!narrow.is_borrowed());
     assert!(narrow.make_mut().capacity() <= 2 * keep, "release the unique narrow seed capacity");
 }
