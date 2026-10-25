@@ -17,8 +17,6 @@ import time
 import zipfile
 
 DRIVER = Path(__file__).resolve().parent.parent
-RUST = "1.96.0"
-MATURIN = "1.13.3"
 
 
 def digest(path):
@@ -38,6 +36,7 @@ from scripts.build_config import (  # noqa: E402
 )
 from scripts.pgo_diagnostics import audit, coverage  # noqa: E402
 from scripts import build_install, pgo_dependencies  # noqa: E402
+from scripts.toolchain import RUST, MATURIN  # noqa: E402
 
 
 def flag_environment(flags):
@@ -85,6 +84,8 @@ def source_hash(root):
         root / n
         for n in ("Cargo.toml", "Cargo.lock", "pyproject.toml", ".cargo/config.toml")
     ]
+    if (root / "rust-toolchain.toml").is_file():
+        paths.append(root / "rust-toolchain.toml")
     paths += sorted((root / "crates").rglob("*.rs")) + sorted(
         (root / "crates").rglob("Cargo.toml")
     )
@@ -119,6 +120,9 @@ def identity(root, target):
     training = [
         DRIVER / "scripts/build_release.py",
         DRIVER / "scripts/build_config.py",
+        DRIVER / "scripts/toolchain.py",
+        DRIVER / "rust-toolchain.toml",
+        DRIVER / "scripts/release_smoke.py",
         DRIVER / "scripts/rustc_record.py",
         DRIVER / "scripts/pgo_diagnostics.py",
         DRIVER / "scripts/pgo_dependencies.py",
@@ -157,7 +161,7 @@ def run(cmd, log, root, env=None, timeout=None):
         subprocess.run(
             [str(x) for x in cmd],
             cwd=root,
-            env=env,
+            env=dict(os.environ if env is None else env, PYTHONOPTIMIZE="0"),
             stdout=f,
             stderr=subprocess.STDOUT,
             check=True,
@@ -446,8 +450,7 @@ def main():
     run(
         [
             sys.executable,
-            "-c",
-            'import volas; assert len(volas.DataFrame({"close":[1.,2.,3.]}).exec("ma:2")) == 3',
+            DRIVER / "scripts/release_smoke.py",
         ],
         artifacts / "smoke.log",
         artifacts,

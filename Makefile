@@ -14,23 +14,22 @@ MATURIN_DEVELOP_ENV = VIRTUAL_ENV="$(PY_PREFIX)" CONDA_PREFIX="$(PY_PREFIX)"
 
 .PHONY: release help install install-rust build build-pkg build-ext clean test test-quick count-indicators coverage coverage-html audit-harness audit-harness-release audit-harness-checked docs benchmark perf-ab asm-diff asm-diff-update hot-asm hot-asm-check hot-asm-update anime-fonts anime lint fix fmt check cargo-test upload publish bump dev ci
 
-# Install all dependencies (Python + Rust)
-install:
-	@echo "\033[1m>> Installing Rust toolchain... <<\033[0m"
-	@which rustup > /dev/null || curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
-	@rustup update stable
-	@echo "\033[1m>> Installing maturin... <<\033[0m"
-	@pip install maturin
-	@echo "\033[1m>> Installing coverage tooling (cargo-llvm-cov + llvm-tools)... <<\033[0m"
-	@rustup component add llvm-tools-preview
-	@cargo install cargo-llvm-cov --locked || true
-	@echo "\033[1m>> Installing Python dependencies... <<\033[0m"
-	@pip install -e .[dev]
+# Both local provisioning and CI read the repository pins through one reader.
+RUST_TOOLCHAIN = $(shell $(PYTHON) scripts/check_toolchain.py --value rust)
+LLVM_COMPONENTS = $(shell $(PYTHON) scripts/check_toolchain.py --value components)
+MATURIN_VERSION = $(shell $(PYTHON) scripts/check_toolchain.py --value maturin)
 
-# Install only the Rust toolchain
+install: install-rust
+	@$(PIP) install "maturin==$(MATURIN_VERSION)"
+	@cargo install cargo-llvm-cov --locked
+	@$(PIP) install --no-build-isolation -e '.[dev]'
+	@$(PYTHON) scripts/check_toolchain.py
+
+# rustup selects rust-toolchain.toml automatically for every repo cargo/rustc.
 install-rust:
-	@which rustup > /dev/null || curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
-	@rustup update stable
+	@which rustup > /dev/null || curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain none
+	@rustup toolchain install $(RUST_TOOLCHAIN) --profile default --component $(LLVM_COMPONENTS)
+	@$(PYTHON) scripts/check_toolchain.py --rust-only
 
 # Build the Rust extension and install the package in-place (development)
 BUILD_OPT ?= normal

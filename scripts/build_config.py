@@ -23,6 +23,8 @@ def out(cmd, **kw):
 
 
 def check_environment(env):
+    if sys.flags.optimize or env.get("PYTHONOPTIMIZE", "0") not in ("", "0"):
+        raise ValueError("Python optimisation is forbidden for release acceptance")
     allowed_cargo = {
         "CARGO_HOME",
         "CARGO_NET_OFFLINE",

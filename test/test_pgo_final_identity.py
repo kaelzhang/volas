@@ -39,7 +39,7 @@ def linked_release(tmp_path_factory):
     (root / "volas/__init__.py").write_text(
         "from volas_rs import value\nclass DataFrame:\n"
         " def __init__(self, data): self.data=data\n"
-        ' def exec(self, directive): return [value()]*len(self.data["close"])\n'
+        ' def exec(self, directive): value(); return [float("nan"),1.5,2.5]\n'
     )
     (root / "Cargo.toml").write_text(
         '[workspace]\nmembers=["crates/volas-python"]\nresolver="2"\n'

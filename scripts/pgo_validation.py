@@ -14,7 +14,8 @@ class Results:
             np.asarray(actual, dtype="float64"),
             np.asarray(expected, dtype="float64"),
         )
-        assert actual.shape == expected.shape, (actual.shape, expected.shape)
+        if actual.shape != expected.shape:
+            raise AssertionError((actual.shape, expected.shape))
         np.testing.assert_array_equal(np.isnan(actual), np.isnan(expected))
         np.testing.assert_array_equal(actual, expected)
         self.digest.update(str(actual.shape).encode())
@@ -26,7 +27,8 @@ class Results:
 
         size = len(next(iter(expected.values())))
         tail = size if tail is None else min(tail, size)
-        assert len(frame) == tail
+        if len(frame) != tail:
+            raise AssertionError()
         for c, values in expected.items():
             self.equal(frame[c].to_numpy(dtype="float64"), values[-tail:])
         reference = DataFrame(expected)

@@ -105,7 +105,7 @@ def test_real_llvm_tabs_targets_and_relocation(tmp_path, monkeypatch, arch):
         assert "\t" in text
         site = tmp_path / "site"
         site.mkdir(exist_ok=True)
-        (site / "volas_rs.so").touch()
+        shutil.copy2(obj, site / "volas_rs.so")
         report = tmp_path / f"report{padding}"
         real_output = pgo_asm.output
 
@@ -138,6 +138,8 @@ def test_real_cargo_redirect_with_stale_probes(tmp_path, gate):
     # unmodified shell entry, Cargo config resolution, compiler and disassembler.
     scripts = tmp_path / "scripts"
     shutil.copytree(ROOT / "scripts", scripts)
+    for filename in ("rust-toolchain.toml", "pyproject.toml"):
+        shutil.copy2(ROOT / filename, tmp_path / filename)
     (scripts / "asm_baseline.txt").write_text(
         f"# arch: {platform.machine()})\nprobe_ma exact 1\nprobe_ema exact 1\nprobe_str_eq_scan max 1\n"
     )

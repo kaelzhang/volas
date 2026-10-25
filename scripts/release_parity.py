@@ -57,7 +57,8 @@ def main():
     np.savez(args.output, **results)
     if args.compare:
         with np.load(args.compare) as reference:
-            assert set(reference.files) == set(results)
+            if set(reference.files) != set(results):
+                raise AssertionError()
             for name, values in results.items():
                 expected = reference[name]
                 np.testing.assert_array_equal(

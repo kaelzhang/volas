@@ -53,9 +53,11 @@ def train(stage=None):
     from scripts.count_indicators import count
 
     inventory = json.loads((ROOT / "test/pgo_inventory.json").read_text())
-    assert set(inventory) == set(count()["forms"]), "training inventory drift"
+    if set(inventory) != set(count()["forms"]):
+        raise AssertionError("training inventory drift")
     forms = list(inventory.values())
-    assert len(forms) == 254, "public inventory changed: review training budget"
+    if len(forms) != 254:
+        raise AssertionError("public inventory changed: review training budget")
     stages = []
     checks = hashlib.sha256()
     from scripts.pgo_validation import Results, live_expected, fold
@@ -66,9 +68,8 @@ def train(stage=None):
         wall, cpu = time.monotonic(), time.process_time()
         before = checks.digest()
         operations = fn()
-        assert operations > 0 and checks.digest() != before, (
-            f"unverified training stage: {name}"
-        )
+        if not (operations > 0 and checks.digest() != before):
+            raise AssertionError(f"unverified training stage: {name}")
         stages.append(
             {
                 "stage": name,
@@ -87,7 +88,8 @@ def train(stage=None):
                 for _ in range(2):
                     df = DataFrame(data)
                     result = df.exec(d, dtype="float64")
-                    assert len(result) == n, d
+                    if len(result) != n:
+                        raise AssertionError(d)
                     verified.equal(result, df[d].to_numpy(dtype="float64"))
         return len(forms) * 4
 
@@ -99,7 +101,8 @@ def train(stage=None):
                 args, kw = setup()
                 run(*args, **kw)
                 expected = DataFrame(data).exec(d, dtype="float64")
-                assert len(args[0]) == len(data["close"])
+                if len(args[0]) != len(data["close"]):
+                    raise AssertionError()
                 verified.equal(args[0][d].to_numpy(dtype="float64"), expected)
                 verified.frame(args[0], data)
         return len(forms) * 16
@@ -122,11 +125,11 @@ def train(stage=None):
             args, kw = setup()
             frame = args[0]
             directive, rows = d.split("@n=")
-            assert len(frame.columns) == 5
+            if len(frame.columns) != 5:
+                raise AssertionError()
             run(*args, **kw)
-            assert len(frame.columns) == 6, (
-                "first-cache stage did not materialize result"
-            )
+            if len(frame.columns) != 6:
+                raise AssertionError("first-cache stage did not materialize result")
             # get_column resolves an existing cache and never materializes one.
             try:
                 cached = frame.get_column(directive)
@@ -151,9 +154,8 @@ def train(stage=None):
                     args, kw = setup()
                     before = args[0].to_numpy().copy()
                     run(*args, **kw)
-                    assert not np.array_equal(
-                        before, args[0].to_numpy(), equal_nan=True
-                    ), "live stage did not change state"
+                    if np.array_equal(before, args[0].to_numpy(), equal_nan=True):
+                        raise AssertionError("live stage did not change state")
                     verified.frame(args[0], live_expected(data, phase), [d])
         return len(T.TF_LIVE_PHASES) * len(T.TF_LIVE_INDICATORS) * 32
 
@@ -193,14 +195,15 @@ def train(stage=None):
     def boundaries():
         for n, reps in ((4096, 8), (1000000, 2)):
             factories = W.interop(n)
-            assert set(factories) == {
+            if set(factories) != {
                 "frame_from_arrow",
                 "frame_to_arrow",
                 "series_from_arrow",
                 "series_to_arrow",
                 "dlpack_import",
                 "dlpack_export",
-            }
+            }:
+                raise AssertionError()
             for name, fn in factories.items():
                 for _ in range(reps):
                     value = fn()
@@ -232,7 +235,8 @@ def train(stage=None):
             df["scratch"] = data["close"]
             verified.equal(df["scratch"].to_numpy(), data["close"])
             df.iat[100, 0] = 1.5
-            assert df.iat[100, 0] == 1.5
+            if df.iat[100, 0] != 1.5:
+                raise AssertionError()
             altered = {c: a.copy() for c, a in data.items()}
             altered["open"][100] = 1.5
             verified.frame(df, altered)
@@ -333,7 +337,7 @@ def main():
             phase_output = args.output.with_name(
                 args.output.stem + "." + stage + ".json"
             )
-            env = dict(os.environ)
+            env = dict(os.environ, PYTHONOPTIMIZE="0")
             if "LLVM_PROFILE_FILE" in env:
                 raw = Path(env["LLVM_PROFILE_FILE"])
                 env["LLVM_PROFILE_FILE"] = str(raw.with_name(stage + "-%m-%p.profraw"))

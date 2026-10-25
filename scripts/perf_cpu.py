@@ -42,8 +42,10 @@ if sys.argv[1] == "worker":
     import volas_rs
 
     native = importlib.import_module("volas_rs.volas_rs")
-    assert str(pathlib.Path(sys.argv[2]).resolve()) in native.__file__, native.__file__
-    assert B.VolasDataFrame is native.DataFrame
+    if str(pathlib.Path(sys.argv[2]).resolve()) not in native.__file__:
+        raise AssertionError(native.__file__)
+    if B.VolasDataFrame is not native.DataFrame:
+        raise AssertionError()
     standard = B.VolasDataFrame(
         {**{c: B.ARR[c] for c in B.COLUMNS}, "periods": B.PERIODS}
     )
@@ -91,7 +93,8 @@ if sys.argv[1] == "worker":
                     args[arg] = extended
                 elif arg == "interop_registry":
                     length = row.get("extra_info", {}).get("length") or p.get(arg)
-                    assert length is not None, (name, p)
+                    if length is None:
+                        raise AssertionError((name, p))
                     n = int(length)
                     if n not in interop:
                         from test.bench_interop import build
@@ -109,7 +112,8 @@ if sys.argv[1] == "worker":
                 else:
                     args[arg] = p[arg]
             target(**args)
-            assert cap.fn is not None, name
+            if cap.fn is None:
+                raise AssertionError(name)
             for _ in range(5):
                 a, k = cap.setup() if cap.setup else (cap.args, cap.kwargs)
                 cap.fn(*a, **k)
@@ -147,7 +151,8 @@ for site in (base, head):
         text=True,
     )
     ready = json.loads(p.stdout.readline())
-    assert str(pathlib.Path(site).resolve()) in ready["module"], ready
+    if str(pathlib.Path(site).resolve()) not in ready["module"]:
+        raise AssertionError(ready)
     workers.append(p)
     print(ready, flush=True)
 results = []
@@ -181,7 +186,8 @@ try:
                 p.stdin.write(json.dumps({"row": row, "reps": reps}) + "\n")
                 p.stdin.flush()
                 result = p.stdout.readline()
-                assert result, (name, side, p.poll())
+                if not result:
+                    raise AssertionError((name, side, p.poll()))
                 sides[side].append(json.loads(result))
         result = {"item": name, "params": params, "reps": reps, "samples": sides}
         for clock in ("cpu", "wall"):
@@ -209,4 +215,5 @@ finally:
     for p in workers:
         p.stdin.close()
     for p in workers:
-        assert p.wait() == 0
+        if p.wait() != 0:
+            raise AssertionError()

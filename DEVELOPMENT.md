@@ -12,16 +12,28 @@
 
 ## Development
 
-Requires Python >= 3.11 and a Rust toolchain.
+Requires Python >= 3.11 and rustup. The repository's `rust-toolchain.toml`
+selects Rust 1.96.0 and its `llvm-tools-preview` component for every Cargo and
+rustc invocation, including debug builds, coverage and CI. `pyproject.toml`'s
+`build-system.requires` is the single maturin pin (1.13.3); install targets and
+CI read it through `scripts/check_toolchain.py`. Use your chosen virtual
+environment's Python throughout:
 
 ```sh
-make install        # Rust toolchain + maturin + Python dev deps
+make install PYTHON=/path/to/venv/bin/python  # pinned Rust + maturin + dev deps
 make build          # build the Rust extension, install the package in-place
-make test           # run the Python test suite
+make test           # full correctness suite and 100% union coverage
 make coverage       # true cargo-test union pytest line coverage
 make benchmark      # multi-library benchmark
-make build-pkg      # build a release wheel + sdist into dist/
+make build-pkg      # release wheel + sdist in BUILD_ARTIFACTS
 ```
+
+`make install-rust` installs the repository's exact Rust version and LLVM
+component and checks the active selection. `make install` also installs the
+exact maturin requirement with `$(PYTHON) -m pip`, uses it for the editable
+installation (`--no-build-isolation`), and runs the full prerequisite check.
+Neither target updates a floating stable toolchain. Continue passing the same
+`PYTHON` to each make command, or export `VOLAS_PYTHON` once.
 
 `make coverage` delegates to `scripts/coverage.sh`. `make benchmark`
 compares pandas, stock-pandas, polars, TA-Lib, and volas where those
@@ -179,8 +191,7 @@ seeds new inventory entries and optimization candidates.
 use `scripts/build_release.py`. The default remains `BUILD_OPT=normal`.
 The complete local PGO loop is validated on macOS arm64; other release targets
 still need independent validation and CI integration.
-The initial validated tool versions are Rust 1.96.0, its sysroot LLVM tools,
-and maturin 1.13.3. Install `llvm-tools-preview` for that compiler and the
+Run `make install` to provision the repository pins before building. Have the
 hash-locked wheels in `scripts/pgo-requirements.txt` available beforehand. The
 current training lock covers CPython 3.12 on macOS arm64. The owner installs these
 wheels into a fresh isolated training directory with `pip --require-hashes`, records
@@ -199,6 +210,13 @@ fixed-operation training workload, merges raw profiles, then builds and smoke-te
 the final use wheel. It retains logs, hashes, stage timings, raw profiles and
 provenance. `use` requires the matching JSON sidecar. Source, ABI, target,
 toolchain, configuration, training code and dependency mismatches fail closed.
+Release acceptance rejects an optimized owner interpreter (`-O`, `-OO`, or
+inherited nonzero `PYTHONOPTIMIZE`) before building. The owner and training
+coordinator explicitly launch children with `PYTHONOPTIMIZE=0`. All training
+acceptance checks and the final smoke use explicit checks that raise, so even
+a directly invoked optimized interpreter still validates operations, inventory,
+shapes, masks and values. The smoke executes `ma:2` and checks its warm-up mask
+and numerical results before publishing any final identity.
 Every invocation needs fresh stage directories. No profile is shared across sources.
 A completed instrumented stage can be supplied with `--generated <generate-stage>`
 to `--mode pgo`: its native hash, actual compiler arguments and compilation identity
@@ -277,7 +295,15 @@ reports list added, removed and modified functions across both inventories.
 The single reference owner consumes LLVM's numeric disassembly, Mach-O
 indirect-symbol/bind/dyld tables, ELF dynamic relocations and LLVM's PLT labels.
 Stub and GOT/PLT operands name their actual imports, including binding addends;
-slot addresses are never import identities. An unpaired ADRP that overlaps an import page
+slot addresses are never import identities. Bindings include the namespace,
+Mach-O two-level library ordinal and full install name, symbol, ELF symbol
+version and its required provider where present, and addend. Components are escaped
+before rendering, so delimiters and literal escapes cannot collapse distinct bindings.
+Mach-O short dylib names must map to a unique load command. Indirect stub
+entries resolve through their actual loaded pointer, including ARM page pairs,
+literal loads and x86 RIP-relative loads; symbol names alone cannot supply a
+binding from another slot. ELF dynamic-symbol versions qualify both PLT and data
+relocations. Absent or ambiguous provider/version metadata stays unresolved. An unpaired ADRP that overlaps an import page
 remains unresolved, even if LLVM binds the page's first slot. Missing or conflicting identities
 remain explicit unresolved references. A comparison with any unresolved reference
 has `comparison_complete=false` and marks the affected function as changed even
@@ -295,15 +321,11 @@ indirect-jump and exception blocks when all later frame-pointer definitions
 establish the frame or restore it along an exit path. `stack_accesses` lists memory
 accesses, while `confirmed_spills` requires separate compiler evidence and is
 currently empty; this does not assert that no spills occurred.
-The existing CI test, coverage and assembly jobs read Rust and maturin versions
-from the build owner through `scripts/check_toolchain.py --versions`. They install
-those versions plus `llvm-tools-preview` and run `scripts/check_toolchain.py` to
-verify the active compiler, Cargo, maturin and all three sysroot LLVM tools before
-their existing checks. This adds no PGO release job.
-The integration tests require the active Rust sysroot LLVM tools
-(`rustup component add llvm-tools-preview`) and clang; their Cargo fixtures use
-the host architecture and symbol ABI on both ELF and Mach-O. PGO differences
-require review and performance validation; they never update normal baselines.
+The existing CI jobs read the repository pins through the shared reader and
+select that compiler and its LLVM components. Python build jobs install the exact
+maturin requirement. Their prerequisite checks verify the active compiler, Cargo,
+maturin and sysroot LLVM tools before running tests or gates. Both normal assembly
+gates use the same Rust prerequisite checker.
 
 `make build-pkg` writes `delivery.json` inside its isolated `BUILD_ARTIFACTS`
 directory. `make publish` uploads only that manifest's hash-verified wheel and source

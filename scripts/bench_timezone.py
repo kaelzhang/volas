@@ -122,7 +122,10 @@ def main():
     args.output.write_text(json.dumps(current, indent=2) + "\n")
     base = json.loads(args.base.read_text()) if args.base else None
     if base:
-        assert (base["methodology"], base["rows"]) == (current["methodology"], current["rows"])
+        if (base["methodology"], base["rows"]) != (
+            current["methodology"], current["rows"]
+        ):
+            raise AssertionError()
         print("| Case | Base ms | Current ms | Current/base |")
         print("|---|---:|---:|---:|")
     else:

@@ -126,6 +126,8 @@ def test_real_hot_shell_rejects_empty_or_unbound_target(tmp_path, changed_target
 
     scripts = tmp_path / "scripts"
     scripts.mkdir()
+    for filename in ("rust-toolchain.toml", "pyproject.toml"):
+        shutil.copy2(ROOT / filename, tmp_path / filename)
     for p in (ROOT / "scripts").glob("*.py"):
         shutil.copy2(p, scripts / p.name)
     shutil.copy2(ROOT / "scripts/hot_path_asm.sh", scripts)
@@ -147,6 +149,9 @@ def test_real_hot_shell_rejects_empty_or_unbound_target(tmp_path, changed_target
     instructions = "\tret\n" if changed_target else ""
     (bin_ / "cargo").write_text(f"""#!{sys.executable}
 import os,pathlib,sys
+if '--version' in sys.argv:
+ print('cargo {subprocess.check_output(["cargo", "--version"], text=True).split()[1]}')
+ sys.exit(0)
 p=pathlib.Path(os.environ['CARGO_TARGET_DIR'])/'cross-target/release/deps'
 p.mkdir(parents=True,exist_ok=True)
 (p/'volas_core-built.s').write_text('_execute17h123456E:\\n.cfi_startproc\\n\\tnop\\n\\tret\\n.cfi_endproc\\n')
@@ -191,6 +196,8 @@ def test_normal_asm_rejects_cargo_feedback_before_compiler(tmp_path, gate, table
 
     scripts = tmp_path / "scripts"
     scripts.mkdir()
+    for filename in ("rust-toolchain.toml", "pyproject.toml"):
+        shutil.copy2(ROOT / filename, tmp_path / filename)
     for p in (ROOT / "scripts").glob("*.py"):
         shutil.copy2(p, scripts / p.name)
     shutil.copy2(ROOT / "scripts" / gate, scripts)
