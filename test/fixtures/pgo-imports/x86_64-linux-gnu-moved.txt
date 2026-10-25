@@ -1,0 +1,97 @@
+
+linked.so:	file format elf64-x86-64
+
+Program Header:
+    PHDR off    0x0000000000000040 vaddr 0x0000000000000040 paddr 0x0000000000000040 align 2**3
+         filesz 0x00000000000001c0 memsz 0x00000000000001c0 flags r--
+    LOAD off    0x0000000000000000 vaddr 0x0000000000000000 paddr 0x0000000000000000 align 2**12
+         filesz 0x0000000000000348 memsz 0x0000000000000348 flags r--
+    LOAD off    0x0000000000000348 vaddr 0x0000000000001348 paddr 0x0000000000001348 align 2**12
+         filesz 0x0000000000000048 memsz 0x0000000000000048 flags r-x
+    LOAD off    0x0000000000000390 vaddr 0x0000000000002390 paddr 0x0000000000002390 align 2**12
+         filesz 0x00000000000000e8 memsz 0x0000000000000c70 flags rw-
+    LOAD off    0x0000000000000478 vaddr 0x0000000000003478 paddr 0x0000000000003478 align 2**12
+         filesz 0x0000000000000028 memsz 0x0000000000000028 flags rw-
+ DYNAMIC off    0x0000000000000390 vaddr 0x0000000000002390 paddr 0x0000000000002390 align 2**3
+         filesz 0x00000000000000e0 memsz 0x00000000000000e0 flags rw-
+   RELRO off    0x0000000000000390 vaddr 0x0000000000002390 paddr 0x0000000000002390 align 2**0
+         filesz 0x00000000000000e8 memsz 0x0000000000000c70 flags r--
+   STACK off    0x0000000000000000 vaddr 0x0000000000000000 paddr 0x0000000000000000 align 2**64
+         filesz 0x0000000000000000 memsz 0x0000000000000000 flags rw-
+
+Dynamic Section:
+  RELA     0x0000000000000300
+  RELASZ   0x0000000000000018
+  RELAENT  0x0000000000000018
+  JMPREL   0x0000000000000318
+  PLTRELSZ 0x0000000000000030
+  PLTGOT   0x0000000000003478
+  PLTREL   0x0000000000000007
+  SYMTAB   0x0000000000000200
+  SYMENT   0x0000000000000018
+  STRTAB   0x00000000000002cc
+  STRSZ    0x000000000000002f
+  GNU_HASH 0x0000000000000278
+  HASH     0x000000000000029c
+
+Sections:
+Idx Name           Size     VMA              Type
+  0                00000000 0000000000000000 
+  1 .dynsym        00000078 0000000000000200 DATA
+  2 .gnu.hash      00000024 0000000000000278 DATA
+  3 .hash          00000030 000000000000029c DATA
+  4 .dynstr        0000002f 00000000000002cc DATA
+  5 .rela.dyn      00000018 0000000000000300 DATA
+  6 .rela.plt      00000030 0000000000000318 DATA
+  7 .text          00000015 0000000000001348 TEXT
+  8 .plt           00000030 0000000000001360 TEXT
+  9 .dynamic       000000e0 0000000000002390 DATA
+ 10 .got           00000008 0000000000002470 DATA
+ 11 .relro_padding 00000b88 0000000000002478 BSS
+ 12 .got.plt       00000028 0000000000003478 DATA
+ 13 .comment       0000001c 0000000000000000 
+ 14 .symtab        00000090 0000000000000000 
+ 15 .shstrtab      00000089 0000000000000000 
+ 16 .strtab        00000038 0000000000000000 
+
+SYMBOL TABLE:
+0000000000002390 l       .dynamic	0000000000000000 .hidden _DYNAMIC
+0000000000001348 g       .text	0000000000000000 anchor
+0000000000000000         *UND*	0000000000000000 aaa
+000000000000134e g       .text	0000000000000000 volas_core::frame::execute
+0000000000000000         *UND*	0000000000000000 foreign
+
+DYNAMIC RELOCATION RECORDS
+OFFSET           TYPE                     VALUE
+0000000000002470 R_X86_64_GLOB_DAT        foreign
+0000000000003490 R_X86_64_JUMP_SLOT       aaa
+0000000000003498 R_X86_64_JUMP_SLOT       foreign
+
+Disassembly of section .text:
+
+0000000000001348 <anchor>:
+    1348:      	callq	0x1370 <aaa@plt>
+    134d:      	retq
+
+000000000000134e <volas_core::frame::execute>:
+    134e:      	callq	0x1380 <foreign@plt>
+    1353:      	movq	0x1116(%rip), %rax      # 0x2470 <foreign+0x2470>
+    135a:      	callq	*%rax
+    135c:      	retq
+
+Disassembly of section .plt:
+
+0000000000001360 <.plt>:
+    1360:      	pushq	0x211a(%rip)            # 0x3480 <foreign+0x3480>
+    1366:      	jmpq	*0x211c(%rip)           # 0x3488 <foreign+0x3488>
+    136c:      	nopl	(%rax)
+
+0000000000001370 <aaa@plt>:
+    1370:      	jmpq	*0x211a(%rip)           # 0x3490 <foreign+0x3490>
+    1376:      	pushq	$0x0
+    137b:      	jmp	0x1360 <.plt>
+
+0000000000001380 <foreign@plt>:
+    1380:      	jmpq	*0x2112(%rip)           # 0x3498 <foreign+0x3498>
+    1386:      	pushq	$0x1
+    138b:      	jmp	0x1360 <.plt>

@@ -1,0 +1,98 @@
+
+linked.so:	file format elf64-littleaarch64
+
+Program Header:
+    PHDR off    0x0000000000000040 vaddr 0x0000000000000040 paddr 0x0000000000000040 align 2**3
+         filesz 0x00000000000001c0 memsz 0x00000000000001c0 flags r--
+    LOAD off    0x0000000000000000 vaddr 0x0000000000000000 paddr 0x0000000000000000 align 2**16
+         filesz 0x0000000000000308 memsz 0x0000000000000308 flags r--
+    LOAD off    0x0000000000000308 vaddr 0x0000000000010308 paddr 0x0000000000010308 align 2**16
+         filesz 0x0000000000000058 memsz 0x0000000000000058 flags r-x
+    LOAD off    0x0000000000000360 vaddr 0x0000000000020360 paddr 0x0000000000020360 align 2**16
+         filesz 0x00000000000000e8 memsz 0x0000000000000ca0 flags rw-
+    LOAD off    0x0000000000000448 vaddr 0x0000000000030448 paddr 0x0000000000030448 align 2**16
+         filesz 0x0000000000000020 memsz 0x0000000000000020 flags rw-
+ DYNAMIC off    0x0000000000000360 vaddr 0x0000000000020360 paddr 0x0000000000020360 align 2**3
+         filesz 0x00000000000000e0 memsz 0x00000000000000e0 flags rw-
+   RELRO off    0x0000000000000360 vaddr 0x0000000000020360 paddr 0x0000000000020360 align 2**0
+         filesz 0x00000000000000e8 memsz 0x0000000000000ca0 flags r--
+   STACK off    0x0000000000000000 vaddr 0x0000000000000000 paddr 0x0000000000000000 align 2**64
+         filesz 0x0000000000000000 memsz 0x0000000000000000 flags rw-
+
+Dynamic Section:
+  RELA     0x00000000000002d8
+  RELASZ   0x0000000000000018
+  RELAENT  0x0000000000000018
+  JMPREL   0x00000000000002f0
+  PLTRELSZ 0x0000000000000018
+  PLTGOT   0x0000000000030448
+  PLTREL   0x0000000000000007
+  SYMTAB   0x0000000000000200
+  SYMENT   0x0000000000000018
+  STRTAB   0x00000000000002ac
+  STRSZ    0x000000000000002b
+  GNU_HASH 0x0000000000000260
+  HASH     0x0000000000000284
+
+Sections:
+Idx Name           Size     VMA              Type
+  0                00000000 0000000000000000 
+  1 .dynsym        00000060 0000000000000200 DATA
+  2 .gnu.hash      00000024 0000000000000260 DATA
+  3 .hash          00000028 0000000000000284 DATA
+  4 .dynstr        0000002b 00000000000002ac DATA
+  5 .rela.dyn      00000018 00000000000002d8 DATA
+  6 .rela.plt      00000018 00000000000002f0 DATA
+  7 .text          0000001c 0000000000010308 TEXT
+  8 .plt           00000030 0000000000010330 TEXT
+  9 .dynamic       000000e0 0000000000020360 DATA
+ 10 .got           00000008 0000000000020440 DATA
+ 11 .relro_padding 00000bb8 0000000000020448 BSS
+ 12 .got.plt       00000020 0000000000030448 DATA
+ 13 .comment       0000001c 0000000000000000 
+ 14 .symtab        00000090 0000000000000000 
+ 15 .shstrtab      00000089 0000000000000000 
+ 16 .strtab        00000037 0000000000000000 
+
+SYMBOL TABLE:
+0000000000010308 l       .text	0000000000000000 $x
+0000000000020360 l       .dynamic	0000000000000000 .hidden _DYNAMIC
+0000000000010308 g       .text	0000000000000000 anchor
+0000000000000000         *UND*	0000000000000000 changed
+0000000000010310 g       .text	0000000000000000 volas_core::frame::execute
+
+DYNAMIC RELOCATION RECORDS
+OFFSET           TYPE                     VALUE
+0000000000020440 R_AARCH64_GLOB_DAT       changed
+0000000000030460 R_AARCH64_JUMP_SLOT      changed
+
+Disassembly of section .text:
+
+0000000000010308 <anchor>:
+   10308:      	bl	0x10350 <changed@plt>
+   1030c:      	ret
+
+0000000000010310 <volas_core::frame::execute>:
+   10310:      	adrp	x0, 0x20000 <changed@plt+0xfcb0>
+   10314:      	b	0x10318 <volas_core::frame::execute+0x8>
+   10318:      	ldr	x0, [x0, #0x440]
+   1031c:      	blr	x0
+   10320:      	ret
+
+Disassembly of section .plt:
+
+0000000000010330 <.plt>:
+   10330:      	stp	x16, x30, [sp, #-0x10]!
+   10334:      	adrp	x16, 0x30000 <changed+0x30000>
+   10338:      	ldr	x17, [x16, #0x458]
+   1033c:      	add	x16, x16, #0x458
+   10340:      	br	x17
+   10344:      	nop
+   10348:      	nop
+   1034c:      	nop
+
+0000000000010350 <changed@plt>:
+   10350:      	adrp	x16, 0x30000 <changed+0x30000>
+   10354:      	ldr	x17, [x16, #0x460]
+   10358:      	add	x16, x16, #0x460
+   1035c:      	br	x17

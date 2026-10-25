@@ -10,8 +10,8 @@ from build_pair import manifest
 from build_release import output
 
 
-from asm_symbols import is_branch, is_call, parse, target_operand
-from asm_references import References
+from asm_symbols import is_branch, is_call, parse, stack_access_indices, target_operand
+from asm_references import References, disassemble
 
 
 def main():
@@ -33,19 +33,7 @@ def main():
         / "bin/llvm-objdump"
     )
     lib = next(args.site.rglob("volas_rs*.so"))
-    text = output(
-        [
-            str(objdump),
-            "--disassemble",
-            "--demangle",
-            "--no-show-raw-insn",
-            "--section-headers",
-            "--private-headers",
-            "--syms",
-            "--reloc",
-            str(lib),
-        ]
-    )
+    text = disassemble(objdump, lib, output)
     args.output.mkdir(parents=True, exist_ok=True)
     (args.output / "final-library.asm").write_text(text + "\n")
     functions = parse(text)
@@ -72,7 +60,7 @@ def main():
             if not ins:
                 raise ValueError(f"empty instruction body in final library: {symbol}")
             addresses = {i["address"]: n for n, i in enumerate(ins)}
-            normalized, edges, calls, spills = [], [], [], []
+            normalized, edges, calls = [], [], []
             for n, i in enumerate(ins):
                 body = i["text"]
                 target = target_operand(body)
@@ -88,8 +76,6 @@ def main():
                 normalized.append(body)
                 if is_call(body):
                     calls.append(body)
-                if re.search(r"\b(?:stp|str|ldp|ldr).*\[sp", body):
-                    spills.append(body)
             selected[symbol] = dict(
                 address=f["address"],
                 mod32=f["address"] % 32,
@@ -97,7 +83,10 @@ def main():
                 normalized=normalized,
                 cfg_edges=edges,
                 calls=calls,
-                stack_accesses=spills,
+                stack_accesses=[normalized[i] for i in stack_access_indices(f)],
+                # A load/store does not establish why the compiler used memory.
+                confirmed_spills=[],
+                unresolved_references=[i for i in normalized if "@unresolved(" in i],
                 nop=sum(i == "nop" for i in normalized),
                 non_nop=sum(i != "nop" for i in normalized),
             )
@@ -106,6 +95,9 @@ def main():
         "functions": selected,
         "missing_symbols": missing,
         "status": "review-required",
+        "comparison_complete": not any(
+            f["unresolved_references"] for f in selected.values()
+        ),
     }
     if args.base_report:
         base = json.loads((args.base_report / "report.json").read_text())["functions"]
@@ -115,6 +107,10 @@ def main():
             s
             for s in selected.keys() & base.keys()
             if selected[s]["normalized"] != base[s]["normalized"]
+            or any("@unresolved(" in i for i in selected[s]["normalized"] + base[s]["normalized"])
+        )
+        report["comparison_complete"] &= not any(
+            "@unresolved(" in i for f in base.values() for i in f["normalized"]
         )
         report["changed"] = sorted(
             report["added"] + report["removed"] + report["modified"]

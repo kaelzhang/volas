@@ -94,6 +94,108 @@ def target_operand(body):
     return re.compile(r"0x([0-9a-f]+)").search(body, start, end)
 
 
+def written_registers(body, *, writeback=True):
+    """ARM64 register definitions needed by reference/stack fact lifetimes."""
+    op = opcode(body)
+    registers = set()
+    dest = re.match(r"\S+\s+([xw]\d+)\b", body)
+    if dest and not (
+        op.startswith("st")
+        or op in ("cmp", "cmn", "tst", "ccmp", "ccmn")
+        or is_branch(body)
+        or is_call(body)
+        or op in ("ret", "br", "braa", "brab")
+    ):
+        registers.add("x" + dest[1][1:])
+    if op.startswith(("ldp", "ldnp")):
+        second = re.match(r"\S+\s+\w+,\s*[xw](\d+)", body)
+        if second:
+            registers.add("x" + second[1])
+    base = re.search(r"\[(x\d+)[^]]*\](?:!|,)", body)
+    if writeback and base:
+        registers.add(base[1])
+    return registers
+
+
+def stack_access_indices(function):
+    """Load/store accesses via SP or an established ARM64 frame pointer.
+
+    A forward must-analysis keeps x29 only where every incoming CFG path has
+    established it from SP without overwriting it. Pre/post-index operands use
+    the incoming fact before writeback. Accesses do not imply confirmed spills.
+    """
+    instructions = function["instructions"]
+    if not instructions:
+        return []
+    addresses = {i["address"]: n for n, i in enumerate(instructions)}
+
+    def establishes(body):
+        return re.fullmatch(
+            r"(?:mov\s+x29,\s*sp|(?:add|sub)\s+x29,\s*sp,\s*#(?:0x[0-9a-f]+|\d+))",
+            body,
+        ) is not None
+
+    def restores_at_exit(index):
+        body = instructions[index]["text"]
+        if not opcode(body).startswith(("ldp", "ldnp")) or "[sp" not in body:
+            return False
+        for following in instructions[index + 1:]:
+            body = following["text"]
+            if opcode(body) in ("ret", "retaa", "retab"):
+                return True
+            target = target_operand(body)
+            if opcode(body) == "b" and target and int(target[1], 16) not in addresses:
+                return True  # frame restored before a tail call outside this body
+            if is_branch(body) or is_call(body) or "x29" in body:
+                return False
+        return False
+
+    # A normal prologue's invariant also covers jump-table / exception blocks
+    # whose incoming edges are absent from numeric direct-branch disassembly.
+    # Use it only if all later x29 definitions establish a frame or restore it
+    # immediately along an exit path; arbitrary clobbers disable this inference.
+    prologue = []
+    for instruction in instructions:
+        body = instruction["text"]
+        if is_branch(body) or is_call(body) or opcode(body) in ("ret", "br"):
+            break
+        prologue.append(body)
+    invariant = any(establishes(body) for body in prologue) and all(
+        establishes(i["text"]) or restores_at_exit(n)
+        for n, i in enumerate(instructions)
+        if "x29" in written_registers(i["text"], writeback=False)
+    )
+    incoming = [None] * len(instructions)
+    incoming[0] = False
+    pending = [0]
+    while pending:
+        index = pending.pop()
+        body = instructions[index]["text"]
+        op = opcode(body)
+        state = True if establishes(body) else (
+            False if "x29" in written_registers(body, writeback=False) else incoming[index]
+        )
+        successors = []
+        if is_branch(body) and not is_call(body):
+            target = target_operand(body)
+            if target and int(target[1], 16) in addresses:
+                successors.append(addresses[int(target[1], 16)])
+        if op not in ("b", "br", "braa", "brab", "ret", "retaa", "retab"):
+            if index + 1 < len(instructions):
+                successors.append(index + 1)
+        for dest in successors:
+            merged = state if incoming[dest] is None else incoming[dest] and state
+            if incoming[dest] != merged:
+                incoming[dest] = merged
+                pending.append(dest)
+    return [
+        n for n, instruction in enumerate(instructions)
+        if opcode(instruction["text"]).startswith(("ld", "st"))
+        and (memory := re.search(r"\[(sp|x29)\b", instruction["text"]))
+        and (memory[1] == "sp" or incoming[n] is True or (incoming[n] is None and invariant))
+    ]
+
+
 def source_instructions(text):
     instructions = []
     for line in text.splitlines():

@@ -1,0 +1,60 @@
+
+stack.so:	file format mach-o arm64
+
+Sections:
+Idx Name          Size     VMA              Type
+  0 __text        00000098 0000000000000280 TEXT
+
+SYMBOL TABLE:
+00000000000002e0 g     F __TEXT,__text volas_core::frame::dispatch
+0000000000000280 g     F __TEXT,__text volas_core::frame::execute
+0000000000000300 g     F __TEXT,__text volas_core::frame::indirect
+00000000000002e8 g     F __TEXT,__text volas_core::frame::merge
+
+Disassembly of section __TEXT,__text:
+
+0000000000000280 <volas_core::frame::execute>:
+     280:      	stp	x29, x30, [sp, #-0x80]!
+     284:      	add	x29, sp, #0x50
+     288:      	ldur	q0, [sp, #0x3c]
+     28c:      	stur	q0, [sp, #0x3c]
+     290:      	stp	x3, x4, [x29, #-0x10]!
+     294:      	ldp	x3, x4, [x29], #0x10
+     298:      	ldur	x1, [x29, #-0x8]
+     29c:      	stur	x1, [x29, #-0x8]
+     2a0:      	str	x2, [sp, #0x8]!
+     2a4:      	ldr	x2, [sp], #0x8
+     2a8:      	ldp	x3, x4, [sp, #0x10]
+     2ac:      	stnp	x3, x4, [sp, #0x10]
+     2b0:      	ldnp	x3, x4, [sp, #0x10]
+     2b4:      	ldrsb	x5, [sp, #0x20]
+     2b8:      	ldursh	x5, [x29, #-0x10]
+     2bc:      	ldrsw	x5, [sp, #0x20]
+     2c0:      	ld1.16b	{ v0 }, [sp]
+     2c4:      	st1.16b	{ v0 }, [sp]
+     2c8:      	prfm	pldl1keep, [sp]
+     2cc:      	str	x0, [x19]
+     2d0:      	mov	x29, x19
+     2d4:      	ldur	x0, [x29, #-0x8]
+     2d8:      	ldp	x29, x30, [sp], #0x80
+     2dc:      	ret
+
+00000000000002e0 <volas_core::frame::dispatch>:
+     2e0:      	ldur	x0, [x29, #-0x8]
+     2e4:      	ret
+
+00000000000002e8 <volas_core::frame::merge>:
+     2e8:      	mov	x29, sp
+     2ec:      	cbz	x0, 0x2f4 <volas_core::frame::merge+0xc>
+     2f0:      	mov	x29, x19
+     2f4:      	ldur	x0, [x29, #-0x8]
+     2f8:      	str	x0, [sp]
+     2fc:      	ret
+
+0000000000000300 <volas_core::frame::indirect>:
+     300:      	mov	x29, sp
+     304:      	br	x0
+     308:      	ldur	x1, [x29, #-0x8]
+     30c:      	str	x1, [sp]
+     310:      	ldp	x29, x30, [sp]
+     314:      	b	0x2e0 <volas_core::frame::dispatch>

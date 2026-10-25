@@ -3,7 +3,27 @@
 from collections import Counter
 import re
 
-from asm_symbols import is_branch, is_call, opcode, target_operand
+from asm_symbols import is_branch, is_call, opcode, target_operand, written_registers
+
+
+def disassemble(objdump, library, output):
+    """LLVM owns object-format decoding; retain its numeric CFG and binding facts.
+
+    Generic --symbolize-operands removes numeric branch targets and still uses
+    nearest-symbol guesses for Mach-O imports. Its indirect/bind/dyld tables and
+    ELF dynamic relocations/PLT labels supply the actual import identities.
+    """
+    text = output([
+        str(objdump), "--disassemble", "--demangle", "--no-show-raw-insn",
+        "--section-headers", "--private-headers", "--syms", "--reloc",
+        "--dynamic-reloc", str(library),
+    ])
+    if "file format mach-o" in text:
+        text += "\n" + output([
+            str(objdump), "--macho", "--indirect-symbols", "--bind",
+            "--lazy-bind", "--weak-bind", "--dyld-info", str(library),
+        ])
+    return text
 
 
 class References:
@@ -88,9 +108,87 @@ class References:
             if sec and (address, name) not in known:
                 self.symbols.append((sec[0], address, 0, name))
 
+        self.imports = {}
+        self.import_sections = {
+            "__stubs", "__auth_stubs", "__got", "__auth_got", "__auth_ptr",
+            "__la_symbol_ptr", "__nl_symbol_ptr", ".plt", ".plt.sec", ".plt.got",
+            ".iplt", ".got", ".got.plt", ".igot.plt",
+        }
+        # LLVM decodes Mach-O section types too, including renamed stub/pointer
+        # sections. Conventional names above also identify incomplete captures.
+        for block in text.split("Section\n")[1:]:
+            name = re.match(r"\s+sectname (\S+)", block)
+            if name and re.search(
+                r"^\s+type S_(?:SYMBOL_STUBS|(?:NON_LAZY|LAZY|LAZY_DYLIB)_SYMBOL_POINTERS)\b",
+                block, re.M,
+            ):
+                self.import_sections.add(name[1])
+        self.read_imports(text, functions)
         self.resolved = {}
         for function in functions.values():
             self.resolve_pages(function)
+
+    def read_imports(self, text, functions):
+        """Consume LLVM's decoded identities, never infer an import from a slot.
+
+        Keep conflicting facts unresolved. LOCAL/ABSENT indirect entries are not
+        symbols. Bind/dyld records also cover pointers outside named GOT sections.
+        """
+        indirect, table = False, None
+        bindings = {}
+        headings = {
+            "dyld information:": "dyld",
+            "Bind table:": "bind",
+            "Lazy bind table:": "lazy",
+            "Weak bind table:": "weak",
+        }
+        for line in text.splitlines():
+            if line in headings:
+                table = headings[line]
+            heading = re.match(r"Indirect symbols for \([^,]+,([^)]*)\)", line)
+            if heading:
+                indirect = True
+                self.import_sections.add(heading[1])
+                continue
+            slot = re.fullmatch(r"0x([0-9a-fA-F]+)\s+\d+\s+(\S+)", line)
+            if indirect and slot:
+                self.imports.setdefault(int(slot[1], 16), set()).add(slot[2])
+            elif line and not line.startswith(("address", "0x")):
+                indirect = False
+            # Decoded dynamic relocations, not section-relative instruction
+            # relocations (whose offset has a colon). RELATIVE has no import.
+            dynamic = re.fullmatch(r"([0-9a-fA-F]+)\s+(R_\S+)\s+(\S+)", line)
+            if dynamic and not dynamic[2].endswith("RELATIVE"):
+                self.imports.setdefault(int(dynamic[1], 16), set()).add(dynamic[3])
+            bind = re.match(r"^\S+\s+\S+\s+0x([0-9a-fA-F]+)\s+(.+)$", line)
+            if not table or not bind:
+                continue
+            fields = bind[2].split()
+            if table == "dyld":
+                if len(fields) < 5 or fields[1] != "bind":
+                    continue  # rebases describe internal pointers, not imports
+                addend = int(fields[2], 0)
+            elif table == "lazy":
+                if len(fields) != 2:
+                    continue
+                addend = 0
+            else:
+                if len(fields) < 3 or fields[0] != "pointer":
+                    continue
+                addend = int(fields[1], 0)
+            bindings.setdefault(int(bind[1], 16), set()).add((fields[-1], addend))
+        for address, values in bindings.items():
+            # Indirect symbols name the symbol, bindings additionally supply its
+            # addend. Matching records refine that identity; disagreements remain
+            # a conflict instead of silently selecting a different import.
+            names = self.imports.setdefault(address, set())
+            names.difference_update(name for name, _ in values)
+            names.update(name + (f",{addend:+d}" if addend else "") for name, addend in values)
+        # LLVM synthesizes ELF PLT labels from dynamic relocations. Unlike a
+        # nearest-symbol annotation, the label names the exact stub entry.
+        for name, function in functions.items():
+            if name.endswith("@plt") and function.get("section") in self.import_sections:
+                self.imports.setdefault(function["address"], set()).add(name[:-4])
 
     def resolve_pages(self, function):
         """Track ADRP definitions to their ADD/LDR consumers within a basic block.
@@ -138,20 +236,8 @@ class References:
                 self.resolved[definition] = (
                     original[: target.start()] + "@page(" + ",".join(refs) + ")"
                 )
-            # ARM instructions that write the first register kill its page fact.
-            # Stores, compares and control transfers do not define that operand.
-            dest = re.match(r"\S+\s+([xw]\d+)\b", body)
-            if dest and not (
-                op.startswith("st") or op in ("cmp", "cmn", "tst") or is_branch(body)
-            ):
-                pages.pop("x" + dest[1][1:], None)
-            if op.startswith("ldp"):
-                second = re.match(r"\S+\s+\w+,\s*[xw](\d+)", body)
-                if second:
-                    pages.pop("x" + second[1], None)
-            writeback = re.search(r"\[(x\d+)[^]]*\](?:!|,)", body)
-            if writeback:
-                pages.pop(writeback[1], None)
+            for register in written_registers(body):
+                pages.pop(register, None)
             if is_branch(body) or is_call(body) or op in ("ret", "br", "braa", "brab"):
                 pages.clear()
 
@@ -166,9 +252,24 @@ class References:
         )
 
     def reference(self, address, function, page=False):
+        # An unmatched ADRP names a page, not the import at its first slot. Even
+        # if LLVM binds that slot, a later unpaired load can reach another one.
+        # Paired consumers have already replaced their definition in resolved.
+        if page and any(
+            name in self.import_sections and start & ~4095 <= address < start + size
+            for name, start, size in self.sections
+        ):
+            return "@unresolved(import-page)"
+        imports = self.imports.get(address)
+        if imports:
+            if len(imports) == 1:
+                return f"@import({next(iter(imports))})"
+            return "@unresolved(import-conflict)"
         section = self.section(address)
         if section:
             name, start, size = section
+            if name in self.import_sections:
+                return f"@unresolved(import,{self.labels[section]},{address - start})"
             candidates = [
                 s
                 for s in self.symbols

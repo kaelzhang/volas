@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 import re
 import subprocess
+import shutil
 import sys
 
 import pytest
@@ -23,6 +24,7 @@ def final_report(
     empty=False,
     inventory=("execute", "dispatch"),
     missing=False,
+    library=None,
 ):
     sys.path.insert(0, str(ROOT / "scripts"))
     import pgo_asm
@@ -30,14 +32,20 @@ def final_report(
     site = tmp_path / "site"
     site.mkdir(parents=True, exist_ok=True)
     (site / "volas_rs.so").touch()
+    if library:
+        shutil.copyfile(library, site / "volas_rs.so")
     report = tmp_path / "report"
     real_output = pgo_asm.output
 
     def output(cmd):
+        if "--macho" in cmd:
+            # Callers supply the complete, unedited capture, including metadata.
+            return ""
         return text if str(LLVM / "llvm-objdump") == cmd[0] else real_output(cmd)
 
     with monkeypatch.context() as patch:
-        patch.setattr(pgo_asm, "output", output)
+        if text is not None:
+            patch.setattr(pgo_asm, "output", output)
         patch.setattr(pgo_asm, "manifest", lambda _: {"mode": "normal"})
         (tmp_path / "hot_asm_inventory.txt").write_text(
             "".join(f"core|{name}|max|test\n" for name in inventory)
@@ -230,19 +238,11 @@ hidden:
             capture_output=True,
         )
         subprocess.run(["strip", "-x", str(library)], check=True, capture_output=True)
-        text = subprocess.check_output(
-            [
-                str(LLVM / "llvm-objdump"),
-                "--disassemble",
-                "--demangle",
-                "--no-show-raw-insn",
-                "--syms",
-                "--section-headers",
-                "--private-headers",
-                "--reloc",
-                str(library),
-            ],
-            text=True,
+        from asm_references import disassemble
+
+        text = disassemble(
+            LLVM / "llvm-objdump", library,
+            lambda cmd: subprocess.check_output(cmd, text=True),
         )
         directory, report = final_report(
             tmp_path / str(origin), monkeypatch, text, base

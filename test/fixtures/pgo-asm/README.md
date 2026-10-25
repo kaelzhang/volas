@@ -10,10 +10,12 @@ To reproduce on macOS arm64, in a temporary directory containing `macho.s`:
 clang -c macho.s -o probe.o
 clang -shared probe.o -Wl,-undefined,dynamic_lookup,-no_fixup_chains,-image_base,0 -o linked.dylib
 strip -x linked.dylib
-"$(rustc --print sysroot)/lib/rustlib/aarch64-apple-darwin/bin/llvm-objdump" --disassemble --demangle --no-show-raw-insn --section-headers --syms --reloc linked.dylib > macho-0.txt
+"$(rustc --print sysroot)/lib/rustlib/aarch64-apple-darwin/bin/llvm-objdump" --disassemble --demangle --no-show-raw-insn --section-headers --private-headers --syms --reloc --dynamic-reloc linked.dylib > macho-0.txt
+"$(rustc --print sysroot)/lib/rustlib/aarch64-apple-darwin/bin/llvm-objdump" --macho --indirect-symbols --bind --lazy-bind --weak-bind --dyld-info linked.dylib >> macho-0.txt
 clang -shared probe.o -Wl,-undefined,dynamic_lookup,-no_fixup_chains,-image_base,0x4000 -o linked.dylib
 strip -x linked.dylib
-"$(rustc --print sysroot)/lib/rustlib/aarch64-apple-darwin/bin/llvm-objdump" --disassemble --demangle --no-show-raw-insn --section-headers --syms --reloc linked.dylib > macho-16384.txt
+"$(rustc --print sysroot)/lib/rustlib/aarch64-apple-darwin/bin/llvm-objdump" --disassemble --demangle --no-show-raw-insn --section-headers --private-headers --syms --reloc --dynamic-reloc linked.dylib > macho-16384.txt
+"$(rustc --print sysroot)/lib/rustlib/aarch64-apple-darwin/bin/llvm-objdump" --macho --indirect-symbols --bind --lazy-bind --weak-bind --dyld-info linked.dylib >> macho-16384.txt
 ```
 
 The `macho-section-one` / `macho-section-two` sources and dumps test a real

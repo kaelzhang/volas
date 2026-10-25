@@ -274,11 +274,32 @@ function must contain instructions. Address references use defined symbols,
 section-relative locations (distinguishing same-named sections) and relocation records; unresolved references are
 explicitly marked, rather than trusting LLVM nearest-symbol annotations. Comparison
 reports list added, removed and modified functions across both inventories.
-The reference owner resolves ARM64 ADRP plus ADD/LDR page offsets and x86
-RIP-relative displacements to their reached symbol and offset. Page definitions
-are tracked within basic blocks until register writes or control transfers.
+The single reference owner consumes LLVM's numeric disassembly, Mach-O
+indirect-symbol/bind/dyld tables, ELF dynamic relocations and LLVM's PLT labels.
+Stub and GOT/PLT operands name their actual imports, including binding addends;
+slot addresses are never import identities. An unpaired ADRP that overlaps an import page
+remains unresolved, even if LLVM binds the page's first slot. Missing or conflicting identities
+remain explicit unresolved references. A comparison with any unresolved reference
+has `comparison_complete=false` and marks the affected function as changed even
+when its slot is identical. LLVM's generic `--symbolize-operands` alone retains
+nearest-symbol guesses for Mach-O stubs and removes numeric CFG targets, so it
+cannot replace these tables. The owner retains basic-block ARM64 ADRP/ADD/LDR and
+x86 RIP operand normalization where LLVM does not provide a complete operand.
 Address-only moves compare equal; target changes and non-address immediates
 remain visible.
+Stack accesses come from the shared instruction classifier: ARM64 load/store
+forms (including unscaled and pre/post-index forms) through SP or x29 established
+from SP. Frame facts propagate through CFG joins and end on register overwrites;
+index writeback preserves a frame-derived address. A prologue invariant covers
+indirect-jump and exception blocks when all later frame-pointer definitions
+establish the frame or restore it along an exit path. `stack_accesses` lists memory
+accesses, while `confirmed_spills` requires separate compiler evidence and is
+currently empty; this does not assert that no spills occurred.
+The existing CI test, coverage and assembly jobs read Rust and maturin versions
+from the build owner through `scripts/check_toolchain.py --versions`. They install
+those versions plus `llvm-tools-preview` and run `scripts/check_toolchain.py` to
+verify the active compiler, Cargo, maturin and all three sysroot LLVM tools before
+their existing checks. This adds no PGO release job.
 The integration tests require the active Rust sysroot LLVM tools
 (`rustup component add llvm-tools-preview`) and clang; their Cargo fixtures use
 the host architecture and symbol ABI on both ELF and Mach-O. PGO differences
