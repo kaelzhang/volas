@@ -20,6 +20,19 @@ strictly increase and cannot contain NaT; integer and string labels must be uniq
 The Rust data model exposes checked constructors and read-only Column / Series
 accessors; see the [Rust data-model guide](crates/volas/README.md#the-data-model).
 
+Rust writes validate the complete selection before publication: `Column::scatter`
+checks positions and value counts, and `DataFrame::append` checks schema, values
+and one index admission plan before committing. `OpenPeriod::push` uses that same
+checked append. Reduced rows use `check_folded_row(...).land()`; raw append and
+fold publication helpers are private. `Series::from_column` and
+`DataFrame::from_columns` build checked positional indexes from the admitted shape.
+NumPy and DLPack exports dispatch the storage type once inside the Column owner.
+Reduction admissions retain an immutable positions slice or an owned range.
+`RowGroups::new` and `RowGroups::from_offsets` validate group counts, nonempty
+groups and every position once; their immutable proof can reduce any column of
+the admitted height via `reduce` or `reduce_with_spare`. Arbitrary iterators
+cannot supply either admission proof.
+
 ```python
 from volas import read_csv
 
@@ -279,3 +292,5 @@ to follow new indicators, benchmark results, and releases.
 
 Developer notes, local build commands, dependency groups, and benchmark report
 guidance live in [DEVELOPMENT.md](DEVELOPMENT.md).
+
+Raw missing-placeholder growth is internal to admitted frame writes; public column extension uses `Column::append` with a typed missing column.

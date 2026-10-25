@@ -79,7 +79,7 @@ a `Column`. `Series::new` checks value / index lengths in every build, while
 `name()`, `data()` and `index()` borrow its parts. Checked `Series::scatter`
 writes selected values while preserving the structure and labels.
 
-Every labelled index is built with `Index::new(name, IndexKind::...)`. Datetime
+Explicit index labels are built with `Index::new(name, IndexKind::...)`. Datetime
 labels must strictly increase and contain no NaT; integer and string labels must
 be unique (their order is unrestricted). `DataFrame::new` validates its index too.
 `Index::take`, `extend` and frame row selection return an error if the resulting
@@ -95,6 +95,32 @@ assert_eq!(series.name(), Some("close"));
 assert_eq!(series.data().len(), series.index().len());
 assert!(series.index().take(&[1, 0]).is_err());
 assert!(Index::new(None, IndexKind::Int64(vec![1, 1].into())).is_err());
+```
+
+Rust writes validate the complete selection before publication: `Column::scatter`
+checks positions and value counts, and `DataFrame::append` checks schema, values
+and one index admission plan before committing. `OpenPeriod::push` uses that same
+checked append. Reduced rows use `check_folded_row(...).land()`; raw append and
+fold publication helpers are private. `Series::from_column` and
+`DataFrame::from_columns` build checked positional indexes from the admitted shape.
+NumPy and DLPack exports dispatch the storage type once inside the Column owner.
+Reduction admissions retain an immutable positions slice or an owned range.
+`RowGroups::new` and `RowGroups::from_offsets` validate group counts, nonempty
+groups and every position once; their immutable proof can reduce any column of
+the admitted height via `reduce` or `reduce_with_spare`. Arbitrary iterators
+cannot supply either admission proof.
+
+Cell folds use `Column::check_fold_cell` or `check_reduced_cell`; a reduction
+into an existing cell uses `check_reduction`. Each returns a target-bound plan
+whose `land()` checks and publishes the operation. Raw fold commits are private.
+
+```rust
+use volas::Column;
+use volas::time::Agg;
+let input = Column::i64(vec![2, 3]);
+let mut sum = Column::i64(vec![0]);
+sum.check_reduction(0, Agg::Sum.as_combine_op(), &input, 0..2).unwrap().land().unwrap();
+assert_eq!(sum.as_i64(), Some(&[5][..]));
 ```
 
 ### Missing values (NA)
@@ -252,6 +278,10 @@ period's fine bars. `frame(&self)` returns an independent snapshot while the
 cumulator remains usable. When finished, `into_frame(self)` consumes the
 cumulator and transfers its output buffers. `into_parts(self)` additionally
 returns the open period and its running aggregate for live continuation.
+The running aggregate admits one bar through `check_push(bar, resent).land()`.
+`check_restart(bar, &spec)` reduces a later period's first bar once; its `current()`
+can be appended to the output before `land()` publishes that restart.
+
 
 `Cumulator::from_frame(&fine, tf, spec)` constructs and ingests an initial batch
 with output capacity for consuming materialization and the first live append.
@@ -299,3 +329,5 @@ one dependency. Low-level core storage types are not exported by the facade.
 ## License
 
 [MIT](https://github.com/kaelzhang/volas/blob/main/LICENSE)
+
+Raw missing-placeholder growth is internal to admitted frame writes; public column extension uses `Column::append` with a typed missing column.

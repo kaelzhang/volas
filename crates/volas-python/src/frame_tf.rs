@@ -472,9 +472,14 @@ impl PyDataFrame {
                 // bar (never stepping the closed bar again). The open period switches only
                 // once the row is in.
                 let open = OpenPeriod::new(bar.clone()).map_err(pyerr)?;
-                let row = aggregate_period(bar, &tfs.cumulators, frame, &tz).map_err(pyerr)?;
-                inner.append_new(&row).map_err(pyerr)?;
-                if let Some(aggregate) = &mut tfs.aggregate { aggregate.restart(row, bar); }
+                if let Some(aggregate) = &mut tfs.aggregate {
+                    let restart = aggregate.check_restart(bar, &tfs.cumulators).map_err(pyerr)?;
+                    inner.append_new(restart.current()).map_err(pyerr)?;
+                    restart.land();
+                } else {
+                    let row = aggregate_period(bar, &tfs.cumulators, frame, &tz).map_err(pyerr)?;
+                    inner.append_new(&row).map_err(pyerr)?;
+                }
                 tfs.open = Some(open);
                 tfs.open_key = Some(key);
                 tfs.refold_next = false;
@@ -496,8 +501,8 @@ impl PyDataFrame {
                     inner.check_fold_from(aggregate.prefix(resent), bar, ops).map_err(pyerr)?;
                     if tfs.aggregate.is_none() { tfs.aggregate = rebuilt; }
                     let aggregate = tfs.aggregate.as_mut().unwrap();
-                    aggregate.push(bar, resent).map_err(pyerr)?;
-                    inner.write_folded_row(aggregate.current(), ops).map_err(pyerr)?;
+                    aggregate.check_push(bar, resent).map_err(pyerr)?.land().map_err(pyerr)?;
+                    inner.check_folded_row(aggregate.current(), ops).map_err(pyerr)?.land().map_err(pyerr)?;
                 } else {
                     // A lossless dtype write can leave the displayed coarse value
                     // valid while reducing the converted fine bars overflows. Keep
@@ -516,9 +521,9 @@ impl PyDataFrame {
             } else {
                 // Preserve the single-cell fold as well as the batch reduction:
                 // their NaN payloads (and rounding after a dtype write) can differ.
-                inner.fold_forming_row(inner.height() - 1, bar, 0, ops).map_err(pyerr)?;
+                inner.check_forming_fold(inner.height() - 1, bar, 0, ops).map_err(pyerr)?.land().map_err(pyerr)?;
                 if tfs.aggregate.is_none() { tfs.aggregate = rebuilt; }
-                if tfs.aggregate.as_mut().is_some_and(|a| a.push(bar, false).is_err()) {
+                if tfs.aggregate.as_mut().is_some_and(|a| a.check_push(bar, false).and_then(|push| push.land()).is_err()) {
                     // A dtype write can make the raw reduction overflow while the
                     // displayed incremental fold still fits. Its error stays deferred.
                     tfs.aggregate = None;

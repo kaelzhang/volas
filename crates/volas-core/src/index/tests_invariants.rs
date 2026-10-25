@@ -142,10 +142,10 @@ fn range_label_slicing_handles_the_inclusive_last_int64_label() {
 fn checked_extension_rejects_incompatible_index_kinds() {
     let integer = Index::new(None, IndexKind::Int64(vec![1, 2])).unwrap();
     let string = Index::new(None, IndexKind::Str(vec!["a".into()])).unwrap();
-    assert!(integer.check_extension(&string).is_err());
-    assert!(string.check_extension(&integer).is_err());
+    assert!(integer.plan_append(&string, AppendMode::Extend).is_err());
+    assert!(string.plan_append(&integer, AppendMode::Extend).is_err());
     let explicit_range = Index::new(None, IndexKind::Range { start: 1, len: 1 }).unwrap();
-    assert!(integer.check_extension(&explicit_range).is_err());
+    assert!(integer.plan_append(&explicit_range, AppendMode::Extend).is_err());
 }
 
 #[test]
@@ -168,7 +168,7 @@ fn wide_integer_continuation_checks_its_inclusive_end_without_truncation() {
     let integer = Index::new(None, IndexKind::Int64(vec![1, -1])).unwrap();
     assert_eq!(integer.continuation_clash(added, 0..2), Some(1));
     let range = Index::new(None, IndexKind::Range { start: 0, len: added }).unwrap();
-    assert!(matches!(integer.explicit_continuation(&range), Err(VolasError::Overflow(_))));
+    assert!(matches!(integer.plan_append(&range, AppendMode::Rows { from: 2, shown: 2 }), Err(VolasError::Overflow(_))));
 }
 
 #[test]

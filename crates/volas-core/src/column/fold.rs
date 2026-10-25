@@ -72,6 +72,25 @@ impl CombineOp {
 }
 
 impl Column {
+    #[inline]
+    pub(crate) fn check_row(&self, row: usize) -> Result<()> {
+        if row >= self.len() { return Err(row_error()); }
+        Ok(())
+    }
+
+    /// Reduce a checked nonempty selection into a new column. Only positions need
+    /// a separate preflight: arithmetic may fail on the unpublished candidate.
+    pub fn reduce_selection(&self, op: CombineOp, kept: &[usize]) -> Result<Column> {
+        if !op.supports(self.dtype()) { return Err(op.unsupported(self.dtype())); }
+        let first = kept.first().ok_or_else(|| VolasError::Value("aggregation requires at least one row".into()))?;
+        if kept.iter().any(|&i| i >= self.len()) {
+            return Err(VolasError::Value("aggregation row is outside the column".into()));
+        }
+        let mut out = self.take(&[*first]);
+        out.reduce_into(0, op, self, kept.iter().copied())?;
+        Ok(out)
+    }
+
     /// Whether this cell is a missing aggregation input. Raw storage validity is
     /// unchanged; floating inputs use the shared non-finite computation rule.
     #[inline]
@@ -83,24 +102,9 @@ impl Column {
         }
     }
 
-    /// Reduce ordered, nonempty groups into one typed output buffer. Each group is
-    /// a slice of source row positions (duplicates can already have been removed).
-    /// The caller owns grouping; the fold and its exact arithmetic stay here. An
-    /// error carries its group number so column-wise callers can preserve the
-    /// period-then-column error priority without materializing period frames.
-    /// The repeatable group iterator also supplies a density estimate, so a shared
-    /// finite-input fact is learned once without scanning a sparse source.
-    pub fn reduce_groups<'a>(
-        &self,
-        op: CombineOp,
-        groups: impl ExactSizeIterator<Item = &'a [usize]> + Clone,
-    ) -> std::result::Result<Column, (usize, VolasError)> {
-        self.reduce_groups_with_spare(op, groups, 0, 0)
-    }
-
     /// The grouped fold with capacity for a following append. `spare_bytes` is
     /// the additional UTF-8 payload size; fixed-width columns only use `spare_rows`.
-    pub fn reduce_groups_with_spare<'a>(
+    pub(crate) fn reduce_groups_with_spare<'a>(
         &self,
         op: CombineOp,
         groups: impl ExactSizeIterator<Item = &'a [usize]> + Clone,
@@ -184,7 +188,7 @@ impl Column {
     /// value). [`combine_at`](Self::combine_at) then folds each later value in. A
     /// `Str` cell is written in place only as the column's last row (the forming
     /// row; a [`VolasError::Shape`] error elsewhere).
-    pub fn init_at(&mut self, row: usize, op: CombineOp, src: &Column, src_row: usize) -> Result<()> {
+    pub(crate) fn init_at(&mut self, row: usize, op: CombineOp, src: &Column, src_row: usize) -> Result<()> {
         if src.dtype() != self.dtype() || !op.supports(self.dtype()) {
             return self.fold_converted(row, op, src, src_row, true);
         }
@@ -202,7 +206,7 @@ impl Column {
     /// uniquely-owned buffer. One dtype dispatch per call; another source dtype or
     /// an unsupported `op` takes the cold path. A `Str` cell folds in place only as
     /// the last row.
-    pub fn combine_at(
+    pub(crate) fn combine_at(
         &mut self,
         row: usize,
         op: CombineOp,
@@ -227,17 +231,27 @@ impl Column {
                 }
             }
             (Column { data: ColumnData::Bool(..) }, Column { data: ColumnData::Bool(..) }) | (Column { data: ColumnData::Str(..) }, Column { data: ColumnData::Str(..) }) if op.is_endpoint() => {
-                if !self.is_valid(row) {
-                    return Ok(()); // a missing aggregate stays missing
-                }
-                if !src.is_valid(r) {
-                    return self.set_missing_at(row);
-                }
-                if op == CombineOp::Replace {
-                    self.write_present(row, src, r)?;
-                }
+                return self.combine_endpoint(row, op, src, r);
             }
             _ => return self.fold_converted(row, op, src, src_row, false),
+        }
+        Ok(())
+    }
+
+    // Boolean/string endpoints do not belong in the numeric per-bar body.
+    // Keep their complete presence/UTF-8 handling together, without conversion
+    // or a temporary Column on this already matching-dtype branch.
+    #[cold]
+    #[inline(never)]
+    fn combine_endpoint(&mut self, row: usize, op: CombineOp, src: &Column, r: usize) -> Result<()> {
+        if !self.is_valid(row) {
+            return Ok(()); // a missing aggregate stays missing
+        }
+        if !src.is_valid(r) {
+            return self.set_missing_at(row);
+        }
+        if op == CombineOp::Replace {
+            self.write_present(row, src, r)?;
         }
         Ok(())
     }
@@ -247,7 +261,7 @@ impl Column {
     /// intermediate produced by finite inputs, which must still visit later inputs. Endpoints use
     /// the same canonical missing value as `reduce_into`. This preserves even NaN
     /// payloads and signed zeros when a cached prefix replaces a full re-reduction.
-    pub fn combine_reduced_at(&mut self, row: usize, op: CombineOp, src: &Column, r: usize, had_missing: bool) -> Result<()> {
+    pub(crate) fn combine_reduced_at(&mut self, row: usize, op: CombineOp, src: &Column, r: usize, had_missing: bool) -> Result<()> {
         if op.is_endpoint() && (!self.is_valid(row) || src.is_missing_input(r)) {
             return self.set_missing_at(row);
         }
@@ -293,6 +307,7 @@ impl Column {
         &self, row: usize, op: CombineOp, restart: bool,
         cells: impl IntoIterator<Item = (&'c Column, usize)>,
     ) -> Result<Option<i64>> {
+        self.check_row(row)?;
         let dtype = self.dtype();
         if !op.supports(dtype) {
             return Err(op.unsupported(dtype));
@@ -309,6 +324,7 @@ impl Column {
         let integer = matches!(dtype, DType::I64 | DType::I32);
         let mut first = restart;
         for (src, r) in cells {
+            src.check_row(r)?;
             let converted;
             let (src, r) = if src.dtype() == dtype {
                 (src, r)
@@ -342,11 +358,8 @@ impl Column {
     /// [`init_at`](Self::init_at) with the first row and
     /// [`combine_at`](Self::combine_at) with each later one. An empty `rows` leaves
     /// the cell unchanged.
-    pub fn reduce_into(
-        &mut self,
-        row: usize,
-        op: CombineOp,
-        src: &Column,
+    pub(crate) fn reduce_into(
+        &mut self, row: usize, op: CombineOp, src: &Column,
         rows: impl IntoIterator<Item = usize>,
     ) -> Result<()> {
         let mut rows = rows.into_iter();
@@ -572,9 +585,6 @@ fn float_endpoint_values<'a, T: FloatInput>(
         let values = collect_with_spare(groups.map(|rows| {
             let first = rows[0];
             let last = rows[rows.len() - 1];
-            let len = s.len();
-            let in_bounds = rows.iter().fold(true, |ok, &r| ok & (r < len));
-            assert!(in_bounds, "aggregation row is outside the column");
             s[endpoint_position(op, first, last, true)]
         }), spare);
         (values, Validity::default(), None)
@@ -866,11 +876,11 @@ mod aggregation_fact_tests {
             let known = Column::known_has_nonfinite;
             assert_eq!(known(&col), None);
             let sparse = [vec![0, 99]];
-            let out = col.reduce_groups(CombineOp::Sum, sparse.iter().map(Vec::as_slice)).unwrap();
+            let out = RowGroups::new(&sparse, col.len()).unwrap().reduce(&col, CombineOp::Sum).unwrap();
             assert_eq!(out.get_f64(0), 2.);
             assert_eq!(known(&col), None, "a sparse selection must not scan the source");
             let dense = [(0..100).collect::<Vec<_>>()];
-            let out = col.reduce_groups(CombineOp::Sum, dense.iter().map(Vec::as_slice)).unwrap();
+            let out = RowGroups::new(&dense, col.len()).unwrap().reduce(&col, CombineOp::Sum).unwrap();
             assert_eq!(out.get_f64(0), 100.);
             assert_eq!(known(&col), Some(false), "dense groups reuse one finite-input fact");
         }
@@ -881,7 +891,7 @@ mod aggregation_fact_tests {
         for col in [Column::f64(vec![1., 2., f64::INFINITY, 4.]),
                     Column::f32(vec![1., 2., f32::INFINITY, 4.])] {
             let groups = [vec![0, 1], vec![3]];
-            let out = col.reduce_groups(CombineOp::Sum, groups.iter().map(Vec::as_slice)).unwrap();
+            let out = RowGroups::new(&groups, col.len()).unwrap().reduce(&col, CombineOp::Sum).unwrap();
             assert_eq!(out.get_f64(0), 3.);
             assert_eq!(out.get_f64(1), 4.);
         }
@@ -897,8 +907,12 @@ mod endpoint_bounds_tests {
     fn finite_endpoints_validate_the_middle_positions_too() {
         let col = Column::f64(vec![1.; 100]);
         let dense = [(0..100).collect::<Vec<_>>()];
-        col.reduce_groups(CombineOp::Sum, dense.iter().map(Vec::as_slice)).unwrap();
+        RowGroups::new(&dense, col.len()).unwrap().reduce(&col, CombineOp::Sum).unwrap();
         let invalid = [vec![0, 1000, 1]];
-        col.reduce_groups(CombineOp::Keep, invalid.iter().map(Vec::as_slice)).unwrap();
+        RowGroups::new(&invalid, col.len()).unwrap();
     }
 }
+
+#[cold]
+#[inline(never)]
+fn row_error() -> VolasError { VolasError::Shape("column row position out of bounds".into()) }

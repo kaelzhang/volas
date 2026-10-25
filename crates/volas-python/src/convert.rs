@@ -24,12 +24,7 @@ use crate::*;
 /// missing cell, and the rarer `Str` / `Datetime` columns, take the borrowing export
 /// instead, so a missing cell is exported as missing — never as its payload.
 pub(crate) fn column_into_numpy<'py>(py: Python<'py>, col: Column) -> PyResult<Bound<'py, PyAny>> {
-    Ok(match col.dtype() {
-        DType::F64 => col.into_f64_vec().into_pyarray(py).into_any(),
-        DType::Bool if !col.has_missing() => col.into_bool_vec().map_err(pyerr)?.into_pyarray(py).into_any(),
-        DType::I64 if !col.has_missing() => col.into_i64_vec().map_err(pyerr)?.into_pyarray(py).into_any(),
-        _ => return column_to_numpy(py, &col),
-    })
+    col.into_export(crate::numpy_export::NumpyExport(py))
 }
 
 /// A column as a pandas array for `to_pandas`. With `nullable`, an int/bool
@@ -247,22 +242,7 @@ pub(crate) fn column_to_numpy<'py>(py: Python<'py>, col: &Column) -> PyResult<Bo
             col.to_f64_vec().into_pyarray(py).into_any()
         }
         // String columns become NumPy object arrays (pandas `object` dtype).
-        ColumnView::Str(v, val) => {
-            // a missing cell becomes Python `None` in the object array (pandas parity)
-            let items: Vec<Bound<'_, PyAny>> = (0..v.len())
-                .map(|i| {
-                    if val.is_valid(i) {
-                        v.get(i).into_pyobject(py).unwrap().into_any()
-                    } else {
-                        py.None().into_bound(py)
-                    }
-                })
-                .collect();
-            let list = PyList::new(py, items)?;
-            let kwargs = PyDict::new(py);
-            kwargs.set_item("dtype", "object")?;
-            py.import("numpy")?.call_method("array", (list,), Some(&kwargs))?
-        }
+        ColumnView::Str(v, val) => crate::numpy_export::string_array(py, v, val)?,
         // Datetime columns become NumPy datetime64[ns] arrays.
         ColumnView::Datetime(v) => v.to_vec().into_pyarray(py).call_method1("astype", ("datetime64[ns]",))?,
     })

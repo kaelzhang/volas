@@ -3,7 +3,7 @@
 #![doc = include_str!("../README.md")]
 
 pub use volas_core::{
-    Column, ColumnView, DType, DataFrame, Index, IndexKind, Label, Result, Scalar, Series, SliceBound, Tz, Validity,
+    Column, ColumnView, RowGroups, DType, DataFrame, Index, IndexKind, Label, Result, Scalar, Series, SliceBound, Tz, Validity,
     VolasError,
 };
 pub use volas_io::{read_csv, ReadCsvOptions};
@@ -55,3 +55,82 @@ pub mod time {
 /// assert!(Series::new(None, Column::i64(vec![1]), Arc::new(Index::new(None, volas::IndexKind::Range { start: 0, len: 2 }).unwrap())).is_err());
 /// ```
 mod invariant_examples {}
+
+/// Raw append commits are not a published write path.
+///
+/// ```compile_fail
+/// use volas::{Column, DataFrame};
+/// let mut dst = DataFrame::new(vec!["x".into()], vec![Column::i64(vec![1])], None).unwrap();
+/// let src = DataFrame::new(vec!["x".into()], vec![Column::str(vec!["bad".into()])], None).unwrap();
+/// dst.append_admitted(&src).unwrap();
+/// ```
+mod write_admission_examples {}
+
+/// A folded row needs the target-bound proof returned by checked admission.
+///
+/// ```compile_fail
+/// use volas::{Column, DataFrame};
+/// let mut dst = DataFrame::new(vec!["x".into()], vec![Column::i64(vec![1])], None).unwrap();
+/// let src = dst.clone();
+/// dst.write_folded_row(&src, &[]).unwrap();
+/// ```
+mod folded_admission_examples {}
+
+/// Raw cell-fold commits cannot bypass their checked target-bound admission.
+///
+/// ```compile_fail
+/// use volas::Column;
+/// let mut dst = Column::i64(vec![1]);
+/// let src = Column::i64(vec![2]);
+/// dst.combine_at(0, volas::time::Agg::Sum.as_combine_op(), &src, 0).unwrap();
+/// ```
+mod cell_admission_examples {}
+
+/// Running aggregate restarts also require their checked admission.
+///
+/// ```compile_fail
+/// use volas::{Column, DataFrame, Index, IndexKind, TimeFrame, Tz};
+/// use volas::time::{AggSpec, Cumulator};
+/// let bar = DataFrame::new(vec!["close".into()], vec![Column::i64(vec![1])],
+///     Some(Index::new(None, IndexKind::Datetime(vec![1], Tz::Utc)).unwrap())).unwrap();
+/// let (_, _, aggregate) = Cumulator::from_frame(&bar, TimeFrame::Min1, AggSpec::ohlcv()).unwrap().into_parts().unwrap();
+/// aggregate.unwrap().restart(bar.clone(), &bar);
+/// ```
+mod aggregate_admission_examples {}
+
+/// Forming-row commits cannot be called without their checked position plan.
+///
+/// ```compile_fail
+/// use volas::{Column, DataFrame};
+/// let mut dst = DataFrame::new(vec!["x".into()], vec![Column::i64(vec![1])], None).unwrap();
+/// let src = dst.clone();
+/// dst.fold_forming_row(0, &src, 0, &[]).unwrap();
+/// ```
+mod forming_admission_examples {}
+
+/// Reduction admission freezes positions; a user iterator is not a proof.
+///
+/// ```compile_fail
+/// use volas::{Column, time::Agg};
+/// let mut dst = Column::i64(vec![0]);
+/// let src = Column::i64(vec![1, 2]);
+/// dst.check_reduction(0, Agg::Sum.as_combine_op(), &src, (0..2).map(|i| i)).unwrap().land().unwrap();
+/// ```
+///
+/// Grouped construction cannot trust a user-supplied ExactSizeIterator.
+///
+/// ```compile_fail
+/// use volas::{Column, time::Agg};
+/// let src = Column::i64(vec![1]);
+/// src.reduce_groups(Agg::Last.as_combine_op(), [&[0][..]].into_iter()).unwrap();
+/// ```
+mod stable_selection_examples {}
+
+/// Raw placeholder growth is internal to an admitted frame append.
+///
+/// ```compile_fail
+/// use volas::Column;
+/// let mut target = Column::i64(vec![1]);
+/// target.append_na(usize::MAX);
+/// ```
+mod placeholder_admission_examples {}

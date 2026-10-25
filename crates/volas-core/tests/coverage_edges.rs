@@ -53,7 +53,7 @@ fn every_dtype_takes_missing_placeholders_and_a_tail_write() {
         (Column::datetime(vec![1, 2]), Column::datetime(vec![7, i64::MIN])),
     ];
     for (mut col, tail) in cols {
-        col.append_na(2);
+        col.append(&Column::na_of(col.dtype(), 2)).unwrap();
         assert_eq!(present(&col), [true, true, false, false], "{}", col.dtype());
         col.write_rows(2, &tail).unwrap();
         let want_last = tail.is_valid(1);

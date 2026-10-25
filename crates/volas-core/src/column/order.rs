@@ -288,37 +288,42 @@ impl Column {
             let converted = other.convert_lossless(self.dtype()).map_err(|e| self.append_error(other, e))?;
             return self.append(&converted);
         }
+        self.append_from(other, 0)
+    }
+
+    /// Commit the already admitted suffix without materializing columns or labels.
+    pub(crate) fn append_from(&mut self, other: &Column, start: usize) -> Result<()> {
         match (self, other) {
             (Column { data: ColumnData::F64(a) }, Column { data: ColumnData::F64(b) }) => {
-                a.append(b);
+                a.append(&b[start..]);
                 Ok(())
             }
             (Column { data: ColumnData::F32(a) }, Column { data: ColumnData::F32(b) }) => {
-                a.append(b);
+                a.append(&b[start..]);
                 Ok(())
             }
             (Column { data: ColumnData::Bool(a, av) }, Column { data: ColumnData::Bool(b, bv) }) => {
-                append_validity(av, a.len(), bv, b.len());
-                a.make_mut().extend_from_slice(b);
+                append_validity(av, a.len(), bv, start..b.len());
+                a.make_mut().extend_from_slice(&b[start..]);
                 Ok(())
             }
             (Column { data: ColumnData::I64(a, av) }, Column { data: ColumnData::I64(b, bv) }) => {
-                append_validity(av, a.len(), bv, b.len());
-                a.make_mut().extend_from_slice(b);
+                append_validity(av, a.len(), bv, start..b.len());
+                a.make_mut().extend_from_slice(&b[start..]);
                 Ok(())
             }
             (Column { data: ColumnData::I32(a, av) }, Column { data: ColumnData::I32(b, bv) }) => {
-                append_validity(av, a.len(), bv, b.len());
-                a.make_mut().extend_from_slice(b);
+                append_validity(av, a.len(), bv, start..b.len());
+                a.make_mut().extend_from_slice(&b[start..]);
                 Ok(())
             }
             (Column { data: ColumnData::Str(a, av) }, Column { data: ColumnData::Str(b, bv) }) => {
-                append_validity(av, a.len(), bv, b.len());
-                a.extend(b.iter());
+                append_validity(av, a.len(), bv, start..b.len());
+                a.extend(b.iter().skip(start));
                 Ok(())
             }
             (Column { data: ColumnData::Datetime(a) }, Column { data: ColumnData::Datetime(b) }) => {
-                a.make_mut().extend_from_slice(b);
+                a.make_mut().extend_from_slice(&b[start..]);
                 Ok(())
             }
             _ => unreachable!("dtypes matched above"), // LCOV_EXCL_LINE
@@ -343,6 +348,7 @@ impl Column {
     /// losslessly first, exactly as for [`append`](Self::append). A float write keeps
     /// the column's NaN fact.
     pub fn set_last_from(&mut self, src: &Column, src_row: usize) -> Result<()> {
+        src.check_row(src_row)?;
         let n = self.len();
         let Some(last) = n.checked_sub(1) else {
             return Err(VolasError::Shape("no last row to replace".into()));
@@ -398,7 +404,7 @@ impl Column {
     /// uniquely-owned buffer). One rule for a plain column absent from an appended
     /// frame and for a cached directive's stale rows (its refresh writes each row's
     /// value and presence over the placeholder, whatever dtype the directive has).
-    pub fn append_na(&mut self, len: usize) {
+    pub(crate) fn append_na(&mut self, len: usize) {
         let old = self.len();
         match self {
             Column { data: ColumnData::F64(v) } => v.append_repeated(f64::NAN, len),
@@ -429,7 +435,8 @@ impl Column {
     /// write after a refresh. A `str` tail is rewritten by rebuilding from `from`.
     pub fn write_rows(&mut self, from: usize, src: &Column) -> Result<()> {
         let n = self.len();
-        let k = src.len().min(n.saturating_sub(from));
+        if from > n { return Err(VolasError::Shape("column write start out of bounds".into())); }
+        let k = src.len().min(n - from);
         let presence = |val: &mut Validity, sv: &Validity| {
             for i in 0..k {
                 val.set_in_bounds(from + i, n, sv.is_valid(i));
@@ -520,8 +527,14 @@ impl Column {
     /// buffer (a shared one is copied once, copy-on-write); a float column keeps its
     /// NaN fact. A `str` column rebuilds its contiguous bytes.
     ///
-    /// `positions` are assumed in bounds (callers validate the mask / index).
+    /// Positions and source length are checked before conversion or the first write.
     pub fn scatter(&mut self, positions: &[usize], values: &Column) -> Result<()> {
+        if positions.iter().any(|&position| position >= self.len()) {
+            return Err(VolasError::Shape("Series assignment position out of bounds".into()));
+        }
+        if values.len() != 1 && values.len() != positions.len() {
+            return Err(VolasError::Shape("Series assignment values length != selected rows".into()));
+        }
         let src = self.assignable(values)?;
         self.scatter_assignable(positions, &src);
         Ok(())

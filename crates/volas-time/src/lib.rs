@@ -16,7 +16,7 @@ pub mod time_frame;
 pub use agg::{Agg, AggSpec};
 pub use cumulate::{aggregate_period, cumulate, Cumulator};
 pub use open_period::OpenPeriod;
-pub use period_aggregate::PeriodAggregate;
+pub use period_aggregate::{PeriodAggregate, PeriodPush, PeriodRestart};
 pub use time_frame::{Span, TimeFrame};
 
 #[cfg(test)]

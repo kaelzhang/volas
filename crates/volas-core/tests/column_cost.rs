@@ -81,7 +81,7 @@ fn ordinary_string_gather_keeps_first_append_capacity() {
     let idx: Vec<_> = (0..n).collect();
     let groups: Vec<Vec<_>> = (0..n).map(|i| vec![i]).collect();
     let bar = source.slice(0, 1);
-    for mut out in [source.take(&idx), source.reduce_groups(volas_core::CombineOp::Replace, groups.iter().map(Vec::as_slice)).unwrap()] {
+    for mut out in [source.take(&idx), volas_core::RowGroups::new(&groups, source.len()).unwrap().reduce(&source, volas_core::CombineOp::Replace).unwrap()] {
         let (_, calls, bytes) = measure(|| out.append(&bar).unwrap());
         assert_eq!(out.len(), n + 1);
         assert_eq!(calls, 0, "{calls} allocations / {bytes} bytes");

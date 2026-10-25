@@ -206,7 +206,8 @@ fn integer_batches_replace_and_raise_atomically() {
     let mut empty = labelled(Index::new(None, crate::IndexKind::Int64(vec![])).unwrap(), 0.0);
     empty.append(&labelled(Index::new(None, crate::IndexKind::Int64(vec![5])).unwrap(), 1.0)).unwrap();
     assert_eq!(empty.height(), 1);
-    assert!(!label_precedes(&Label::I64(1), &Label::Str("a".into())));
+    let wrong = labelled(Index::new(None, crate::IndexKind::Str(vec!["a".into()])).unwrap(), 1.0);
+    assert!(empty.append(&wrong).is_err());
 }
 
 #[test]

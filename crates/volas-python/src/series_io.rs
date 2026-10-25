@@ -1,12 +1,11 @@
 //! `Series` import / export (NumPy, Arrow, DLPack, list / dict / items).
 
-use std::sync::Arc;
 
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use pyo3::types::{PyCapsule, PyDict, PyList, PyTuple};
 use volas_core::{
-    Index, Series,
+    Series,
 };
 
 #[allow(unused_imports)]
@@ -81,8 +80,7 @@ impl PySeries {
     #[pyo3(signature = (data, name = None, *, copy = volas_arrow::DEFAULT_IMPORT_COPY), text_signature = "(data, name=None, *, copy=False)")]
     pub(crate) fn from_arrow(data: &Bound<'_, PyAny>, name: Option<String>, copy: bool) -> PyResult<PySeries> {
         let col = crate::arrow::column_from_arrow_obj(data, copy)?;
-        let n = col.len();
-        Ok(PySeries { inner: Series::new(name, col, Arc::new(Index::new(None, volas_core::IndexKind::Range { start: 0, len: n }).map_err(pyerr)?)).map_err(pyerr)? })
+        Ok(PySeries { inner: Series::from_column(name, col).map_err(pyerr)? })
     }
 
     /// Export as a `pyarrow.Array` (zero-copy where dtypes match; requires pyarrow).

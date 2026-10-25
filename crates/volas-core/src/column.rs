@@ -605,13 +605,14 @@ fn diff_kernel<T: Copy + std::ops::Sub<Output = T>>(v: &[T], n: isize, missing: 
 /// Extend `av` (validity of an `alen`-long column) with `bv` (a `blen`-long
 /// column's validity) so it stays aligned after an `append`. Dense + dense is a
 /// no-op (the result is still fully present).
-fn append_validity(av: &mut Validity, alen: usize, bv: &Validity, blen: usize) {
+fn append_validity(av: &mut Validity, alen: usize, bv: &Validity, rows: std::ops::Range<usize>) {
     if !av.has_nulls() && !bv.has_nulls() {
         return;
     }
+    let blen = rows.len();
     let flags: Vec<bool> = (0..alen)
         .map(|i| av.is_valid(i))
-        .chain((0..blen).map(|i| bv.is_valid(i)))
+        .chain(rows.map(|i| bv.is_valid(i)))
         .collect();
     *av = Validity::from_valid_iter(alen + blen, flags);
 }
@@ -899,3 +900,12 @@ mod tests_fold;
 mod tests_layout;
 #[cfg(test)]
 mod tests_arithmetic_bits;
+
+mod export;
+pub use export::{ColumnExport, ColumnBorrowExport};
+
+mod write;
+pub use write::{FoldCell, Reduction, ReductionRows};
+
+mod groups;
+pub use groups::RowGroups;

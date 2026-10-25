@@ -367,3 +367,5 @@ fn volas_rs(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add("NA", missing)?;
     Ok(())
 }
+
+mod numpy_export;

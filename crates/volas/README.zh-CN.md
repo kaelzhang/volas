@@ -78,6 +78,10 @@ assert_eq!(close.as_f64(), Some(&[10.5, 10.5, 13.0][..])); // 借用切片（仅
 带标签的索引统一使用 `Index::new(name, IndexKind::...)` 构造：datetime 标签必须严格递增且不含 NaT，整数和字符串标签必须唯一但不限制顺序。`DataFrame::new` 也验证索引；`Index::take`、`extend` 及 frame 行选择若产生无效标签则返回错误，因此 datetime 索引不能逆序排列。
 
 
+Rust 写入会在发布前检查完整选择：`Column::scatter` 检查位置和值数量，`DataFrame::append` 在提交前检查 schema、值和一份索引接纳计划；`OpenPeriod::push` 复用相同的受检追加。已聚合行通过 `check_folded_row(...).land()` 发布，原始追加及聚合提交 helper 为私有。`Series::from_column` 和 `DataFrame::from_columns` 根据接纳的形状构建受检位置索引；NumPy 与 DLPack 导出由 Column owner 完成一次类型分派。
+
+单元格 fold 经 `Column::check_fold_cell` / `check_reduced_cell` 接纳，已有目标的完整归约经 `check_reduction` 接纳；返回的凭证绑定原目标，通过 `land()` 完成检查和提交，原始 fold 提交方法为私有。运行中聚合对象经 `check_push(bar, resent).land()` 接纳单条 fine bar，并检查 schema、周期与重发时间；`check_restart(bar, &spec)` 只归约一次新周期首条 bar，可先追加其 `current()`，再以 `land()` 发布 restart。
+
 ### 缺失值(NA)
 
 单元格的缺失与其取值无关。浮点列用 `NaN` 作为 NA 标记；整数 / 布尔 / 字符串列携带一个
@@ -254,3 +258,7 @@ assert!(bad.is_err());
 ## 许可证
 
 [MIT](https://github.com/kaelzhang/volas/blob/main/LICENSE)
+
+Rust 归约接纳保存不可变位置切片或拥有型 Range，不能依赖任意 Clone 迭代器。`RowGroups::new` / `from_offsets` 一次验证分组数量、非空及每个位置；不可变凭证经 `reduce` / `reduce_with_spare` 可供同一已接纳高度的各列复用。
+
+底层缺失占位增长仅供已接纳的 frame 写入内部使用；公开列扩展经 `Column::append` 追加同 dtype 的缺失列。

@@ -44,6 +44,9 @@ pip install volas
 
 在可复现的 benchmark 套件中，**volas** 在大多数实时更新指标场景下都快于 pandas、polars、stock-pandas 和 TA-Lib。
 
+Rust 写入会在发布前检查完整选择：`Column::scatter` 检查位置和值数量，`DataFrame::append` 在提交前检查 schema、值和一份索引接纳计划；`OpenPeriod::push` 复用相同的受检追加。已聚合行通过 `check_folded_row(...).land()` 发布，原始追加及聚合提交 helper 为私有。`Series::from_column` 和 `DataFrame::from_columns` 根据接纳的形状构建受检位置索引；NumPy 与 DLPack 导出由 Column owner 完成一次类型分派。
+
+
 ## 为什么选 volas
 
 - **pandas 风格 API** `.loc` / `.iloc` / `.at`、`read_csv`、
@@ -974,3 +977,7 @@ Rust 调用方通过 `parse` 或 `bind_frame` 获得经过校验、不可变更�
 # 面向开发者
 开发者说明、本地构建命令、依赖分组和 benchmark 报告指引都在
 [DEVELOPMENT.md](DEVELOPMENT.md) 中。
+
+Rust 归约接纳保存不可变位置切片或拥有型 Range，不能依赖任意 Clone 迭代器。`RowGroups::new` / `from_offsets` 一次验证分组数量、非空及每个位置；不可变凭证经 `reduce` / `reduce_with_spare` 可供同一已接纳高度的各列复用。
+
+底层缺失占位增长仅供已接纳的 frame 写入内部使用；公开列扩展经 `Column::append` 追加同 dtype 的缺失列。

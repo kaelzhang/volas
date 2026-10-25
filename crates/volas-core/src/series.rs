@@ -20,6 +20,7 @@ pub struct Series {
 
 impl Series {
     /// Build a series from equally sized data and a checked index.
+    #[inline]
     pub fn new(name: Option<String>, data: Column, index: Arc<Index>) -> Result<Self> {
         let data_len = data.len();
         let index_len = index.len();
@@ -48,8 +49,15 @@ impl Series {
 
     /// Build a float series with an implicit range index.
     pub fn from_f64(name: Option<String>, values: Vec<f64>) -> Result<Self> {
-        let n = values.len();
-        Self::new(name, Column::f64(values), Arc::new(Index::new(None, crate::IndexKind::Range { start: 0, len: n })?))
+        Self::from_column(name, Column::f64(values))
+    }
+
+    /// Admit a column with a fresh checked positional index. Its length supplies
+    /// both parts of the shape, so no independent lengths need comparing.
+    #[inline]
+    pub fn from_column(name: Option<String>, data: Column) -> Result<Self> {
+        let index = Arc::new(Index::positional(data.len())?);
+        Ok(Self { name, data, index })
     }
 
     /// Number of elements.
@@ -72,12 +80,6 @@ impl Series {
     /// A single value broadcasts; otherwise values must cover the selected rows.
     /// Invalid positions or a lossy conversion leave the series unchanged.
     pub fn scatter(&mut self, positions: &[usize], values: &Column) -> Result<()> {
-        if positions.iter().any(|&position| position >= self.len()) {
-            return Err(VolasError::Shape("Series assignment position out of bounds".into()));
-        }
-        if values.len() != 1 && values.len() != positions.len() {
-            return Err(VolasError::Shape("Series assignment values length != selected rows".into()));
-        }
         self.data.scatter(positions, values)
     }
 

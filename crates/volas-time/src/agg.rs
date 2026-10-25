@@ -46,23 +46,13 @@ impl Agg {
     }
 
     /// Reduce the values at `kept` positions of `col` to a 1-element column of
-    /// `col`'s dtype in one pass ([`Column::reduce_into`]: the steps the live
+    /// `col`'s dtype in one pass ([`Column::reduce_selection`]: the steps the live
     /// time-frame fold runs, dispatched once per column), so the batch and the
     /// incremental aggregate agree exactly — the support table is
     /// [`CombineOp::supports`], a missing input makes any aggregate missing, an
     /// integer sum is checked.
     pub fn reduce(&self, col: &Column, kept: &[usize]) -> Result<Column> {
-        let op = self.as_combine_op();
-        if !op.supports(col.dtype()) {
-            return Err(op.unsupported(col.dtype()));
-        }
-        let first = kept.first().ok_or_else(|| VolasError::Value("aggregation requires at least one row".into()))?;
-        if kept.iter().any(|&i| i >= col.len()) {
-            return Err(VolasError::Value("aggregation row is outside the column".into()));
-        }
-        let mut out = col.take(&[*first]);
-        out.reduce_into(0, op, col, kept.iter().copied())?;
-        Ok(out)
+        col.reduce_selection(self.as_combine_op(), kept)
     }
 }
 
@@ -315,7 +305,7 @@ mod tests {
             for agg in [Agg::First, Agg::Last, Agg::Max, Agg::Min, Agg::Sum] {
                 let (op, batch) = (agg.as_combine_op(), agg.reduce(col, &[0, 1, 2, 3]));
                 let mut fold = col.take(&[0]);
-                let folded = (1..4).try_for_each(|r| fold.combine_at(0, op, col, r));
+                let folded = (1..4).try_for_each(|r| fold.check_fold_cell(0, op, col, r, false).and_then(|write| write.land()));
                 match batch {
                     Ok(b) => assert!(folded.is_ok() && b.equals(&fold), "{agg:?} {}", col.dtype()),
                     Err(_) => assert!(folded.is_err(), "{agg:?} {}", col.dtype()),

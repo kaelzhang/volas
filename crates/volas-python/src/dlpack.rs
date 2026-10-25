@@ -13,7 +13,6 @@
 //! `copy=True` returns an **independent** owned copy (writable, flagged `IS_COPIED`); a
 //! non-CPU `dl_device` or a `stream` is refused with `BufferError` (CPU-only producer).
 
-use volas_core::ColumnView;
 use std::any::Any;
 use std::ffi::{c_void, CStr};
 use std::ptr;
@@ -22,7 +21,7 @@ use std::sync::Arc;
 use pyo3::exceptions::PyBufferError;
 use pyo3::ffi;
 use pyo3::prelude::*;
-use volas_core::{Buffer, Column};
+use volas_core::{Buffer, Column, ColumnBorrowExport, Element, StrBuffer, Validity};
 
 /// (`kDLCPU`, device 0) — the only device volas data lives on.
 pub(crate) const DEVICE_CPU: (i32, i32) = (1, 0);
@@ -153,33 +152,37 @@ fn dl_parts(
     col: &Column,
     copy: bool,
 ) -> PyResult<(*mut c_void, DLDataType, usize, Arc<dyn Any + Send + Sync>)> {
-    macro_rules! parts {
-        ($buf:expr, $code:expr, $bits:expr) => {{
-            let b = if copy { Buffer::from_vec($buf.to_vec()) } else { $buf.clone() };
-            // DLPack requires a size-0 tensor's data pointer to be NULL; a Rust empty
-            // slice's pointer is a non-null dangling address, so normalise it here.
-            let data = if b.len() == 0 { ptr::null_mut() } else { b.as_ptr() as *mut c_void };
-            Ok((data, DLDataType { code: $code, bits: $bits, lanes: 1 }, b.len(), b.keepalive()))
-        }};
+    col.export(DlExport { copy })
+}
+
+struct DlExport { copy: bool }
+type DlParts = PyResult<(*mut c_void, DLDataType, usize, Arc<dyn Any + Send + Sync>)>;
+impl DlExport {
+    fn parts<T: Element + Clone + Send + Sync + 'static>(self, buffer: &Buffer<T>, code: u8, bits: u8) -> DlParts {
+        let owned;
+        let b = if self.copy { owned = Buffer::from_vec(buffer.to_vec()); &owned } else { buffer };
+        let data = if b.is_empty() { ptr::null_mut() } else { b.as_ptr() as *mut c_void };
+        Ok((data, DLDataType { code, bits, lanes: 1 }, b.len(), b.keepalive()))
     }
-    let na = || {
-        PyBufferError::new_err(
-            "cannot export a column with missing values via DLPack (DLPack has no null \
-             mask) — fill the NA first",
-        )
-    };
-    match col.view() {
-        ColumnView::F64(b) => parts!(b, KDL_FLOAT, 64),
-        ColumnView::F32(b) => parts!(b, KDL_FLOAT, 32),
-        ColumnView::I64(_, v) | ColumnView::I32(_, v) | ColumnView::Bool(_, v) if v.has_nulls() => Err(na()),
-        ColumnView::I64(b, _) => parts!(b, KDL_INT, 64),
-        ColumnView::I32(b, _) => parts!(b, KDL_INT, 32),
-        ColumnView::Bool(b, _) => parts!(b, KDL_BOOL, 8),
-        ColumnView::Str(..) | ColumnView::Datetime(..) => Err(PyBufferError::new_err(format!(
-            "cannot export a {} column via DLPack (only numeric / bool dtypes are supported)",
-            col.dtype()
-        ))),
+    fn present(self, valid: &Validity) -> PyResult<Self> {
+        if valid.has_nulls() {
+            return Err(PyBufferError::new_err("cannot export a column with missing values via DLPack (DLPack has no null mask) — fill the NA first"));
+        }
+        Ok(self)
     }
+}
+impl ColumnBorrowExport for DlExport {
+    type Output = DlParts;
+    fn f64(self, v: &Buffer<f64>) -> DlParts { self.parts(v, KDL_FLOAT, 64) }
+    fn f32(self, v: &Buffer<f32>) -> DlParts { self.parts(v, KDL_FLOAT, 32) }
+    fn i64(self, v: &Buffer<i64>, valid: &Validity) -> DlParts { self.present(valid)?.parts(v, KDL_INT, 64) }
+    fn i32(self, v: &Buffer<i32>, valid: &Validity) -> DlParts { self.present(valid)?.parts(v, KDL_INT, 32) }
+    fn bool(self, v: &Buffer<bool>, valid: &Validity) -> DlParts { self.present(valid)?.parts(v, KDL_BOOL, 8) }
+    fn str(self, _: &StrBuffer, _: &Validity) -> DlParts { Err(unsupported("str")) }
+    fn datetime(self, _: &Buffer<i64>) -> DlParts { Err(unsupported("datetime64[ns]")) }
+}
+fn unsupported(dtype: &str) -> PyErr {
+    PyBufferError::new_err(format!("cannot export a {dtype} column via DLPack (only numeric / bool dtypes are supported)"))
 }
 
 /// The `__dlpack__` payload: a `"dltensor(_versioned)"` PyCapsule over the column.

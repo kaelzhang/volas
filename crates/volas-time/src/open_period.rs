@@ -42,13 +42,12 @@ impl OpenPeriod {
         ts[ts.len() - 1]
     }
 
-    /// Take `bars` (already admitted against a frame with this period's columns and
-    /// dtypes, in time order): a bar stamped like the last bar replaces it whole, a
+    /// Take `bars` (checked against this period's columns, dtypes and time order): a bar stamped like the last bar replaces it whole, a
     /// later one is appended, an earlier one is an error — so the invariant holds.
     /// On an error nothing changes.
     pub fn push(&mut self, bars: &DataFrame) -> Result<()> {
-        self.bars.append_admitted(bars)?;
-        // append_admitted validates the incoming labels against the last held
+        self.bars.append(bars)?;
+        // append validates the incoming labels against the last held
         // label before writing. Re-scanning the history here would make a debug
         // build's live correction O(period length) despite that invariant.
         Ok(())

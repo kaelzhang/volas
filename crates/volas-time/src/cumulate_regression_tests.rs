@@ -77,7 +77,7 @@ fn grouped_reductions_keep_missing_endpoints_and_the_first_failure_position() {
     let rows = [vec![0, 1, 2, 3], vec![4, 5, 6, 7]];
     for col in columns() {
         for agg in [Agg::First, Agg::Last, Agg::Sum, Agg::Max, Agg::Min] {
-            let got = col.reduce_groups(agg.as_combine_op(), rows.iter().map(Vec::as_slice));
+            let got = volas_core::RowGroups::new(&rows, col.len()).unwrap().reduce(&col, agg.as_combine_op());
             if !agg.as_combine_op().supports(col.dtype()) {
                 assert_eq!(got.unwrap_err().0, 0);
                 continue;
@@ -192,13 +192,13 @@ fn nonfinite_inputs_are_missing_in_initial_fold_and_resend_checkpoints() {
             for agg in [Agg::First, Agg::Last, Agg::Max, Agg::Min, Agg::Sum] {
                 let op = agg.as_combine_op();
                 let mut initial = col.take(&[1]);
-                initial.init_at(0, op, &col, 0).unwrap();
+                initial.check_fold_cell(0, op, &col, 0, true).unwrap().land().unwrap();
                 assert!(initial.get_f64(0).is_nan(), "initial {agg:?} {bad}");
                 let mut fold = col.take(&[1]);
-                fold.combine_at(0, op, &col, 0).unwrap();
+                fold.check_fold_cell(0, op, &col, 0, false).unwrap().land().unwrap();
                 assert!(fold.get_f64(0).is_nan(), "fold {agg:?} {bad}");
                 let mut checkpoint = col.take(&[1]);
-                checkpoint.combine_reduced_at(0, op, &col, 0, false).unwrap();
+                checkpoint.check_reduced_cell(0, op, &col, 0, false).unwrap().land().unwrap();
                 assert!(checkpoint.get_f64(0).is_nan(), "checkpoint {agg:?} {bad}");
                 let raw = frame(&[0, MINUTE, 2 * MINUTE], vec![col.clone()]);
                 let spec = spec(agg, 1);

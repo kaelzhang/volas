@@ -17,7 +17,7 @@ use std::sync::Arc;
 use crate::column::Column;
 use crate::column::CombineOp;
 use crate::error::{Result, VolasError};
-use crate::index::{IndexKind, Label};
+use crate::index::{AppendMode, AppendPlan, IndexInput};
 
 use super::{DataFrame, Replay};
 
@@ -31,23 +31,40 @@ pub struct Retained {
     pub shown: usize,
 }
 
-/// What [`DataFrame::append`] does with each admitted row.
-#[derive(Clone, Copy)]
-enum Route {
-    /// Every row is appended (no label repeats the last).
-    Append,
-    /// The one row replaces the current last row (the live re-sent bar).
-    ReplaceLast,
-    /// The first incoming row replaces the last, and every remaining row appends.
-    ReplaceThenAppend,
-}
-
 /// Rows admitted for a frame (`DataFrame::admit_rows`), with whether they carry its
 /// leading columns in order — decided once, so the commit maps their columns
 /// positionally without comparing the names again.
-struct Admitted<'a> {
+struct Admitted<'a, 'target> {
     rows: Cow<'a, DataFrame>,
     leads: bool,
+    index: IndexInput<'target, 'a>,
+}
+
+/// An admitted reduced row, bound by exclusive borrow to its destination.
+/// Only `DataFrame::check_folded_row` can construct it.
+pub struct FoldedRow<'a> {
+    frame: &'a mut DataFrame,
+    src: &'a DataFrame,
+    ops: &'a [(usize, usize, CombineOp)],
+}
+impl FoldedRow<'_> {
+    /// Publish the checked row on the same destination.
+    pub fn land(self) -> Result<()> { self.frame.write_folded_row(self.src, self.ops) }
+}
+
+/// A target-bound forming-row position plan. Landing still checks every column's
+/// aggregation before the first write, without adding guards to the hot fold body.
+pub struct FormingFold<'a> {
+    frame: &'a mut DataFrame,
+    row: usize,
+    source: &'a DataFrame,
+    source_row: usize,
+    ops: &'a [(usize, usize, CombineOp)],
+}
+impl FormingFold<'_> {
+    /// Check the arithmetic and publish the admitted fold atomically.
+    #[inline]
+    pub fn land(self) -> Result<()> { self.frame.fold_forming_row(self.row, self.source, self.source_row, self.ops) }
 }
 
 impl DataFrame {
@@ -109,7 +126,7 @@ impl DataFrame {
     /// contract #20 — a lossy value raises). Returns the rows with this frame's dtypes,
     /// borrowed when nothing needed converting (the live single-bar path), and whether
     /// they lead with this frame's columns.
-    fn admit_rows<'a>(&self, rows: &'a DataFrame) -> Result<Admitted<'a>> {
+    fn admit_rows<'a, 't>(&'t self, rows: &'a DataFrame) -> Result<Admitted<'a, 't>> {
         // One pass over the rows' columns: each is looked up once — positionally when the
         // rows carry the frame's leading columns in order (the live bar of a frame whose
         // cached columns follow its data columns) — and its dtype compared. Errors are
@@ -149,14 +166,14 @@ impl DataFrame {
                  is rejected so data is never silently dropped)"
             )));
         }
-        self.index.check_append(&rows.index)?;
+        let index = self.index.admit_input(&rows.index)?;
         if !convert {
             if self.lead.is_some() {
                 for (name, col) in rows.names.iter().zip(&rows.columns) {
                     self.check_lead_values(name, col, 0, col.len())?;
                 }
             }
-            return Ok(Admitted { rows: Cow::Borrowed(rows), leads: prefix });
+            return Ok(Admitted { rows: Cow::Borrowed(rows), leads: prefix, index });
         }
         let mut columns = rows.columns.clone();
         for (k, name) in rows.names.iter().enumerate() {
@@ -171,6 +188,7 @@ impl DataFrame {
         Ok(Admitted {
             rows: Cow::Owned(rows.same_schema(columns, (*rows.index).clone(), rows.origin)),
             leads: prefix,
+            index,
         })
     }
 
@@ -187,7 +205,8 @@ impl DataFrame {
     /// a datetime row is O(1); an integer / string row looks its label up.
     pub fn append(&mut self, other: &DataFrame) -> Result<()> {
         let admitted = self.admit_rows(other)?;
-        self.commit_rows(&admitted.rows, admitted.leads, Retained { from: 0, shown: 0 })
+        let plan = admitted.index.plan(AppendMode::Rows { from: 0, shown: 0 })?;
+        self.commit_plan(&admitted.rows, admitted.leads, plan)
     }
 
     /// [`append`](Self::append) to a frame that retains only its rows from
@@ -202,60 +221,34 @@ impl DataFrame {
             return Err(VolasError::Shape("retained rows must satisfy from <= shown <= frame height".into()));
         }
         let admitted = self.admit_rows(other)?;
-        let route = self.route(&admitted.rows, retained)?;
-        let appends = match route {
-            Route::ReplaceLast => return self.write_last_row(&admitted.rows, 0, admitted.leads),
-            Route::ReplaceThenAppend => Cow::Owned(admitted.rows.slice_data(1, admitted.rows.height)),
-            Route::Append => Cow::Borrowed(admitted.rows.as_ref()),
-        };
-        if !self.index.reuses_dropped_labels(&appends.index, retained.from) {
-            return self.commit_route(&admitted.rows, admitted.leads, route);
+        let plan = admitted.index.plan(AppendMode::Rows { from: retained.from, shown: retained.shown })?;
+        let from = plan.compact_from();
+        if from == 0 {
+            return self.commit_plan(&admitted.rows, admitted.leads, plan);
         }
-        // A reused label cannot coexist with its dropped physical predecessor.
-        // Compact through the derivation owner, keeping recursive checkpoints,
-        // on a candidate so a rejected commit leaves the original untouched.
-        let rows = match self.index.explicit_continuation(&admitted.rows.index)? {
-            Some(index) => Cow::Owned(admitted.rows.same_schema(admitted.rows.columns.clone(), index, admitted.rows.origin)),
-            None => Cow::Borrowed(admitted.rows.as_ref()),
-        };
+        // The same plan proves that only dropped labels collide. Compact through
+        // the derivation owner on a candidate, then consume it without re-routing.
         let mut candidate = self.clone();
-        let from = match route {
-            Route::ReplaceThenAppend => retained.from.min(self.height - 1),
-            _ => retained.from,
-        };
         candidate.compact_tail(self.height - from, replay);
-        candidate.commit_route(&rows, admitted.leads, route)?;
+        candidate.commit_plan(&admitted.rows, admitted.leads, plan)?;
         *self = candidate;
         Ok(())
     }
 
-    /// [`append`](Self::append) of rows already admitted against a frame with this
-    /// frame's columns and index (a time-frame frame's open period takes the bars the
-    /// frame admitted): only the label routing and the commit. Columns the rows carry
-    /// that this frame lacks are not kept.
-    pub fn append_admitted(&mut self, rows: &DataFrame) -> Result<()> {
-        let leads = self.leads_with(rows);
-        self.commit_rows(rows, leads, Retained { from: 0, shown: 0 })
-    }
-
-    /// Route admitted rows (`leads`: they carry this frame's leading columns) by label
-    /// and write them.
-    fn commit_rows(&mut self, rows: &DataFrame, leads: bool, retained: Retained) -> Result<()> {
-        let route = self.route(rows, retained)?;
-        self.commit_route(rows, leads, route)
-    }
-
-    fn commit_route(&mut self, rows: &DataFrame, leads: bool, route: Route) -> Result<()> {
-        match route {
-            Route::Append => self.push_rows(rows, leads),
-            Route::ReplaceLast => self.write_last_row(rows, 0, leads),
-            Route::ReplaceThenAppend => {
-                // Validate the append's index before replacing any values.
-                let tail = rows.slice_data(1, rows.height);
-                self.index.check_extension(&tail.index)?;
-                self.write_last_row(rows, 0, leads)?;
-                self.push_rows(&tail, leads)
-            }
+    fn commit_plan(&mut self, rows: &DataFrame, leads: bool, plan: AppendPlan<'_>) -> Result<()> {
+        let replaces = plan.replaces();
+        let added = plan.appended();
+        if replaces && added == 0 {
+            return self.write_last_row(rows, 0, leads);
+        }
+        if replaces {
+            // All label checks precede the replacement. Resource preparation also
+            // precedes it, so a representability/capacity error cannot publish it.
+            Arc::make_mut(&mut self.index).prepare_replacement(&plan)?;
+            self.write_last_row(rows, 0, leads)?;
+            self.push_rows(rows, leads, plan, 1)
+        } else {
+            self.push_rows(rows, leads, plan, 0)
         }
     }
 
@@ -266,99 +259,23 @@ impl DataFrame {
     pub fn append_new(&mut self, other: &DataFrame) -> Result<()> {
         let admitted = self.admit_rows(other)?;
         let rows = admitted.rows.as_ref();
-        let mut prev = self.height.checked_sub(1).map(|i| self.index.label_at(i));
-        for k in 0..rows.height {
-            let label = rows.index.label_at(k);
-            if let Some(p) = &prev {
-                if !label_precedes(p, &label) {
-                    return Err(VolasError::Value(format!(
-                        "cannot start a new row labelled {}: it does not follow the last row \
-                         (labelled {})",
-                        label_text(&label),
-                        label_text(p)
-                    )));
-                }
-            }
-            prev = Some(label);
-        }
-        self.push_rows(rows, admitted.leads)
-    }
-
-    /// Decide, for each admitted row, whether it replaces the last row or is appended
-    /// (see [`append`](Self::append)), or reject the row set. Writes nothing.
-    fn route(&self, rows: &DataFrame, retained: Retained) -> Result<Route> {
-        let held = |label: &Label| self.index.position_in(label, retained.from..self.height);
-        if rows.index.is_unlabelled() || rows.height == 0 {
-            // unlabelled rows continue the last label: unique over the retained rows
-            if let Some(dup) = self.index.continuation_clash(rows.height, retained.from..self.height) {
-                return Err(VolasError::Value(format!(
-                    "cannot append unlabelled rows: the next label {dup} is already in the index \
-                     (label the rows explicitly)"
-                )));
-            }
-            return Ok(Route::Append);
-        }
-        let datetime = matches!(rows.index.kind(), IndexKind::Datetime(..));
-        if rows.height == 1 && self.height > 0 {
-            // The live single-bar path: one comparison with the last label.
-            let label = rows.index.label_at(0);
-            let last = self.index.label_at(self.height - 1);
-            if label == last {
-                return Ok(Route::ReplaceLast);
-            }
-            let fresh = if datetime {
-                !label_precedes(&label, &last)
-            } else {
-                held(&label).is_none()
-            };
-            if fresh {
-                return Ok(Route::Append);
-            }
-        }
-        // The input Index is unique: only its first row can replace the
-        // target's last row. Raw consecutive re-sends belong to cumulation.
-        let first_replaces = self.height > 0 && rows.height > 0
-            && rows.index.label_at(0) == self.index.label_at(self.height - 1);
-        for k in usize::from(first_replaces)..rows.height {
-            let label = rows.index.label_at(k);
-            if datetime {
-                if self.height > 0 && label_precedes(&label, &self.index.label_at(self.height - 1)) {
-                    return Err(VolasError::Value(format!(
-                        "cannot append a row labelled {}: a datetime index only increases (only the last row can be replaced)",
-                        label_text(&label)
-                    )));
-                }
-                break; // the incoming index already proves every later row increases
-            }
-            if let Some(held) = held(&label) {
-                if held < retained.shown {
-                    return Err(VolasError::Value(format!(
-                        "cannot append label {}: an earlier row with that label is still retained in the window's hidden margin (max_lookback)",
-                        label_text(&label)
-                    )));
-                }
-                return Err(VolasError::Value(format!(
-                    "cannot append a row labelled {}: an earlier row has that label (only the last row can be replaced)",
-                    label_text(&label)
-                )));
-            }
-        }
-        Ok(if first_replaces { Route::ReplaceThenAppend } else { Route::Append })
+        let plan = admitted.index.plan(AppendMode::NewRows)?;
+        self.push_rows(rows, admitted.leads, plan, 0)
     }
 
     /// Append admitted rows (see `admit_rows`) at the end — the commit step:
-    /// the index is extended first (the one step that checks anything), then every
+    /// the validated index plan is consumed first, then every
     /// column grows. Columns `rows` lacks are padded; computed metadata is retained,
     /// leaving the new rows stale.
-    fn push_rows(&mut self, rows: &DataFrame, leads: bool) -> Result<()> {
-        Arc::make_mut(&mut self.index).extend(&rows.index)?;
-        let oh = rows.height;
+    fn push_rows(&mut self, rows: &DataFrame, leads: bool, plan: AppendPlan<'_>, start: usize) -> Result<()> {
+        Arc::make_mut(&mut self.index).apply_append(plan)?;
+        let oh = rows.height - start;
         if leads {
             // The rows carry the leading columns in order (the live-streaming case):
             // append them positionally and pad the rest.
             let w = rows.width();
             for (dst, src) in self.columns.iter_mut().zip(&rows.columns) {
-                dst.append(src)?;
+                dst.append_from(src, start)?;
             }
             for pos in w..self.names.len() {
                 self.pad_rows(pos, oh)?;
@@ -367,7 +284,7 @@ impl DataFrame {
             for pos in 0..self.names.len() {
                 let n = &self.names[pos];
                 match rows.column_pos(n) {
-                    Some(j) => self.columns[pos].append(&rows.columns[j])?,
+                    Some(j) => self.columns[pos].append_from(&rows.columns[j], start)?,
                     None => self.pad_rows(pos, oh)?,
                 }
             }
@@ -454,6 +371,13 @@ impl DataFrame {
         Ok(())
     }
 
+    /// Admit the complete position plan against this exact destination before a
+    /// forming-row fold. The returned plan cannot land on another frame.
+    pub fn check_forming_fold<'a>(&'a mut self, row: usize, src: &'a DataFrame, src_row: usize, ops: &'a [(usize, usize, CombineOp)]) -> Result<FormingFold<'a>> {
+        self.check_fold_positions(row, src, Some(src_row), ops)?;
+        Ok(FormingFold { frame: self, row, source: src, source_row: src_row, ops })
+    }
+
     /// Fold `src[src_row]` into the forming aggregate at `row`, in place, per the
     /// `(dst_col, src_col, op)` plan — the allocation-free live tf-fold. Each cell is
     /// combined through [`Column::combine_at`], after every column's fold has been
@@ -461,7 +385,9 @@ impl DataFrame {
     /// forming row changed: it goes stale while each cached column keeps its carried
     /// states. The caller guarantees each `op` is supported for its column's dtype
     /// ([`CombineOp::supports`]); an unsupported pair is the fold's error.
-    pub fn fold_forming_row(
+    // Keep the gated commit body present after sealing it behind the position plan.
+    #[inline(never)]
+    pub(crate) fn fold_forming_row(
         &mut self,
         row: usize,
         src: &DataFrame,
@@ -491,6 +417,11 @@ impl DataFrame {
     /// Both snapshots change only after every fold passes. All rows have already
     /// been admitted, and `ops` matches their schemas, as for `fold_forming_row`.
     pub fn fold_with_checkpoint(&mut self, before: &mut DataFrame, src: &DataFrame, ops: &[(usize, usize, CombineOp)], missing: &[bool], replace: bool) -> Result<()> {
+        self.check_fold_positions(0, src, Some(0), ops)?;
+        before.check_fold_positions(0, src, Some(0), ops)?;
+        if self.height != 1 || before.height != 1 || self.names != before.names || self.columns.iter().zip(&before.columns).any(|(a, b)| a.dtype() != b.dtype()) || missing.len() < src.width() {
+            return Err(VolasError::Shape("fold checkpoint schema or missing mask does not match".into()));
+        }
         for &(dst_col, src_col, op) in ops {
             let dst = if replace { &before.columns[dst_col] } else { &self.columns[dst_col] };
             let from = &src.columns[src_col];
@@ -522,7 +453,9 @@ impl DataFrame {
     /// `None` starts a one-bar reduction (a correction with no earlier prefix).
     /// Prefix and source use the source positions in `ops`, with matching dtypes.
     pub fn check_fold_from(&self, prefix: Option<&DataFrame>, src: &DataFrame, ops: &[(usize, usize, CombineOp)]) -> Result<()> {
-        let row = self.height - 1;
+        let row = self.height.checked_sub(1).ok_or_else(|| VolasError::Shape("no last row to fold".into()))?;
+        self.check_fold_positions(row, src, Some(0), ops)?;
+        if let Some(prefix) = prefix { self.check_fold_positions(row, prefix, Some(0), ops)?; }
         for &(dst_col, src_col, op) in ops {
             let (dst, from) = (&self.columns[dst_col], &src.columns[src_col]);
             if !cannot_fail(dst, from) {
@@ -533,15 +466,25 @@ impl DataFrame {
         Ok(())
     }
 
+    /// Admit a reduced row against this exact target before any value is written.
+    pub fn check_folded_row<'a>(&'a mut self, src: &'a DataFrame, ops: &'a [(usize, usize, CombineOp)]) -> Result<FoldedRow<'a>> {
+        let row = self.height.checked_sub(1).ok_or_else(|| VolasError::Shape("no last row to replace".into()))?;
+        self.check_fold_positions(row, src, Some(0), ops)?;
+        for &(dst_col, src_col, _) in ops {
+            if self.columns[dst_col].dtype() != src.columns[src_col].dtype() {
+                return Err(VolasError::DType("folded row must have the target column dtypes".into()));
+            }
+            self.check_lead_values(&self.names[dst_col], &src.columns[src_col], 0, 1)?;
+        }
+        Ok(FoldedRow { frame: self, src, ops })
+    }
+
     /// Publish an already reduced, admitted row at the forming row, using the
     /// fold plan's positions. The source has this frame's data dtypes and every
     /// aggregation check has succeeded, so neither conversion nor reduction is
     /// repeated. Missing integer / bool / string cells retain the destination's
     /// unused payload, as `refold_forming_row` does; floats keep the reduced NaN bits.
-    pub fn write_folded_row(&mut self, src: &DataFrame, ops: &[(usize, usize, CombineOp)]) -> Result<()> {
-        for &(dst_col, src_col, _) in ops {
-            self.check_lead_values(&self.names[dst_col], &src.columns[src_col], 0, 1)?;
-        }
+    pub(crate) fn write_folded_row(&mut self, src: &DataFrame, ops: &[(usize, usize, CombineOp)]) -> Result<()> {
         for &(dst_col, src_col, _) in ops {
             let from = &src.columns[src_col];
             if matches!(from, Column { data: ColumnData::F64(_) } | Column { data: ColumnData::F32(_) }) || from.is_valid(0) {
@@ -566,6 +509,8 @@ impl DataFrame {
         last: &DataFrame,
         ops: &[(usize, usize, CombineOp)],
     ) -> Result<()> {
+        self.check_fold_positions(row, src, None, ops)?;
+        if last.height == 0 { return Err(VolasError::Shape("no replacement row to fold".into())); }
         let Some(h) = src.height.checked_sub(1) else {
             return Ok(());
         };
@@ -596,6 +541,7 @@ impl DataFrame {
         src: &DataFrame,
         ops: &[(usize, usize, CombineOp)],
     ) -> Result<()> {
+        self.check_fold_positions(row, src, None, ops)?;
         for &(dst_col, src_col, op) in ops {
             let (dst, from) = (&self.columns[dst_col], &src.columns[src_col]);
             if !cannot_fail(dst, from) {
@@ -610,6 +556,18 @@ impl DataFrame {
         self.debug_check();
         Ok(())
     }
+    fn check_fold_positions(&self, row: usize, src: &DataFrame, src_row: Option<usize>, ops: &[(usize, usize, CombineOp)]) -> Result<()> {
+        if row >= self.height || src_row.is_some_and(|r| r >= src.height) {
+            return Err(VolasError::Shape("fold row position out of bounds".into()));
+        }
+        for (i, &(dst, from, _)) in ops.iter().enumerate() {
+            if dst >= self.width() || from >= src.width() || ops[..i].iter().any(|&(previous, _, _)| previous == dst) {
+                return Err(VolasError::Shape("fold columns must be in bounds with distinct destinations".into()));
+            }
+        }
+        Ok(())
+    }
+
 }
 
 /// A conversion error, naming the column it happened in.
@@ -655,20 +613,6 @@ fn py_str(s: &str) -> String {
     }
     out.push(quote);
     out
-}
-
-/// Whether datetime label `a` orders before `b` (only a datetime index is ordered by
-/// the append rule; a label of another kind never precedes).
-fn label_precedes(a: &Label, b: &Label) -> bool {
-    matches!((a, b), (Label::I64(x), Label::I64(y)) if x < y)
-}
-
-/// A label as written in a message.
-fn label_text(label: &Label) -> String {
-    match label {
-        Label::I64(v) => v.to_string(),
-        Label::Str(s) => format!("{s:?}"),
-    }
 }
 
 /// Whether folding `src` into `dst` cannot fail, so its check is skipped (the live

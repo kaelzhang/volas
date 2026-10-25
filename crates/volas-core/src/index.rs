@@ -4,6 +4,9 @@ use crate::column::{Column, ColumnView};
 use crate::datetime::NAT;
 use crate::error::{Result, VolasError};
 use crate::tz::Tz;
+mod admission;
+pub(crate) use admission::{AppendMode, AppendPlan, IndexInput};
+use admission::ValidatedLabels;
 
 /// Row labels plus an optional name.
 ///
@@ -72,15 +75,8 @@ impl LabelOrder {
         LabelOrder::EMPTY.extended(None, labels)
     }
 
-    /// The order of the labels of `kind`.
-    fn of_kind(kind: &IndexKind) -> LabelOrder {
-        match kind {
-            IndexKind::Range { len, .. } => LabelOrder { increasing: true, decreasing: *len <= 1 },
-            IndexKind::Int64(v) => LabelOrder::of(v),
-            IndexKind::Datetime(v, _) => LabelOrder { increasing: true, decreasing: v.len() <= 1 },
-            IndexKind::Str(v) => LabelOrder::of(v),
-        }
-    }
+    /// A proven strictly increasing sequence (empty/singleton also decreases).
+    fn ascending(len: usize) -> Self { Self { increasing: true, decreasing: len <= 1 } }
 
     /// The first position of `x` in `labels`, labels of this order: a binary search
     /// when they are monotonic — O(log n) — a scan otherwise.
@@ -192,9 +188,16 @@ impl Index {
     /// Construct an index after validating every label invariant.
     /// Datetime labels are present and strictly increasing; integer and string
     /// labels are unique. All explicit-label construction uses this owner.
+    #[inline]
     pub fn new(name: Option<String>, kind: IndexKind) -> Result<Index> {
-        let order = validate_labels(&kind)?;
-        Ok(Index { name, kind, order })
+        ValidatedLabels::check(kind).map(|labels| Self::from_validated(name, labels))
+    }
+
+    /// Construct a checked, unnamed positional index without moving a generic
+    /// label descriptor across the admission boundary.
+    #[inline]
+    pub fn positional(len: usize) -> Result<Self> {
+        ValidatedLabels::range(0, len).map(|labels| Self::from_validated(None, labels))
     }
 
     /// Whether this index carries the checked strictly increasing datetime fact.
@@ -202,13 +205,19 @@ impl Index {
         matches!(self.kind, IndexKind::Datetime(..)) && self.order.increasing
     }
 
-    /// Validate admission from the opaque index's stored construction fact.
-    /// Labels cannot be changed by callers; construction checked their validity.
+    /// Check the opaque construction fact in O(1), including internal admissions.
+    #[inline]
     pub(crate) fn validate(&self) -> Result<()> {
-        match &self.kind {
-            IndexKind::Datetime(..) if !self.order.increasing => Err(datetime_order_error()),
-            _ => Ok(()),
+        if matches!(self.kind, IndexKind::Datetime(..)) && !self.order.increasing {
+            return Err(datetime_order_error());
         }
+        Ok(())
+    }
+
+    /// The only publication point for owned labels and their validation proof.
+    fn from_validated(name: Option<String>, labels: ValidatedLabels) -> Self {
+        let (kind, order) = labels.into_parts();
+        Self { name, kind, order }
     }
 
     /// The label storage / kind.
@@ -291,6 +300,8 @@ impl Index {
 
     /// The label at position `i` (for membership tests like `drop`).
     pub fn label_at(&self, i: usize) -> Label {
+        #[cfg(test)]
+        tests_cost::record_label_read();
         match &self.kind {
             IndexKind::Range { start, .. } => Label::I64(start + i as i64),
             IndexKind::Int64(v) => Label::I64(v[i]),
@@ -313,24 +324,7 @@ impl Index {
     /// A `[start, end)` slice, clamped to the available rows like frame slices.
     /// The name and a datetime timezone are preserved.
     pub fn slice(&self, start: usize, end: usize) -> Index {
-        let start = start.min(self.len());
-        let end = end.max(start).min(self.len());
-        let kind = match &self.kind {
-            // A range starting at 0 stays an (implicit) range; a non-zero start
-            // cannot be expressed as `Range`, so it materializes the actual labels
-            // (`start..end`) — e.g. `tail(2)` of `0..7` keeps labels `[5, 6]`, not
-            // a reset `[0, 1]`, matching pandas.
-            IndexKind::Range { start: first, .. } => {
-                IndexKind::Range { start: (*first as i128 + start as i128).min(i64::MAX as i128) as i64, len: end - start }
-            }
-            IndexKind::Int64(v) => IndexKind::Int64(v[start..end].to_vec()),
-            IndexKind::Datetime(v, tz) => IndexKind::Datetime(v[start..end].to_vec(), tz.clone()),
-            IndexKind::Str(v) => IndexKind::Str(v[start..end].to_vec()),
-        };
-        // A contiguous subset inherits uniqueness and datetime order; only an
-        // unordered integer/string subset may need its order recomputed.
-        let order = LabelOrder::of_kind(&kind);
-        Index { name: self.name.clone(), kind, order }
+        self.validated_slice(start, end).to_index(self.name.clone())
     }
 
     /// Gather the given positions (the name and a datetime tz are preserved).
@@ -434,26 +428,25 @@ impl Index {
     /// - a `RangeIndex` takes unlabelled or integer rows; a string index string rows.
     ///
     /// The order of explicit labels (a datetime index only increases, an integer or
-    /// string one stays unique) is the frame's append rule, decided per row there.
+    /// string one stays unique) is checked by this owner's append admission plan.
     pub fn check_append(&self, other: &Index) -> Result<()> {
         use IndexKind::*;
         if let Range { start, len } = &other.kind {
-            if *start != 0 {
-                return self.check_append(&other.labelled(*start, *len)?);
-            }
+            if *start != 0 && *len > isize::MAX as usize / std::mem::size_of::<i64>() { return Err(integer_capacity_error(*len)); }
         }
         match (&self.kind, &other.kind) {
             (Range { .. }, Range { .. } | Int64(_))
             | (Int64(_), Int64(_))
             | (Str(_), Str(_)) => Ok(()),
             (Datetime(_, a), Datetime(_, b)) if a.is_aware() == b.is_aware() => Ok(()),
-            (Int64(a), Range { len: k, .. }) => continuation(a, *k).map(drop),
+            (Int64(a), Range { start: 0, len: k }) => continuation(a, *k).map(drop),
+            (Int64(_), Range { .. }) => Ok(()),
             (mine, theirs) => Err(VolasError::Value(format!(
                 "cannot append rows with a {} to a frame with a {}{}",
-                other.kind_text(),
+                if matches!(&other.kind, Range { start, .. } if *start != 0) { "integer index" } else { other.kind_text() },
                 self.kind_text(),
                 match (mine, theirs) {
-                    (Datetime(..), Range { .. }) => " — label the rows with their timestamps",
+                    (Datetime(..), Range { start: 0, .. }) => " — label the rows with their timestamps",
                     (Datetime(_, a), Datetime(..)) if a.is_aware() => {
                         " — tz_localize the rows to their zone first"
                     }
@@ -469,11 +462,6 @@ impl Index {
     /// A `RangeIndex` starting later (a slice) carries its labels.
     pub fn is_unlabelled(&self) -> bool {
         matches!(self.kind, IndexKind::Range { start: 0, .. })
-    }
-
-    /// These labels as explicit integer labels (a sliced `RangeIndex` appended).
-    fn labelled(&self, start: i64, len: usize) -> Result<Index> {
-        Index::new(self.name.clone(), IndexKind::Int64(materialize_range(start, len, 0)?))
     }
 
     /// How the index kind reads in a message.
@@ -493,136 +481,8 @@ impl Index {
     /// [`check_append`](Self::check_append), which this checks first, so on an error
     /// the index is unchanged.
     pub fn extend(&mut self, other: &Index) -> Result<()> {
-        use IndexKind::*;
-        if let Range { start, len } = &other.kind {
-            if *start != 0 {
-                return self.extend(&other.labelled(*start, *len)?);
-            }
-        }
-        self.check_append(other)?;
-        self.check_extension(other)?;
-        let order = self.order;
-        match (&mut self.kind, &other.kind) {
-            (Range { len: a, .. }, Range { len: b, .. }) => {
-                *a += b;
-                self.order = LabelOrder { increasing: true, decreasing: *a <= 1 };
-            }
-            (Datetime(a, _), Datetime(b, _)) => {
-                a.extend_from_slice(b);
-                self.order = LabelOrder { increasing: true, decreasing: a.len() <= 1 };
-            }
-            (Int64(a), Int64(b)) => {
-                self.order = order.extended(a.last(), b);
-                a.extend_from_slice(b);
-            }
-            (Str(a), Str(b)) => {
-                self.order = order.extended(a.last(), b);
-                a.extend(b.iter().cloned());
-            }
-            // An implicit positional (Range) index appended to explicit Int64 labels
-            // continues the sequence (last + 1, ...), mirroring Range+Range's auto-
-            // increment — so a sliced / compacted frame (whose Range collapsed to
-            // absolute Int64 labels) keeps assigning monotonic labels to appended bars
-            // instead of restarting at the bar's own 0. The bare-RangeIndex bar is the
-            // "no explicit label, take the next row position" signal; honoring it keeps
-            // a windowed (rolling-compacted) RangeIndex frame's labels absolute and
-            // gap-free, matching pandas' last-M view of a RangeIndex.
-            (Int64(a), Range { len: bn, .. }) => {
-                let next = continuation(a, *bn)?;
-                reserve_integer_labels(a, *bn)?;
-                let start = a.len();
-                a.extend((0..*bn).map(|k| next + k as i64));
-                let (head, added) = a.split_at(start);
-                self.order = order.extended(head.last(), added);
-            }
-            // explicit integer labels after implicit positions: the positions become labels
-            (Range { start, len }, Int64(added)) => {
-                let mut labels = materialize_range(*start, *len, added.len())?;
-                labels.extend_from_slice(added);
-                self.order = LabelOrder::of(&labels);
-                self.kind = Int64(labels);
-            }
-            _ => unreachable!("rejected by check_append"), // LCOV_EXCL_LINE
-        }
-        Ok(())
-    }
-
-    /// Both inputs are checked indexes. Only overlap across their boundary can
-    /// invalidate a concatenation; increasing indexes use their stored order.
-    pub(crate) fn check_extension(&self, other: &Index) -> Result<()> {
-        use IndexKind::*;
-        if let Range { start, len } = &other.kind {
-            if *start != 0 {
-                return self.check_extension(&other.labelled(*start, *len)?);
-            }
-        }
-        match (&self.kind, &other.kind) {
-            (Range { start, len }, Range { len: added, .. }) => {
-                let len = len.checked_add(*added).ok_or_else(|| VolasError::Overflow("range index length overflow".into()))?;
-                validate_labels(&Range { start: *start, len })?;
-            }
-            (Datetime(a, _), Datetime(b, _)) => {
-                if a.last().zip(b.first()).is_some_and(|(a, b)| a >= b) {
-                    return Err(datetime_order_error());
-                }
-            }
-            (Int64(a), Range { len, .. }) => {
-                if self.continuation_clash(*len, 0..a.len()).is_some() {
-                    return Err(duplicate_label_error("int64"));
-                }
-            }
-            (Range { start, len }, Int64(b)) => {
-                if b.iter().any(|&label| label >= *start && (label as i128) < *start as i128 + *len as i128) {
-                    return Err(duplicate_label_error("int64"));
-                }
-                // Replacement-plus-append checks this before replacing values.
-                // Reject impossible Vec capacities without allocating or changing
-                // the current index; the eventual reserve still checks resources.
-                let count = len.saturating_add(b.len());
-                if count > isize::MAX as usize / std::mem::size_of::<i64>() {
-                    return Err(integer_capacity_error(count));
-                }
-            }
-            (Int64(_), Int64(b)) => {
-                if b.iter().any(|&label| self.position_of(&Label::I64(label)).is_some()) {
-                    return Err(duplicate_label_error("int64"));
-                }
-            }
-            (Str(_), Str(b)) => {
-                if b.iter().any(|label| self.position_of(&Label::Str(label.clone())).is_some()) {
-                    return Err(duplicate_label_error("str"));
-                }
-            }
-            _ => return self.check_append(other),
-        }
-        Ok(())
-    }
-
-    /// Whether labels about to be appended reuse labels in a physically held,
-    /// logically dropped prefix. The caller has already checked retained labels.
-    pub(crate) fn reuses_dropped_labels(&self, other: &Index, dropped: usize) -> bool {
-        if dropped == 0 || self.is_strict_datetime() {
-            return false;
-        }
-        if other.is_unlabelled() {
-            return self.continuation_clash(other.len(), 0..dropped).is_some();
-        }
-        (0..other.len()).any(|i| self.position_in(&other.label_at(i), 0..dropped).is_some())
-    }
-
-    /// Freeze continued integer labels before a dropped-prefix compaction can
-    /// remove the previous last label. Only the cold prefix-reuse path needs it.
-    pub(crate) fn explicit_continuation(&self, other: &Index) -> Result<Option<Index>> {
-        match (&self.kind, &other.kind) {
-            (IndexKind::Int64(labels), IndexKind::Range { len, .. }) if other.is_unlabelled() => {
-                let next = continuation(labels, *len)?;
-                let mut values = Vec::new();
-                reserve_integer_labels(&mut values, *len)?;
-                values.extend((0..*len).map(|i| next + i as i64));
-                Index::new(other.name.clone(), IndexKind::Int64(values)).map(Some)
-            }
-            _ => Ok(None),
-        }
+        let plan = self.plan_append(other, AppendMode::Extend)?;
+        self.apply_append(plan)
     }
 
     /// The first label among the positions `rows` (a window's retained rows) that `k`
@@ -788,17 +648,24 @@ fn validate_labels(kind: &IndexKind) -> Result<LabelOrder> {
             if labels.first() == Some(&NAT) || labels.windows(2).any(|w| w[1] == NAT || w[0] >= w[1]) {
                 return invalid_datetime_labels(labels);
             }
-            return Ok(LabelOrder::of_kind(kind));
+            Ok(LabelOrder::ascending(labels.len()))
         }
-        IndexKind::Int64(labels) => return require_unique_labels(labels, "int64"),
-        IndexKind::Str(labels) => return require_unique_labels(labels, "str"),
+        IndexKind::Int64(labels) => require_unique_labels(labels, "int64"),
+        IndexKind::Str(labels) => require_unique_labels(labels, "str"),
         IndexKind::Range { start, len } => {
-            if *len > 0 && i64::try_from(*len - 1).ok().and_then(|span| start.checked_add(span)).is_none() {
-                return Err(VolasError::Overflow("range index labels overflow int64".into()));
-            }
+            validate_range(*start, *len)?;
+            Ok(LabelOrder::ascending(*len))
         }
     }
-    Ok(LabelOrder::of_kind(kind))
+}
+
+/// The range invariant shared by explicit construction and append plans.
+#[inline]
+fn validate_range(start: i64, len: usize) -> Result<()> {
+    if len > 0 && i64::try_from(len - 1).ok().and_then(|span| start.checked_add(span)).is_none() {
+        return Err(VolasError::Overflow("range index labels overflow int64".into()));
+    }
+    Ok(())
 }
 
 /// Detailed failures stay off the valid, single-pass datetime construction path.
@@ -918,3 +785,6 @@ mod tests;
 
 #[cfg(test)]
 mod tests_invariants;
+
+#[cfg(test)]
+mod tests_cost;

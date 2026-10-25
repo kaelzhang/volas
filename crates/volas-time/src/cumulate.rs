@@ -2,7 +2,7 @@
 
 use std::borrow::Cow;
 
-use volas_core::{DataFrame, Index, IndexKind, Result, Tz, VolasError};
+use volas_core::{RowGroups, DataFrame, Index, IndexKind, Result, Tz, VolasError};
 
 use crate::agg::AggSpec;
 use crate::open_period::OpenPeriod;
@@ -169,7 +169,7 @@ impl Cumulator {
             let resent = ts[0] == open.last_ts();
             open.push(&bars)?;
             // append has always deferred errors in the still-open aggregate.
-            if aggregate.push(&bars, resent).is_err() { self.aggregate = None; }
+            if aggregate.push_admitted(&bars, resent, ts[0]).is_err() { self.aggregate = None; }
         }
         Ok(true)
     }
@@ -272,13 +272,14 @@ impl PeriodRuns {
     }
 
     fn aggregate(&self, raw: &DataFrame, spec: &AggSpec, count: usize, tz: &Tz, materializing: bool) -> Result<DataFrame> {
+        let groups = RowGroups::from_offsets(&self.kept[..self.offsets[count]], &self.offsets[..=count], raw.height()).map_err(|(_, error)| error)?;
         let mut columns = Vec::with_capacity(raw.width());
         let mut error: Option<(usize, VolasError)> = None;
         for (name, col) in raw.names().iter().zip(raw.columns()) {
             // Columns fold independently, but errors still belong to the earliest
             // period, then the earliest column of that period, just as before.
             let end = error.as_ref().map_or(count, |(row, _)| row + 1);
-            let groups = self.offsets[..=end].windows(2).map(|w| &self.kept[w[0]..w[1]]);
+            let selected = groups.prefix(end);
             // Only the initial materializing batch retains the snapshot output's
             // growth capacity. Ordinary incremental builders keep their old budget.
             // The maximum open string cell bounds the forming endpoint's bytes.
@@ -287,7 +288,7 @@ impl PeriodRuns {
                 volas_core::ColumnView::Str(v, _) if materializing => (self.starts[count]..raw.height()).map(|i| v.get(i).len()).max().unwrap_or(0),
                 _ => 0,
             };
-            match col.reduce_groups_with_spare(spec.agg_for(name).as_combine_op(), groups, spare, bytes) {
+            match selected.reduce_with_spare(col, spec.agg_for(name).as_combine_op(), spare, bytes) {
                 Ok(col) => columns.push(col),
                 Err(e) if error.as_ref().is_none_or(|(row, _)| e.0 < *row) => error = Some(e),
                 Err(_) => {}

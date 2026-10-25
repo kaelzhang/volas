@@ -616,7 +616,7 @@ fn an_integer_fold_cannot_make_the_float_lead_join_inexact() {
     assert!(tail.equals(&before));
     assert!(snapshot.equals(&before));
     let bad = DataFrame::new(vec!["close".into()], vec![Column::i64(vec![(1 << 53) + 1])], None).unwrap();
-    assert!(matches!(tail.write_folded_row(&bad, &ops), Err(VolasError::DType(_))));
+    assert!(matches!(tail.check_folded_row(&bad, &ops), Err(VolasError::DType(_))));
     assert!(tail.equals(&before));
 }
 

@@ -225,6 +225,16 @@ fn duplicate_name(names: &[String]) -> VolasError {
 impl DataFrame {
     /// Construct a frame from parallel `names` / `columns`, validating shape.
     pub fn new(names: Vec<String>, columns: Vec<Column>, index: Option<Index>) -> Result<Self> {
+        Self::admit(names, columns, index, None)
+    }
+
+    /// Admit columns with an explicit row count and a checked positional index.
+    /// The row count also preserves zero-column Arrow tables.
+    pub fn from_columns(names: Vec<String>, columns: Vec<Column>, height: usize) -> Result<Self> {
+        Self::admit(names, columns, None, Some(height))
+    }
+
+    fn admit(names: Vec<String>, columns: Vec<Column>, index: Option<Index>, height: Option<usize>) -> Result<Self> {
         if names.len() != columns.len() {
             return Err(VolasError::Shape(format!(
                 "{} names but {} columns",
@@ -233,7 +243,7 @@ impl DataFrame {
             )));
         }
         // a frame of no columns is as tall as its index (pandas `df[[]]`)
-        let height = columns.first().map(|c| c.len()).or(index.as_ref().map(Index::len)).unwrap_or(0);
+        let height = height.or_else(|| columns.first().map(Column::len)).or_else(|| index.as_ref().map(Index::len)).unwrap_or(0);
         for (n, c) in names.iter().zip(&columns) {
             if c.len() != height {
                 return Err(VolasError::Shape(format!(
@@ -257,7 +267,7 @@ impl DataFrame {
                 }
                 ix
             }
-            None => Index::new(None, crate::IndexKind::Range { start: 0, len: height })?,
+            None => Index::positional(height)?,
         };
         let mut name_to_idx = FxHashMap::with_capacity_and_hasher(names.len(), Default::default());
         for (i, n) in names.iter().enumerate() {
@@ -501,6 +511,7 @@ impl DataFrame {
 }
 
 mod admit;
+pub use admit::{FoldedRow, FormingFold};
 pub use admit::Retained;
 mod cells;
 pub use cells::{CellWrite, CellWrites};

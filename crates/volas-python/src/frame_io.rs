@@ -307,7 +307,7 @@ impl PyDataFrame {
     #[pyo3(signature = (data, *, copy = volas_arrow::DEFAULT_IMPORT_COPY), text_signature = "(data, *, copy=False)")]
     pub(crate) fn from_arrow(data: &Bound<'_, PyAny>, copy: bool) -> PyResult<PyDataFrame> {
         let (names, cols, height) = crate::arrow::frame_from_arrow_obj(data, copy)?;
-        let frame = DataFrame::new(names, cols, Some(Index::new(None, volas_core::IndexKind::Range { start: 0, len: height }).map_err(pyerr)?)).map_err(pyerr)?;
+        let frame = DataFrame::from_columns(names, cols, height).map_err(pyerr)?;
         Self::validate_schema(&frame)?;
         Ok(PyDataFrame::plain(frame))
     }
