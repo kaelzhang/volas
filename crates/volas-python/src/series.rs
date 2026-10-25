@@ -262,15 +262,3 @@ pub(crate) fn duplicated_mask_keep(col: &Column, keep: &str) -> PyResult<Vec<boo
         ))),
     }
 }
-
-
-/// The first `n` rows of a series (saturating).
-pub(crate) fn slice_head(s: &Series, n: usize) -> PyResult<PySeries> {
-    let take: Vec<usize> = (0..n.min(s.len())).collect();
-    let index = Arc::new(s.index().take(&take).map_err(pyerr)?);
-    Ok(PySeries {
-        inner: Series::new(s.name().map(str::to_owned), s.data().take(&take), index).map_err(pyerr)?,
-    })
-}
-
-

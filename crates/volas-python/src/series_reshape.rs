@@ -166,9 +166,7 @@ impl PySeries {
         if n < 0 {
             return Err(PyValueError::new_err("n must be >= 0"));
         }
-        self.inner.data().require_numeric().map_err(pyerr)?;
-        let sorted = self.sort_values(false, "last")?;
-        slice_head(&sorted.inner, n as usize)
+        self.extreme_rows(n as usize, false)
     }
 
     /// The `n` smallest values, ascending (pandas `nsmallest`).
@@ -176,9 +174,7 @@ impl PySeries {
         if n < 0 {
             return Err(PyValueError::new_err("n must be >= 0"));
         }
-        self.inner.data().require_numeric().map_err(pyerr)?;
-        let sorted = self.sort_values(true, "last")?;
-        slice_head(&sorted.inner, n as usize)
+        self.extreme_rows(n as usize, true)
     }
 
     /// Drop duplicate values, keeping the `keep` occurrence (`'first'` |
@@ -282,5 +278,17 @@ impl PySeries {
         )
         .map_err(pyerr)?;
         Ok(PyDataFrame::plain(df))
+    }
+}
+
+impl PySeries {
+    /// Derive exactly the returned rows; rows after the cutoff have no index constraint.
+    fn extreme_rows(&self, n: usize, ascending: bool) -> PyResult<PySeries> {
+        let col = self.inner.data();
+        col.require_numeric().map_err(pyerr)?;
+        let mut positions: Vec<usize> = col.argsort(ascending).into_iter()
+            .filter(|&i| col.is_valid(i)).collect();
+        positions.truncate(n);
+        self.reindexed(&positions)
     }
 }
