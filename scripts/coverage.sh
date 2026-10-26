@@ -88,7 +88,7 @@ echo ">> cargo test coverage..."
 # maturin's build), run the suite, then export LCOV for the exact .so that ran.
 echo ">> building instrumented extension..."
 "$PYTHON" scripts/build_env.py --set MallocPreScribble=1 --set MALLOC_PERTURB_=170 \
-    --set RUSTFLAGS=-Cinstrument-coverage \
+    --rust-checks coverage \
     --set LLVM_PROFILE_FILE="$PWD/$PROF_DIR/build-%m-%p.profraw" \
     -- "$PYTHON" -m maturin develop --quiet
 # maturin may install volas_rs as a package shim (`from .volas_rs import *`), so

@@ -23,13 +23,14 @@ PYTHON="${VOLAS_PYTHON:-${PYTHON:-python}}"
 PY_PREFIX="$("$PYTHON" -c 'import sys; print(sys.prefix)')"
 export VIRTUAL_ENV="$PY_PREFIX" CONDA_PREFIX="$PY_PREFIX"
 TESTS=(test/test_harness_machines.py test/test_harness_schedules.py test/test_harness_defects.py)
+OWNED_ARGS=()
 
 case "$MODE" in
     release)
         "$PYTHON" -c 'from scripts.build_config import build_environment; build_environment()'
         ;;
     checked)
-        CHECKED_FLAGS="-C debug-assertions -C overflow-checks"
+        OWNED_ARGS=(--rust-checks checked)
         export CARGO_TARGET_DIR="${HARNESS_CHECKED_TARGET:-target/harness-checked}"
         restore() {
             echo ">> restoring a normal release through the build owner..."
@@ -45,13 +46,13 @@ case "$MODE" in
 esac
 
 echo ">> [$MODE] Rust resume-vs-full matrix..."
-"$PYTHON" scripts/build_env.py ${CHECKED_FLAGS:+--set "RUSTFLAGS=$CHECKED_FLAGS"} \
+"$PYTHON" scripts/build_env.py ${OWNED_ARGS[@]+"${OWNED_ARGS[@]}"} \
     -- cargo test -p volas-directive --test resume_matrix --release
 echo ">> [$MODE] building the extension..."
 if [ "$MODE" = release ]; then
     "$PYTHON" scripts/build_release.py --mode normal --artifacts "$PWD/target/harness-release-$(date +%Y%m%d-%H%M%S)" --install
 else
-    "$PYTHON" scripts/build_env.py --set "RUSTFLAGS=$CHECKED_FLAGS" \
+    "$PYTHON" scripts/build_env.py "${OWNED_ARGS[@]}" \
         -- "$PYTHON" -m maturin develop --release --quiet
 fi
 echo ">> [$MODE] Python harness (profile ${VOLAS_HARNESS_PROFILE:-short})..."

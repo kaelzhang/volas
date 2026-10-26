@@ -88,10 +88,12 @@ def test_owned_inputs_survive_by_provenance_in_real_child(tmp_path):
     script = 'import json,os; print(json.dumps({k:os.environ.get(k) for k in ' + repr(keys) + '}))'
     for owned in (False, True):
         record = tmp_path / f'{owned}.json'
-        additions = [arg for key in keys for arg in ('--set', key + '=owner')]
+        additions = dict.fromkeys(keys, 'owner') if owned else {}
         result = subprocess.run(
-            [sys.executable, str(ROOT / 'scripts/build_env.py'), '--record', str(record),
-             *(additions if owned else []), '--', sys.executable, '-c', script],
+            [sys.executable, '-c',
+             'from scripts.build_config import exec_child; '
+             f'exec_child({[sys.executable, "-c", script]!r}, '
+             f'owned={additions!r}, record={str(record)!r})'], cwd=ROOT,
             env=dict(os.environ, **dict.fromkeys(keys, 'ambient')),
             capture_output=True, text=True, check=True,
         )

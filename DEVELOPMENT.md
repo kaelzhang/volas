@@ -250,7 +250,13 @@ and unrepresentable Cargo configuration remain checked and rejected as before.
 The same environment owner serves coverage, audit builds, assembly gates and Make's
 debug/check/lint/publish builds through `scripts/build_env.py`; their command and
 environment records live in `target/build-environments/`. Coverage and checked audit
-supply their instrumentation/check flags explicitly after removing shell settings.
+supply `--rust-checks coverage|checked`; the owner constructs their fixed flags.
+Shell entries initialize their own argument arrays before selecting a mode.
+The shell boundary's `--set` accepts only the fixed allocator checks and an
+absolute coverage profile path ending in `-%m-%p.profraw` with coverage selected;
+arbitrary compiler settings and unknown inputs fail before a child is started.
+Shell expansion cannot prove assignment provenance, so it cannot promote a
+variable's arbitrary value to an owned compiler input.
 Coverage also supplies its allocator guards (`MallocPreScribble=1` and
 `MALLOC_PERTURB_=170`) as owned inputs, so Rust tests retain the same checks as
 Python tests. Explicit owner inputs are preserved by provenance, irrespective of

@@ -115,12 +115,12 @@ def test_shell_build_boundary_records_inputs_and_keeps_parent_environment(tmp_pa
     env = dict(os.environ, **AMBIENT)
     result = subprocess.run(
         [sys.executable, str(ROOT / "scripts/build_env.py"), "--record", str(record),
-         "--set", "RUSTFLAGS=--cfg owned", "--", "cargo", "--version"],
+         "--rust-checks", "checked", "--", "cargo", "--version"],
         env=env, cwd=tmp_path, capture_output=True, text=True,
     )
     assert result.returncode == 0, result.stderr
     assert json.loads(record.read_text())["environment"]["owned"] == {
-        "RUSTFLAGS": "--cfg owned"
+        "RUSTFLAGS": "-C debug-assertions -C overflow-checks"
     }
     # Invoke the real compiler too: rustc does not consume Cargo's RUSTFLAGS.
     result = subprocess.run(
