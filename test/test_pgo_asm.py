@@ -118,7 +118,7 @@ def test_opcode_target_uses_address_operand(tmp_path, monkeypatch, opcode, opera
 
 
 @pytest.mark.parametrize("changed_target", [False, True])
-def test_real_hot_shell_rejects_empty_or_unbound_target(tmp_path, changed_target):
+def test_real_hot_shell_checks_body_after_sanitizing_target(tmp_path, changed_target):
     import os
     import shutil
     import subprocess
@@ -178,11 +178,17 @@ for a in sys.argv:
         capture_output=True,
         text=True,
     )
-    assert result.returncode != 0, result.stdout
     if changed_target:
-        assert "ambient build overrides rejected" in result.stderr
-        assert "CARGO_BUILD_TARGET" in result.stderr
+        import json
+
+        assert result.returncode == 0, result.stdout + result.stderr
+        records = list((target / "build-environments").glob("*.json"))
+        # The launcher records under the invoking source's target directory.
+        assert records
+        assert any("CARGO_BUILD_TARGET" in json.loads(p.read_text())["environment"]["removed"]
+                   for p in records)
     else:
+        assert result.returncode != 0, result.stdout
         assert "empty" in result.stderr or "instruction" in result.stderr
 
 

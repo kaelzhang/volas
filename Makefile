@@ -6,6 +6,8 @@ PYTHON ?= $(or $(VOLAS_PYTHON),python)
 PIP ?= $(PYTHON) -m pip
 PYTEST ?= $(PYTHON) -m pytest
 MATURIN ?= $(PYTHON) -m maturin
+BUILD_DRIVER := $(dir $(abspath $(lastword $(MAKEFILE_LIST))))scripts/build_env.py
+BUILD_ENV = $(PYTHON) "$(BUILD_DRIVER)" --
 # Lazy (`=`, not `:=`): the interpreter is probed only when a maturin recipe actually
 # expands MATURIN_DEVELOP_ENV — so targets that need no Python (asm-diff, lint) don't
 # print `python: command not found` when neither `python` nor VOLAS_PYTHON is set.
@@ -20,9 +22,9 @@ LLVM_COMPONENTS = $(shell $(PYTHON) scripts/check_toolchain.py --value component
 MATURIN_VERSION = $(shell $(PYTHON) scripts/check_toolchain.py --value maturin)
 
 install: install-rust
-	@$(PIP) install "maturin==$(MATURIN_VERSION)"
-	@cargo install cargo-llvm-cov --locked
-	@$(PIP) install --no-build-isolation -e '.[dev]'
+	@$(BUILD_ENV) $(PIP) install "maturin==$(MATURIN_VERSION)"
+	@$(BUILD_ENV) cargo install cargo-llvm-cov --locked
+	@$(BUILD_ENV) $(PIP) install --no-build-isolation -e '.[dev]'
 	@$(PYTHON) scripts/check_toolchain.py
 
 # rustup selects rust-toolchain.toml automatically for every repo cargo/rustc.
@@ -47,7 +49,7 @@ build-pkg:
 
 # Build the Rust extension only (development mode)
 build-ext:
-	@$(MATURIN_DEVELOP_ENV) $(MATURIN) develop
+	@$(MATURIN_DEVELOP_ENV) $(BUILD_ENV) $(MATURIN) develop
 
 # Clean build artifacts
 clean:
@@ -149,7 +151,7 @@ endif
 endif
 benchmark: build
 	@echo "\033[1m>> Installing dev + benchmark comparison libraries... <<\033[0m"
-	@$(PYTHON) -c "import tomllib; e=tomllib.load(open('pyproject.toml','rb'))['project']['optional-dependencies']; print('\n'.join(e['dev'] + e['benchmark']))" | $(PIP) install -q -r /dev/stdin
+	@$(PYTHON) -c "import tomllib; e=tomllib.load(open('pyproject.toml','rb'))['project']['optional-dependencies']; print('\n'.join(e['dev'] + e['benchmark']))" | $(BUILD_ENV) $(PIP) install -q -r /dev/stdin
 ifdef SECTION
 	@echo "\033[1m>> Benchmarking the '$(SECTION)' section only (console, not archived) <<\033[0m"
 	$(PYTEST) test/test_benchmark.py $(BENCH_OPTS) -k "test_$(SECTION)"
@@ -229,7 +231,7 @@ hot-asm-update:
 
 # Download/check the fonts used by the README / GitHub Pages animated GIFs.
 anime-fonts:
-	@$(PIP) install -q pillow
+	@$(BUILD_ENV) $(PIP) install -q pillow
 	@$(PYTHON) docs/animated_gif/generate_gif.py --ensure-fonts --check-fonts --strict-fonts --no-render
 
 # Generate the README / GitHub Pages animated explainer GIFs locally and open a
@@ -257,7 +259,7 @@ lint:
 	@echo "\033[1m>> Running mypy (package)... <<\033[0m"
 	@mypy volas
 	@echo "\033[1m>> Running cargo clippy (warnings are errors)... <<\033[0m"
-	@cargo clippy --workspace --all-targets -- -D warnings
+	@$(BUILD_ENV) cargo clippy --workspace --all-targets -- -D warnings
 
 # Static type gates — deterministic oracles that prove the shipped typings are correct
 # (no human review needed). Needs the extension built so the stub is installed.
@@ -286,12 +288,12 @@ fmt:
 
 # Check Rust code
 check:
-	cargo check
-	cargo clippy
+	$(BUILD_ENV) cargo check
+	$(BUILD_ENV) cargo clippy
 
 # Run Rust unit tests
 cargo-test:
-	cargo test
+	$(BUILD_ENV) cargo test
 
 # Publish the Rust crates to crates.io in dependency order. `volas-python` is the
 # PyO3 cdylib (publish = false) and is skipped; the `volas` facade goes last since
@@ -302,7 +304,7 @@ cargo-publish:
 	@flags="--locked"; [ -n "$(DRY)" ] && flags="$$flags --dry-run"; \
 	for c in volas-core volas-arrow volas-compute volas-directive volas-time volas-io volas; do \
 		echo "\033[1m>> cargo publish $$c $$flags <<\033[0m"; \
-		cargo publish -p $$c $$flags || exit 1; \
+		$(BUILD_ENV) cargo publish -p $$c $$flags || exit 1; \
 	done
 
 # Upload to PyPI

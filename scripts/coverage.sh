@@ -70,8 +70,7 @@ restore() {
         "$PYTHON" scripts/build_install.py restore "$RELEASE_SNAPSHOT"
     else
         echo ">> restoring a normal release through the build owner..."
-        env -u RUSTFLAGS -u LLVM_PROFILE_FILE \
-            "$PYTHON" scripts/build_release.py --mode normal --artifacts "$PWD/target/coverage-restore-$(date +%Y%m%d-%H%M%S)" --install
+        "$PYTHON" scripts/build_release.py --mode normal --artifacts "$PWD/target/coverage-restore-$(date +%Y%m%d-%H%M%S)" --install
     fi
 }
 trap restore EXIT
@@ -80,7 +79,7 @@ trap restore EXIT
 # cargo-llvm-cov runs the workspace unit/integration tests under instrumentation
 # and emits LCOV in one self-contained step (its own target dir + profiles).
 echo ">> cargo test coverage..."
-cargo llvm-cov --workspace --exclude volas-python --quiet \
+"$PYTHON" scripts/build_env.py -- cargo llvm-cov --workspace --exclude volas-python --quiet \
     --lcov --output-path "$PROF_DIR/cargo.lcov" \
     --ignore-filename-regex 'volas-python'
 
@@ -88,8 +87,9 @@ cargo llvm-cov --workspace --exclude volas-python --quiet \
 # Instrument the cdylib too (RUSTFLAGS, since the wrapper alone does not reach
 # maturin's build), run the suite, then export LCOV for the exact .so that ran.
 echo ">> building instrumented extension..."
-export RUSTFLAGS="${RUSTFLAGS:-} -Cinstrument-coverage"
-LLVM_PROFILE_FILE="$PWD/$PROF_DIR/build-%m-%p.profraw" "$PYTHON" -m maturin develop --quiet
+"$PYTHON" scripts/build_env.py --set RUSTFLAGS=-Cinstrument-coverage \
+    --set LLVM_PROFILE_FILE="$PWD/$PROF_DIR/build-%m-%p.profraw" \
+    -- "$PYTHON" -m maturin develop --quiet
 # maturin may install volas_rs as a package shim (`from .volas_rs import *`), so
 # the native object lives inside the package dir, not at `.origin`.
 SO="$("$PYTHON" - <<'PY'

@@ -27,7 +27,9 @@ def digest(path):
 # The driver is also used against source archives that do not contain this tooling.
 sys.path.insert(0, str(DRIVER))
 from scripts.build_config import (  # noqa: E402
-    check_environment,
+    check_environment as check_environment,
+    build_environment,
+    environment_record,
     configuration,
     resolved_flags,
     tool_environment,
@@ -42,7 +44,7 @@ from scripts.toolchain import RUST, MATURIN  # noqa: E402
 
 def flag_environment(flags):
     """Cargo's encoded format preserves whitespace inside individual arguments."""
-    return dict(os.environ, CARGO_ENCODED_RUSTFLAGS="\x1f".join(flags))
+    return dict(build_environment(), CARGO_ENCODED_RUSTFLAGS="\x1f".join(flags))
 
 
 def verify_library(path, site, expected):
@@ -77,6 +79,7 @@ def validate_profile(profile, identity, provenance, profdata):
 
 
 def output(cmd, **kwargs):
+    kwargs.setdefault("env", build_environment())
     return subprocess.check_output(cmd, text=True, **kwargs).strip()
 
 
@@ -99,7 +102,7 @@ def source_hash(root):
 
 
 def identity(root, target):
-    check_environment(os.environ)
+    build_environment()
     with tempfile.TemporaryDirectory(prefix="volas-identity-") as temp:
         config = configuration(root, target, Path(temp) / "flags.log")
     rust = config["tools"]["rustc"]["version"]
@@ -121,6 +124,7 @@ def identity(root, target):
     training = [
         DRIVER / "scripts/build_release.py",
         DRIVER / "scripts/build_config.py",
+        DRIVER / "scripts/build_env.py",
         DRIVER / "scripts/toolchain.py",
         DRIVER / "rust-toolchain.toml",
         DRIVER / "scripts/release_smoke.py",
@@ -156,13 +160,19 @@ def write(path, value):
 def run(cmd, log, root, env=None, timeout=None):
     start = time.monotonic()
     before = resource.getrusage(resource.RUSAGE_CHILDREN)
+    ambient = dict(os.environ, PYTHONOPTIMIZE="0")
+    base = build_environment(ambient)
+    child = dict(base if env is None else env, PYTHONOPTIMIZE="0")
+    write(Path(log).with_suffix(".environment.json"), environment_record(
+        ambient, owned={k: v for k, v in child.items() if base.get(k) != v}
+    ))
     with Path(log).open("w") as f:
         f.write(json.dumps([str(x) for x in cmd]) + "\n")
         f.flush()
         subprocess.run(
             [str(x) for x in cmd],
             cwd=root,
-            env=dict(os.environ if env is None else env, PYTHONOPTIMIZE="0"),
+            env=child,
             stdout=f,
             stderr=subprocess.STDOUT,
             check=True,
@@ -292,6 +302,8 @@ def build(root, artifacts, mode, target, ident, profile=None):
     lib = install(wheel, stage / "site", root, stage / "install.log")
     manifest = {
         "schema": 2,
+        "environment": environment_record(owned={k: v for k, v in env.items()
+                                                   if build_environment().get(k) != v}),
         "argv_sha256": digest(stage / "rustc-argv.jsonl"),
         "profile_warnings": warnings,
         "mode": mode,
@@ -345,7 +357,7 @@ def main():
         help="offline wheelhouse for hash-locked training",
     )
     args = ap.parse_args()
-    check_environment(os.environ)
+    build_environment()
     root, artifacts = args.source.resolve(), args.artifacts.resolve()
     artifacts.mkdir(parents=True, exist_ok=True)
     target = args.target or next(
@@ -389,7 +401,7 @@ def main():
         raw = artifacts / "training-raw"
         raw.mkdir()
         env = dict(
-            os.environ,
+            build_environment(),
             LLVM_PROFILE_FILE=str(raw / "train-%m-%p.profraw"),
             PYTHONPATH=str(deps),
         )
@@ -461,7 +473,7 @@ def main():
     probe = artifacts / "final-probe"
     probe.mkdir()
     env = dict(
-        os.environ,
+        build_environment(),
         PYTHONPATH=os.pathsep.join(map(str, [stage / "site", runtime])),
         LLVM_PROFILE_FILE=str(probe / "%m-%p.profraw"),
     )

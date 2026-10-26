@@ -236,8 +236,21 @@ a fresh generate build.
 Schema 2 manifests have one effective configuration identity: ordered Cargo-resolved
 flags (including duplicates), the release profile, resolved features, actual compiler
 and Cargo executables, linker/SDK identities and the deployment target. Profile and
-pair checks compare that identity independently of the source hash. Unbound tool,
-flags, linker, SDK and release-profile overrides are rejected. The Cargo resolver
+pair checks compare that identity independently of the source hash. The build owner
+constructs every child build environment from an explicit allowlist. Ambient compiler
+and linker settings (including `LDFLAGS`, `CFLAGS`, `CPPFLAGS`, `RUSTFLAGS`, wrappers,
+per-target variants and unknown build-script inputs) are removed before configuration
+resolution or compilation. Their names are recorded under `environment.removed` in
+build manifests; retained inputs and owner-supplied flags/tools are recorded separately.
+Removed settings do not enter the build identity. Cargo registry authentication
+remains available to the existing publish command; records retain only its SHA-256
+fingerprint, never the token. `MACOSX_DEPLOYMENT_TARGET` remains
+bound to that identity; explicit SDK/developer-directory overrides, Python optimization,
+and unrepresentable Cargo configuration remain checked and rejected as before.
+The same environment owner serves coverage, audit builds, assembly gates and Make's
+debug/check/lint/publish builds through `scripts/build_env.py`; their command and
+environment records live in `target/build-environments/`. Coverage and checked audit
+supply their instrumentation/check flags explicitly after removing shell settings. The Cargo resolver
 records the complete target-info query and refuses an unfamiliar query grammar.
 Both resolved flags and real rustc argv must match the requested mode and absolute
 profile path. One argument parser accepts `-Cx`, `-C x`, `--codegen=x`, and
@@ -343,7 +356,7 @@ distribution. To upload a previously built package, run
 `make upload BUILD_ARTIFACTS=<that-build-directory>`. Other files in `dist/` are
 untouched and never selected implicitly.
 
-Normal assembly gates reject target-triple redirection in the environment or Cargo
+Normal assembly gates remove ambient target-triple redirection and reject it in Cargo
 config. Both gates pass the same explicit `--target-dir` to Cargo and read outputs
 from that directory (`CARGO_TARGET_DIR`, or the repository's `target` directory),
 so a configured build-directory redirect cannot select stale probes.

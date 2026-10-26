@@ -1,8 +1,9 @@
 """Real local compiler/LLVM tools and clean subprocess environments for tooling tests."""
 
-import os
 from pathlib import Path
 import subprocess
+
+from scripts.build_config import build_environment
 
 ROOT = Path(__file__).resolve().parents[1]
 HOST = (
@@ -17,10 +18,7 @@ LLVM = SYSROOT / "lib/rustlib" / HOST / "bin"
 
 
 def clean_env(**extra):
-    env = dict(os.environ, CARGO_NET_OFFLINE="true")
-    for key in ("LDFLAGS", "RUSTFLAGS", "CARGO_ENCODED_RUSTFLAGS"):
-        env.pop(key, None)
-    return dict(env, **extra)
+    return dict(build_environment(), CARGO_NET_OFFLINE="true", **extra)
 
 
 def extension_link_flags(target):

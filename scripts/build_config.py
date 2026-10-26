@@ -18,71 +18,57 @@ def sha(path):
 
 
 def out(cmd, **kw):
+    kw.setdefault("env", build_environment())
     return subprocess.check_output([str(x) for x in cmd], text=True, **kw).strip()
 
 
 def check_environment(env):
     if sys.flags.optimize or env.get("PYTHONOPTIMIZE", "0") not in ("", "0"):
         raise ValueError("Python optimisation is forbidden for release acceptance")
-    allowed_cargo = {
-        "CARGO_HOME",
-        "CARGO_NET_OFFLINE",
-        "CARGO_TARGET_DIR",
-        "CARGO_BUILD_JOBS",
-        "CARGO_TERM_COLOR",
-        "CARGO_TERM_PROGRESS_WHEN",
-    }
-    exact = {
-        "RUSTFLAGS",
-        "CARGO_ENCODED_RUSTFLAGS",
-        "MATURIN_PGO",
-        "RUSTC",
-        "CARGO",
-        "RUSTC_WRAPPER",
-        "RUSTC_WORKSPACE_WRAPPER",
-        "RUSTDOC",
-        "SDKROOT",
-        "DEVELOPER_DIR",
-        "CC",
-        "CXX",
-        "LD",
-        "AR",
-        "CFLAGS",
-        "CXXFLAGS",
-        "LDFLAGS",
-        "LIBRARY_PATH",
-        "CPATH",
-        "RUSTC_BOOTSTRAP",
-        "RUSTC_LINKER",
-        "PYO3_CONFIG_FILE",
-        "PYO3_CROSS",
-        "PYO3_CROSS_LIB_DIR",
-        "PYO3_CROSS_PYTHON_VERSION",
-    }
-    bad = [
-        k
-        for k in env
-        if k in exact
-        or (
-            k.startswith(
-                (
-                    "CARGO_BUILD_",
-                    "CARGO_TARGET_",
-                    "CARGO_PROFILE_",
-                    "CARGO_ENCODED_",
-                    "CARGO_UNSTABLE_",
-                    "MATURIN_",
-                    "CC_",
-                    "CXX_",
-                    "CFLAGS_",
-                    "LDFLAGS_",
-                )
-            )
-            and k not in allowed_cargo
-        )
-    ]
+    bad = set(env) - BUILD_ENVIRONMENT - {"PYTHONOPTIMIZE"}
     if bad:
         raise ValueError(f"ambient build overrides rejected: {sorted(bad)}")
+
+
+# Only these ambient inputs may reach a build tool. Tool/flag additions are
+# constructed by the caller after this boundary and recorded separately.
+BUILD_ENVIRONMENT = {
+    "PATH", "HOME", "USER", "LOGNAME", "TMPDIR", "TMP", "TEMP",
+    "SYSTEMROOT", "SystemRoot", "WINDIR", "COMSPEC", "PATHEXT",
+    "LANG", "LC_ALL", "LC_CTYPE", "TZ",
+    "CARGO_HOME", "CARGO_NET_OFFLINE", "CARGO_TARGET_DIR", "CARGO_BUILD_JOBS",
+    "CARGO_REGISTRY_TOKEN",
+    "CARGO_TERM_COLOR", "CARGO_TERM_PROGRESS_WHEN",
+    "RUSTUP_HOME", "RUSTUP_TOOLCHAIN",
+    "VIRTUAL_ENV", "CONDA_PREFIX", "PYTHONHOME", "PYTHONPATH",
+    "MACOSX_DEPLOYMENT_TARGET",
+    "PIP_NO_INDEX", "PIP_FIND_LINKS", "PIP_CACHE_DIR", "PIP_DISABLE_PIP_VERSION_CHECK",
+}
+
+
+def build_environment(ambient=None):
+    """Construct child inputs; never mutate or reject a developer's shell flags."""
+    ambient = os.environ if ambient is None else ambient
+    # These acceptance/tool-selection inputs remain checked, as before.
+    check_environment({k: v for k, v in ambient.items()
+                       if k in {"PYTHONOPTIMIZE", "SDKROOT", "DEVELOPER_DIR"}})
+    return {k: v for k, v in ambient.items() if k in BUILD_ENVIRONMENT}
+
+
+def environment_record(ambient=None, owned=None):
+    ambient = os.environ if ambient is None else ambient
+    clean = build_environment(ambient)
+    return {
+        "removed": sorted(ambient.keys() - clean.keys()),
+        "retained": recorded_environment(clean),
+        "owned": recorded_environment(owned or {}),
+    }
+
+
+def recorded_environment(env):
+    """Authentication is operational input; retain a fingerprint, never a token."""
+    return {k: {"sha256": hashlib.sha256(v.encode()).hexdigest()}
+            if k.endswith("_TOKEN") else v for k, v in env.items()}
 
 
 def check_cargo_config(root):
@@ -160,7 +146,7 @@ def tools():
 
 def tool_environment(config):
     t = config["tools"]
-    env = dict(os.environ, RUSTC=t["rustc"]["path"], CARGO=t["cargo"]["path"])
+    env = dict(build_environment(), RUSTC=t["rustc"]["path"], CARGO=t["cargo"]["path"])
     env["PATH"] = str(Path(t["cargo"]["path"]).parent) + os.pathsep + env["PATH"]
     if t["sdk"]:
         env["SDKROOT"] = t["sdk"]["path"]
@@ -194,7 +180,7 @@ def resolved_flags(root, target, flags, log):
         trace = probe / "argv.jsonl"
         compiler_bin = Path(out(["rustc", "--print", "sysroot"])) / "bin"
         env = trace_environment(
-            dict(os.environ, RUSTC=str(compiler_bin / "rustc")), trace
+            dict(build_environment(), RUSTC=str(compiler_bin / "rustc")), trace
         )
         cmd = [
             str(compiler_bin / "cargo"),
@@ -206,6 +192,11 @@ def resolved_flags(root, target, flags, log):
             "--target-dir",
             str(probe / "target"),
         ]
+        Path(log).with_suffix(".environment.json").write_text(
+            json.dumps(environment_record(owned={k: v for k, v in env.items()
+                                                if build_environment().get(k) != v}),
+                       indent=2) + "\n"
+        )
         with Path(log).open("w") as f:
             f.write(json.dumps(cmd) + "\n")
             f.flush()

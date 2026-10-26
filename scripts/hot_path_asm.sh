@@ -28,7 +28,7 @@
 set -euo pipefail
 ROOT="$(git rev-parse --show-toplevel)"
 cd "$ROOT"
-"${VOLAS_PYTHON:-python3}" -c 'import sys; sys.path.insert(0,"scripts"); from build_release import check_environment; from build_config import check_cargo_config; import os; from pathlib import Path; check_environment(os.environ); check_cargo_config(Path.cwd())'
+"${VOLAS_PYTHON:-python3}" -c 'import sys; sys.path.insert(0,"scripts"); from build_release import check_environment; from build_config import check_cargo_config, build_environment; import os; from pathlib import Path; check_environment(build_environment()); check_cargo_config(Path.cwd())'
 "${VOLAS_PYTHON:-python3}" scripts/check_toolchain.py --rust-only
 if [ -n "${PGO_SITE:-}" ]; then
   "${VOLAS_PYTHON:-python3}" scripts/pgo_asm.py --site "$PGO_SITE" --output "${PGO_ASM_OUT:?set PGO_ASM_OUT for the separate final-library report}"
@@ -51,7 +51,7 @@ emit_asm() {
   crates="$(printf '%s\n' "$INVENTORY" | awk -F'|' -v mode="$MODE" 'NF>=4 && (mode=="dump" || $3=="max" || $3=="loop32"){print $1}' | sort -u)"
   for crate in $crates; do
     echo ">> emitting release asm for $crate ..." >&2
-    cargo rustc --release -q --target-dir "$TARGET" -p "$crate" -- \
+    "${VOLAS_PYTHON:-python3}" "$ROOT/scripts/build_env.py" -- cargo rustc --release -q --target-dir "$TARGET" -p "$crate" -- \
       --emit "asm=$ASM_DIR/$crate.s" -C "llvm-args=-x86-asm-syntax=intel"
   done
 }

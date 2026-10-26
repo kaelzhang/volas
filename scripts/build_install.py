@@ -71,8 +71,9 @@ def save(destination):
 def install(data):
     if digest(data["wheel"]) != data["wheel_sha256"]:
         raise ValueError("release wheel hash mismatch")
+    boundary = [sys.executable, str(Path(__file__).with_name("build_env.py")), "--"]
     subprocess.run(
-        [sys.executable, "-m", "pip", "install", data["wheel"]],
+        [*boundary, sys.executable, "-m", "pip", "install", data["wheel"]],
         check=True,
     )
     # Resolve missing dependencies first, keeping compatible installed versions.
@@ -80,6 +81,7 @@ def install(data):
     # same-version shortcut, without forcing unrelated dependency replacements.
     subprocess.run(
         [
+            *boundary,
             sys.executable,
             "-m",
             "pip",
