@@ -6,13 +6,13 @@ import hashlib
 import importlib
 import json
 import os
-import subprocess
 from pathlib import Path
 import sys
 import time
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
+from scripts import build_config as processes  # noqa: E402
 # Fixed before adoption; validation now recomputes every operation.
 TRAIN_PASSES = 4
 STAGES = (
@@ -337,11 +337,11 @@ def main():
             phase_output = args.output.with_name(
                 args.output.stem + "." + stage + ".json"
             )
-            env = dict(os.environ, PYTHONOPTIMIZE="0")
-            if "LLVM_PROFILE_FILE" in env:
-                raw = Path(env["LLVM_PROFILE_FILE"])
+            env = processes.build_environment(owned={"PYTHONOPTIMIZE": "0"})
+            if "LLVM_PROFILE_FILE" in os.environ:
+                raw = Path(os.environ["LLVM_PROFILE_FILE"])
                 env["LLVM_PROFILE_FILE"] = str(raw.with_name(stage + "-%m-%p.profraw"))
-            subprocess.run(
+            processes.run_child(
                 [
                     sys.executable,
                     "-S",

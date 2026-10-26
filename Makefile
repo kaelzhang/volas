@@ -29,8 +29,8 @@ install: install-rust
 
 # rustup selects rust-toolchain.toml automatically for every repo cargo/rustc.
 install-rust:
-	@which rustup > /dev/null || curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain none
-	@rustup toolchain install $(RUST_TOOLCHAIN) --profile default --component $(LLVM_COMPONENTS)
+	@which rustup > /dev/null || $(BUILD_ENV) curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | $(BUILD_ENV) sh -s -- -y --default-toolchain none
+	@$(BUILD_ENV) rustup toolchain install $(RUST_TOOLCHAIN) --profile default --component $(LLVM_COMPONENTS)
 	@$(PYTHON) scripts/check_toolchain.py --rust-only
 
 # Build the Rust extension and install the package in-place (development)

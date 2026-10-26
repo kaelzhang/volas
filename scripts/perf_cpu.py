@@ -7,10 +7,16 @@ import os
 import pathlib
 import statistics
 import subprocess
+
 import sys
 import time
 
 from build_pair import validate
+
+if __package__:
+    from . import build_config as processes
+else:
+    import build_config as processes
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 os.environ.setdefault("NUMBA_CACHE_DIR", str(ROOT / "target/numba"))
@@ -144,8 +150,9 @@ pathlib.Path(out + ".builds.json").write_text(json.dumps(provenance, indent=2))
 requests = json.loads(pathlib.Path(manifest).read_text())
 workers = []
 for site in (base, head):
-    p = subprocess.Popen(
+    p = processes.popen_child(
         [sys.executable, __file__, "worker", site],
+        env=dict(os.environ),
         stdin=subprocess.PIPE,
         stdout=subprocess.PIPE,
         text=True,

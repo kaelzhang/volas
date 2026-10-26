@@ -10,7 +10,7 @@ import subprocess
 import sys
 import sysconfig
 import tempfile
-import tomllib
+import uuid
 
 
 def sha(path):
@@ -18,8 +18,7 @@ def sha(path):
 
 
 def out(cmd, **kw):
-    kw.setdefault("env", build_environment())
-    return subprocess.check_output([str(x) for x in cmd], text=True, **kw).strip()
+    return child_output(cmd, text=True, **kw).strip()
 
 
 def check_environment(env):
@@ -46,18 +45,20 @@ BUILD_ENVIRONMENT = {
 }
 
 
-def build_environment(ambient=None):
+def build_environment(ambient=None, *, owned=None):
     """Construct child inputs; never mutate or reject a developer's shell flags."""
     ambient = os.environ if ambient is None else ambient
     # These acceptance/tool-selection inputs remain checked, as before.
     check_environment({k: v for k, v in ambient.items()
                        if k in {"PYTHONOPTIMIZE", "SDKROOT", "DEVELOPER_DIR"}})
-    return {k: v for k, v in ambient.items() if k in BUILD_ENVIRONMENT}
+    return {**{k: v for k, v in ambient.items() if k in BUILD_ENVIRONMENT},
+            **(owned or {})}
 
 
 def environment_record(ambient=None, owned=None):
     ambient = os.environ if ambient is None else ambient
-    clean = build_environment(ambient)
+    # Recording never reapplies ambient policy to an already-owned handoff.
+    clean = {k: v for k, v in ambient.items() if k in BUILD_ENVIRONMENT}
     return {
         "removed": sorted(ambient.keys() - clean.keys()),
         "retained": recorded_environment(clean),
@@ -65,14 +66,59 @@ def environment_record(ambient=None, owned=None):
     }
 
 
+def child_inputs(cmd, *, env=None, owned=None, record=None):
+    """Record before spawning. Explicit inputs are owned, never filtered by name.
+
+    ``env`` is a complete environment already constructed by an owner; ``owned``
+    adds intentional inputs to the ambient boundary. Never pass ambient os.environ
+    as ``env`` to a build or dependency command.
+    """
+    if env is not None and owned is not None:
+        raise ValueError("provide a complete environment or owned additions, not both")
+    additions = env if env is not None else owned
+    child = dict(env) if env is not None else build_environment(owned=owned)
+    path = Path(record) if record else (Path(__file__).resolve().parents[1]
+                                      / "target/build-environments" / f"{uuid.uuid4().hex}.json")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    argv = [str(x) for x in cmd]
+    data = environment_record(owned=additions)
+    data["effective"] = recorded_environment(child)
+    path.write_text(json.dumps({"argv": argv, "environment": data},
+                               indent=2) + "\n")
+    return argv, child
+
+
+def run_child(cmd, *, env=None, owned=None, record=None, **kwargs):
+    argv, child = child_inputs(cmd, env=env, owned=owned, record=record)
+    return subprocess.run(argv, env=child, **kwargs)
+
+
+def child_output(cmd, *, env=None, owned=None, record=None, **kwargs):
+    argv, child = child_inputs(cmd, env=env, owned=owned, record=record)
+    return subprocess.check_output(argv, env=child, **kwargs)
+
+
+def popen_child(cmd, *, env=None, owned=None, record=None, **kwargs):
+    argv, child = child_inputs(cmd, env=env, owned=owned, record=record)
+    return subprocess.Popen(argv, env=child, **kwargs)
+
+
+def exec_child(cmd, *, env=None, owned=None, record=None):
+    argv, child = child_inputs(cmd, env=env, owned=owned, record=record)
+    os.execvpe(argv[0], argv, child)
+
+
 def recorded_environment(env):
     """Authentication is operational input; retain a fingerprint, never a token."""
     return {k: {"sha256": hashlib.sha256(v.encode()).hexdigest()}
-            if k.endswith("_TOKEN") else v for k, v in env.items()}
+            if any(part in k.upper() for part in ("TOKEN", "PASSWORD", "SECRET", "KEY"))
+            else v for k, v in env.items()}
 
 
 def check_cargo_config(root):
     """Cargo owns merging; reject settings that our identity cannot represent."""
+    import tomllib
+
     paths = [
         p / ".cargo" / name
         for p in (root, *root.parents)
@@ -192,16 +238,12 @@ def resolved_flags(root, target, flags, log):
             "--target-dir",
             str(probe / "target"),
         ]
-        Path(log).with_suffix(".environment.json").write_text(
-            json.dumps(environment_record(owned={k: v for k, v in env.items()
-                                                if build_environment().get(k) != v}),
-                       indent=2) + "\n"
-        )
         with Path(log).open("w") as f:
             f.write(json.dumps(cmd) + "\n")
             f.flush()
-            subprocess.run(
-                cmd, cwd=root, env=env, stdout=f, stderr=subprocess.STDOUT, check=True
+            run_child(
+                cmd, record=Path(log).with_suffix(".environment.json"),
+                cwd=root, env=env, stdout=f, stderr=subprocess.STDOUT, check=True
             )
         queries = [json.loads(line) for line in trace.read_text().splitlines()]
         queries = [a for a in queries if "--print=file-names" in a and "--target" in a]
@@ -314,6 +356,8 @@ def trace_codegen(mode, is_target, target, config):
 
 
 def configuration(root, target, log):
+    import tomllib
+
     flags = resolved_flags(root, target, [], log)
     validate_flags(flags, "normal")
     manifests = tomllib.loads((root / "Cargo.toml").read_text())

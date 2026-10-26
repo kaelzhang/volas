@@ -3,30 +3,35 @@
 
 import argparse
 from pathlib import Path
-import subprocess
+
 import sys
 
 from toolchain import RUST, MATURIN, COMPONENTS
 
+if __package__:
+    from . import build_config as processes
+else:
+    import build_config as processes
+
 
 def check(rust_only=False):
-    rust = subprocess.check_output(["rustc", "-Vv"], text=True)
+    rust = processes.child_output(["rustc", "-Vv"], text=True)
     fields = dict(line.split(": ", 1) for line in rust.splitlines() if ": " in line)
     if fields.get("release") != RUST:
         raise ValueError(f"requires rustc {RUST}: {rust}")
-    cargo = subprocess.check_output(["cargo", "--version"], text=True).strip()
+    cargo = processes.child_output(["cargo", "--version"], text=True).strip()
     if cargo.split()[1] != RUST:
         raise ValueError(f"requires cargo {RUST}: {cargo}")
     maturin = ""
     if not rust_only:
-        maturin = subprocess.check_output(
+        maturin = processes.child_output(
             [sys.executable, "-m", "maturin", "--version"],
             text=True,
         ).strip()
         if maturin != f"maturin {MATURIN}":
             raise ValueError(f"requires maturin {MATURIN}: {maturin}")
     sysroot = Path(
-        subprocess.check_output(["rustc", "--print", "sysroot"], text=True).strip()
+        processes.child_output(["rustc", "--print", "sysroot"], text=True).strip()
     )
     llvm = sysroot / "lib/rustlib" / fields["host"] / "bin"
     for name in ("llvm-profdata", "llvm-cov", "llvm-objdump"):
@@ -35,7 +40,7 @@ def check(rust_only=False):
             raise ValueError(
                 f"install llvm-tools-preview for Rust {RUST}: missing {path}"
             )
-        version = subprocess.check_output([str(path), "--version"], text=True).strip()
+        version = processes.child_output([str(path), "--version"], text=True).strip()
         if fields["LLVM version"] not in version:
             raise ValueError(f"LLVM version mismatch: {path}: {version}")
         print(f"{path}: {version}")

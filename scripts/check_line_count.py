@@ -21,8 +21,13 @@ lists the offenders, largest first) when any code file exceeds the cap.
 from __future__ import annotations
 
 import pathlib
-import subprocess
+
 import sys
+
+if __package__:
+    from . import build_config as processes
+else:
+    import build_config as processes
 
 # The single knob. 1000 lines is the canonical "this file is doing too much"
 # threshold; it catches the bloat we just split apart while leaving cohesive core
@@ -34,7 +39,7 @@ CODE_EXTS = {".rs", ".py"}
 
 
 def code_files() -> "list[pathlib.Path]":
-    listed = subprocess.run(
+    listed = processes.run_child(
         ["git", "ls-files", "--cached", "--others", "--exclude-standard", "-z"],
         cwd=ROOT, check=True, capture_output=True,
     ).stdout.decode().split("\0")

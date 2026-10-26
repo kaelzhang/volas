@@ -4,8 +4,13 @@
 import argparse
 import os
 import re
-import subprocess
+
 import sys
+
+if __package__:
+    from . import build_config as processes
+else:
+    import build_config as processes
 
 
 def parse(text):
@@ -234,7 +239,7 @@ if __name__ == "__main__":
     if args.source_count:
         print(count_source(sys.stdin.read(), args.comparisons))
         sys.exit(0)
-    text = subprocess.check_output(
+    text = processes.child_output(
         [os.environ.get("OBJDUMP", "objdump"), "-d", args.binary], text=True
     )
     print(len(require_symbol(parse(text), args.symbol)["instructions"]))

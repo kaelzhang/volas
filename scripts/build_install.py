@@ -8,9 +8,14 @@ import hashlib
 import importlib
 import json
 from pathlib import Path
-import subprocess
+
 import sys
 import sysconfig
+
+if __package__:
+    from . import build_config as processes
+else:
+    import build_config as processes
 
 MANIFEST = "volas-build.json"
 
@@ -71,17 +76,15 @@ def save(destination):
 def install(data):
     if digest(data["wheel"]) != data["wheel_sha256"]:
         raise ValueError("release wheel hash mismatch")
-    boundary = [sys.executable, str(Path(__file__).with_name("build_env.py")), "--"]
-    subprocess.run(
-        [*boundary, sys.executable, "-m", "pip", "install", data["wheel"]],
+    processes.run_child(
+        [sys.executable, "-m", "pip", "install", data["wheel"]],
         check=True,
     )
     # Resolve missing dependencies first, keeping compatible installed versions.
     # Reinstall only this wheel so debug/coverage bytes cannot survive pip's
     # same-version shortcut, without forcing unrelated dependency replacements.
-    subprocess.run(
+    processes.run_child(
         [
-            *boundary,
             sys.executable,
             "-m",
             "pip",

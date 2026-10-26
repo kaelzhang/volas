@@ -8,8 +8,8 @@ import hashlib
 import json
 import os
 import resource
-from pathlib import Path
 import subprocess
+from pathlib import Path
 import sys
 import sysconfig
 import tempfile
@@ -29,6 +29,8 @@ sys.path.insert(0, str(DRIVER))
 from scripts.build_config import (  # noqa: E402
     check_environment as check_environment,
     build_environment,
+    run_child,
+    child_output,
     environment_record,
     configuration,
     resolved_flags,
@@ -68,7 +70,7 @@ def validate_profile(profile, identity, provenance, profdata):
     if digest(profile) != provenance["profile_sha256"]:
         raise ValueError("profile hash mismatch")
     if profdata:
-        result = subprocess.run(
+        result = run_child(
             [str(profdata), "show", "--all-functions", "--counts", str(profile)],
             check=True,
             capture_output=True,
@@ -79,8 +81,7 @@ def validate_profile(profile, identity, provenance, profdata):
 
 
 def output(cmd, **kwargs):
-    kwargs.setdefault("env", build_environment())
-    return subprocess.check_output(cmd, text=True, **kwargs).strip()
+    return child_output(cmd, text=True, **kwargs).strip()
 
 
 def source_hash(root):
@@ -161,17 +162,15 @@ def run(cmd, log, root, env=None, timeout=None):
     start = time.monotonic()
     before = resource.getrusage(resource.RUSAGE_CHILDREN)
     ambient = dict(os.environ, PYTHONOPTIMIZE="0")
-    base = build_environment(ambient)
-    child = dict(base if env is None else env, PYTHONOPTIMIZE="0")
-    write(Path(log).with_suffix(".environment.json"), environment_record(
-        ambient, owned={k: v for k, v in child.items() if base.get(k) != v}
-    ))
+    child = (build_environment(ambient, owned={"PYTHONOPTIMIZE": "0"})
+             if env is None else dict(env, PYTHONOPTIMIZE="0"))
     with Path(log).open("w") as f:
         f.write(json.dumps([str(x) for x in cmd]) + "\n")
         f.flush()
-        subprocess.run(
+        run_child(
             [str(x) for x in cmd],
             cwd=root,
+            record=Path(log).with_suffix(".environment.json"),
             env=child,
             stdout=f,
             stderr=subprocess.STDOUT,

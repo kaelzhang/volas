@@ -6,7 +6,13 @@ import json
 from pathlib import Path
 import shlex
 import subprocess
+
 import sys
+
+if __package__:
+    from . import build_config as processes
+else:
+    import build_config as processes
 
 LOCK = Path(__file__).with_name("pgo-requirements.txt")
 
@@ -56,7 +62,7 @@ def install(destination, log, wheels=None):
     if wheels:
         cmd += ["--no-index", "--find-links", str(wheels)]
     with Path(log).open("w") as f:
-        subprocess.run(cmd, stdout=f, stderr=subprocess.STDOUT, check=True)
+        processes.run_child(cmd, record=Path(log).with_suffix(".environment.json"), stdout=f, stderr=subprocess.STDOUT, check=True)
     expected = locked()
     actual = {}
     for item in json.loads(report.read_text())["install"]:

@@ -2,12 +2,9 @@
 """Run a developer build with owned inputs and a durable environment record."""
 
 import argparse
-import json
-import os
 from pathlib import Path
-import uuid
 
-from build_config import build_environment, environment_record
+from build_config import exec_child
 
 
 def main():
@@ -22,13 +19,7 @@ def main():
     if not command:
         parser.error("a build command is required")
     owned = dict(item.split("=", 1) for item in args.set)
-    env = dict(build_environment(), **owned)
-    record = args.record or Path("target/build-environments") / f"{uuid.uuid4().hex}.json"
-    record.parent.mkdir(parents=True, exist_ok=True)
-    record.write_text(json.dumps({"argv": command,
-                                  "environment": environment_record(owned=owned)},
-                                 indent=2) + "\n")
-    os.execvpe(command[0], command, env)
+    exec_child(command, owned=owned, record=args.record)
 
 
 if __name__ == "__main__":

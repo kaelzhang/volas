@@ -11,10 +11,15 @@ it for the git tag.
 from __future__ import annotations
 
 import re
-import subprocess
+
 import sys
 import tomllib
 from pathlib import Path
+
+if __package__:
+    from . import build_config as processes
+else:
+    import build_config as processes
 
 CARGO = Path(__file__).resolve().parent.parent / "Cargo.toml"
 KINDS = ("major", "minor", "patch")
@@ -73,7 +78,7 @@ def main(argv: list[str]) -> None:
         # builds pass --locked (reproducible builds), so a bump that leaves the
         # lock stale fails every wheel job ("cannot update the lock file").
         # `cargo update --workspace` rewrites ONLY the workspace-member entries.
-        subprocess.run(
+        processes.run_child(
             ["cargo", "update", "--workspace", "--quiet"],
             cwd=CARGO.parent, check=True,
         )

@@ -28,6 +28,9 @@ docs/animated_gif/*.gif
 *.profraw
 *.profdata
 
+# Local build experiments
+/work/
+
 # Tooling caches
 /.ruff_cache
 /.mypy_cache

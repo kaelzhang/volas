@@ -4,9 +4,15 @@
 import argparse
 import hashlib
 import json
+import os
 from pathlib import Path
-import subprocess
+
 import sys
+
+if __package__:
+    from . import build_config as processes
+else:
+    import build_config as processes
 
 
 def artifacts(manifest):
@@ -31,7 +37,7 @@ if __name__ == "__main__":
     ap.add_argument("--manifest", type=Path, required=True)
     args = ap.parse_args()
     paths = artifacts(args.manifest)
-    subprocess.run(
+    processes.run_child(
         [
             sys.executable,
             "-m",
@@ -44,5 +50,6 @@ if __name__ == "__main__":
             "--verbose",
             *paths,
         ],
+        env=dict(os.environ),
         check=True,
     )

@@ -250,7 +250,15 @@ and unrepresentable Cargo configuration remain checked and rejected as before.
 The same environment owner serves coverage, audit builds, assembly gates and Make's
 debug/check/lint/publish builds through `scripts/build_env.py`; their command and
 environment records live in `target/build-environments/`. Coverage and checked audit
-supply their instrumentation/check flags explicitly after removing shell settings. The Cargo resolver
+supply their instrumentation/check flags explicitly after removing shell settings.
+Coverage also supplies its allocator guards (`MallocPreScribble=1` and
+`MALLOC_PERTURB_=170`) as owned inputs, so Rust tests retain the same checks as
+Python tests. Explicit owner inputs are preserved by provenance, irrespective of
+their names; ambient values never become owned merely by matching those names.
+All subprocess calls in `scripts/` use the environment owner to record the actual
+command and child inputs before execution, including tool probes, pip dependency
+installs, training stages and Cargo-to-rustc handoff. Runtime-only tools explicitly
+preserve their runtime controls at this boundary. The Cargo resolver
 records the complete target-info query and refuses an unfamiliar query grammar.
 Both resolved flags and real rustc argv must match the requested mode and absolute
 profile path. One argument parser accepts `-Cx`, `-C x`, `--codegen=x`, and

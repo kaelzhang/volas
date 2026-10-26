@@ -17,8 +17,14 @@ import os
 from pathlib import Path
 from statistics import median
 import subprocess
+
 import sys
 import time
+
+if __package__:
+    from . import build_config as processes
+else:
+    import build_config as processes
 
 try:
     from scripts.perf_costs import COST_TESTS, cost_verdict
@@ -114,7 +120,7 @@ def run_pairs(python: str, root: Path, sites: dict[str, str], directory: Path,
             path = directory / f'{side}-{pair + 1}.json'
             print(f'>> pair {pair + 1}/{rounds}: {side.upper()}', flush=True)
             with (directory / f'{side}-{pair + 1}.log').open('w') as log:
-                result = subprocess.run([python, '-c', WORKER, sites[side],
+                result = processes.run_child([python, '-c', WORKER, sites[side],
                                          'test/test_benchmark.py', 'test/test_benchmark_true_range.py', *options,
                                          f'--benchmark-json={path}'], cwd=root, env=environment,
                                         stdout=log, stderr=subprocess.STDOUT)
@@ -125,7 +131,7 @@ def run_pairs(python: str, root: Path, sites: dict[str, str], directory: Path,
             if full_gate:
                 cost_path = directory / f'{side}-cost-{pair + 1}.json'
                 with (directory / f'{side}-cost-{pair + 1}.log').open('w') as log:
-                    result = subprocess.run([python, '-c', WORKER, sites[side], *COST_TESTS,
+                    result = processes.run_child([python, '-c', WORKER, sites[side], *COST_TESTS,
                                              '--benchmark-disable', '-q',
                                              f'--volas-cost-json={cost_path}'], cwd=root, env=environment,
                                             stdout=log, stderr=subprocess.STDOUT)
