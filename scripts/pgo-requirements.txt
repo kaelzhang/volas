@@ -1,0 +1,5 @@
+# Training wheels validated on CPython 3.12 / macOS arm64. Other targets fail closed.
+# Distribution SHA-256 from PyPI release files; pip must use --require-hashes.
+numpy==2.0.2 --hash=sha256:9a92ae5c14811e390f3767053ff54eaee3bf84576d99a2456391401323f4ec2c
+pyarrow==26.0.0 --hash=sha256:90ddaf7c625307ad52f31a9b25c34fe5e4897c7529ee3481135822b2b6842ff1
+tzdata==2026.5 --hash=sha256:b683bd1b6659ddcd810ff02ad09ba821d4bf1065072805063eb35c49617905ac

@@ -34,13 +34,18 @@ jobs:
       - name: mypy (package)
         run: mypy volas
 
-      # Pinned (not @stable): clippy is a hard gate (`-D warnings`), so a newer stable
-      # clippy adding a lint must not spuriously fail CI on unrelated PRs. Bump this
-      # deliberately (and clear any new warnings) as a maintenance step.
+      - name: Read build tool versions
+        id: toolchain
+        run: python scripts/check_toolchain.py --versions >> "$GITHUB_OUTPUT"
+
       - name: Set up Rust
-        uses: dtolnay/rust-toolchain@1.96.0
+        uses: dtolnay/rust-toolchain@master
         with:
-          components: clippy
+          toolchain: ${{ steps.toolchain.outputs.rust }}
+          components: ${{ steps.toolchain.outputs.components }},clippy
+
+      - name: Check Rust prerequisites
+        run: python scripts/check_toolchain.py --rust-only
 
       - name: Cache cargo build
         uses: Swatinem/rust-cache@v2
@@ -68,11 +73,23 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
 
+      - name: Read build tool versions
+        id: toolchain
+        run: python scripts/check_toolchain.py --versions >> "$GITHUB_OUTPUT"
+
       - name: Set up Rust
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ steps.toolchain.outputs.rust }}
+          components: ${{ steps.toolchain.outputs.components }}
 
       - name: Cache cargo build
         uses: Swatinem/rust-cache@v2
+
+      - name: Install cargo-llvm-cov
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-llvm-cov
 
       - name: Create virtual environment
         run: |
@@ -82,13 +99,16 @@ jobs:
 
       - name: Install dependencies
         run: |
-          python -m pip install --upgrade pip maturin
+          python -m pip install --upgrade pip "maturin==${{ steps.toolchain.outputs.maturin }}"
           # `.[dev]` only -- the benchmark comparison libraries (polars / TA-Lib /
           # DuckDB, in the `benchmark` extra) are NOT needed to run the tests;
           # they are installed only by `make benchmark`.
           # The oracles (pandas, TA-Lib) are exact `==` pins in the `dev` extra.
-          pip install -e .[dev]
+          python -m pip install --no-build-isolation -e '.[dev]'
           python -c "import sys, numpy as np, pandas as pd, talib; print(sys.version); print('numpy', np.__version__); print('oracles: pandas', pd.__version__, 'TA-Lib', talib.__version__)"
+
+      - name: Check build prerequisites
+        run: python scripts/check_toolchain.py --cargo-llvm-cov
 
       - name: Rust unit tests
         run: cargo test --workspace --exclude volas-python
@@ -114,10 +134,15 @@ jobs:
         with:
           python-version: "3.12"
 
+      - name: Read build tool versions
+        id: toolchain
+        run: python scripts/check_toolchain.py --versions >> "$GITHUB_OUTPUT"
+
       - name: Set up Rust
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@master
         with:
-          components: llvm-tools-preview
+          toolchain: ${{ steps.toolchain.outputs.rust }}
+          components: ${{ steps.toolchain.outputs.components }}
 
       - name: Cache cargo build
         uses: Swatinem/rust-cache@v2
@@ -135,8 +160,11 @@ jobs:
 
       - name: Install dependencies
         run: |
-          python -m pip install --upgrade pip maturin
-          pip install -e .[dev]
+          python -m pip install --upgrade pip "maturin==${{ steps.toolchain.outputs.maturin }}"
+          python -m pip install --no-build-isolation -e '.[dev]'
+
+      - name: Check build prerequisites
+        run: python scripts/check_toolchain.py
 
       # Runs the cargo unit tests and the pytest suite (against the instrumented
       # extension) and writes their per-line union to target/volas-cov/union.lcov.
@@ -173,8 +201,15 @@ jobs:
         with:
           python-version: "3.12"
 
+      - name: Read build tool versions
+        id: toolchain
+        run: python scripts/check_toolchain.py --versions >> "$GITHUB_OUTPUT"
+
       - name: Set up Rust
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ steps.toolchain.outputs.rust }}
+          components: ${{ steps.toolchain.outputs.components }}
 
       - name: Cache cargo build
         uses: Swatinem/rust-cache@v2
@@ -187,8 +222,8 @@ jobs:
 
       - name: Install dependencies
         run: |
-          python -m pip install --upgrade pip maturin
-          pip install -e .[dev]
+          python -m pip install --upgrade pip "maturin==${{ steps.toolchain.outputs.maturin }}"
+          python -m pip install --no-build-isolation -e '.[dev]'
 
       - name: Build the extension (installs the stub + py.typed)
         run: maturin develop --release
@@ -215,8 +250,26 @@ jobs:
     steps:
       - uses: actions/checkout@v5
 
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Read build tool versions
+        id: toolchain
+        run: python scripts/check_toolchain.py --versions >> "$GITHUB_OUTPUT"
+
       - name: Set up Rust
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ steps.toolchain.outputs.rust }}
+          components: ${{ steps.toolchain.outputs.components }}
+
+      - name: Install build tool
+        run: python -m pip install "maturin==${{ steps.toolchain.outputs.maturin }}"
+
+      - name: Check build prerequisites
+        run: python scripts/check_toolchain.py
 
       - name: Cache cargo build
         uses: Swatinem/rust-cache@v2

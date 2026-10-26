@@ -45,8 +45,8 @@ rm -rf "$PROF_DIR"
 mkdir -p "$PROF_DIR"
 
 # Locate the LLVM tools shipped with the active toolchain (llvm-tools-preview).
-HOST="$(rustc -vV | sed -n 's/^host: //p')"
-LLVM_BIN="$(rustc --print sysroot)/lib/rustlib/$HOST/bin"
+HOST="$("$PYTHON" scripts/build_env.py -- rustc -vV | sed -n 's/^host: //p')"
+LLVM_BIN="$("$PYTHON" scripts/build_env.py -- rustc --print sysroot)/lib/rustlib/$HOST/bin"
 PROFDATA="$LLVM_BIN/llvm-profdata"
 COV="$LLVM_BIN/llvm-cov"
 if [ ! -x "$PROFDATA" ] || [ ! -x "$COV" ]; then
@@ -55,11 +55,23 @@ if [ ! -x "$PROFDATA" ] || [ ! -x "$COV" ]; then
     exit 1
 fi
 
+# A release wheel is tested directly before the separate coverage build replaces it.
+# Preserve the exact wheel across coverage; coverage is never proof of PGO behavior.
+RELEASE_SNAPSHOT="$PWD/$PROF_DIR/release-build.json"
+RELEASE_WHEEL="$("$PYTHON" scripts/build_install.py save "$RELEASE_SNAPSHOT")"
+if [ -n "$RELEASE_WHEEL" ]; then
+    echo ">> testing the installed release wheel before coverage: $RELEASE_WHEEL"
+    "$PYTHON" -m pytest test/ --benchmark-skip -q --basetemp="$PWD/$PROF_DIR/release-pytest"
+fi
+
 restore() {
-    find . -name '*.profraw' -not -path './target/*' -delete 2>/dev/null || true
-    echo ">> restoring the normal extension (maturin develop --release)..."
-    env -u RUSTFLAGS -u LLVM_PROFILE_FILE \
-        "$PYTHON" -m maturin develop --release >/dev/null 2>&1 || true
+    if [ -n "$RELEASE_WHEEL" ]; then
+        echo ">> restoring the exact release wheel..."
+        "$PYTHON" scripts/build_install.py restore "$RELEASE_SNAPSHOT"
+    else
+        echo ">> restoring a normal release through the build owner..."
+        "$PYTHON" scripts/build_release.py --mode normal --artifacts "$PWD/target/coverage-restore-$(date +%Y%m%d-%H%M%S)" --install
+    fi
 }
 trap restore EXIT
 
@@ -67,7 +79,7 @@ trap restore EXIT
 # cargo-llvm-cov runs the workspace unit/integration tests under instrumentation
 # and emits LCOV in one self-contained step (its own target dir + profiles).
 echo ">> cargo test coverage..."
-cargo llvm-cov --workspace --exclude volas-python --quiet \
+"$PYTHON" scripts/build_env.py --set MallocPreScribble=1 --set MALLOC_PERTURB_=170 -- cargo llvm-cov --workspace --exclude volas-python --quiet \
     --lcov --output-path "$PROF_DIR/cargo.lcov" \
     --ignore-filename-regex 'volas-python'
 
@@ -75,8 +87,10 @@ cargo llvm-cov --workspace --exclude volas-python --quiet \
 # Instrument the cdylib too (RUSTFLAGS, since the wrapper alone does not reach
 # maturin's build), run the suite, then export LCOV for the exact .so that ran.
 echo ">> building instrumented extension..."
-export RUSTFLAGS="${RUSTFLAGS:-} -Cinstrument-coverage"
-"$PYTHON" -m maturin develop --quiet
+"$PYTHON" scripts/build_env.py --set MallocPreScribble=1 --set MALLOC_PERTURB_=170 \
+    --rust-checks coverage \
+    --set LLVM_PROFILE_FILE="$PWD/$PROF_DIR/build-%m-%p.profraw" \
+    -- "$PYTHON" -m maturin develop --quiet
 # maturin may install volas_rs as a package shim (`from .volas_rs import *`), so
 # the native object lives inside the package dir, not at `.origin`.
 SO="$("$PYTHON" - <<'PY'
@@ -98,11 +112,11 @@ if [ -z "$SO" ] || [ ! -f "$SO" ]; then
 fi
 
 echo ">> running Python suite against the instrumented extension..."
-LLVM_PROFILE_FILE="$PROF_DIR/pytest-%p-%m.profraw" \
-    "$PYTHON" -m pytest test/ --benchmark-skip -q
+LLVM_PROFILE_FILE="$PWD/$PROF_DIR/pytest-%p-%m.profraw" \
+    "$PYTHON" -m pytest test/ --benchmark-skip -q --basetemp="$PWD/$PROF_DIR/coverage-pytest"
 
-"$PROFDATA" merge -sparse "$PROF_DIR"/pytest-*.profraw -o "$PROF_DIR/pytest.profdata"
-"$COV" export --format=lcov --instr-profile="$PROF_DIR/pytest.profdata" "$SO" \
+"$PYTHON" scripts/build_env.py -- "$PROFDATA" merge -sparse "$PROF_DIR"/pytest-*.profraw -o "$PROF_DIR/pytest.profdata"
+"$PYTHON" scripts/build_env.py -- "$COV" export --format=lcov --instr-profile="$PROF_DIR/pytest.profdata" "$SO" \
     --ignore-filename-regex '/\.cargo/|/rustc/|library/(core|std|alloc)|volas-python' \
     > "$PROF_DIR/pytest.lcov"
 

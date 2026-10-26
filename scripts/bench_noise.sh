@@ -53,7 +53,7 @@ for i in $(seq 1 "$K"); do
       echo "#[no_mangle] pub fn _noise_pad_${i}_${j}() -> u64 { ${i} * 1009 + ${j} }"
     done
   } >> "$PAD_FILE"
-  ( cd "$ROOT" && "$PYTHON" -m maturin develop --release -q )
+  ( cd "$ROOT" && "$PYTHON" scripts/build_release.py --mode normal --artifacts "$ROOT/target/bench-noise-$(date +%Y%m%d-%H%M%S)-$i" --install )
   ( cd "$ROOT" && "$PYTHON" -m pytest test/test_benchmark.py -k "$KSEL" --benchmark-only -q \
       --benchmark-json="$TMP/run_$i.json" >/dev/null 2>&1 )
   w="$(win_count "$TMP/run_$i.json")"

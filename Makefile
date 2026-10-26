@@ -6,47 +6,50 @@ PYTHON ?= $(or $(VOLAS_PYTHON),python)
 PIP ?= $(PYTHON) -m pip
 PYTEST ?= $(PYTHON) -m pytest
 MATURIN ?= $(PYTHON) -m maturin
+BUILD_DRIVER := $(dir $(abspath $(lastword $(MAKEFILE_LIST))))scripts/build_env.py
+BUILD_ENV = $(PYTHON) "$(BUILD_DRIVER)" --
 # Lazy (`=`, not `:=`): the interpreter is probed only when a maturin recipe actually
 # expands MATURIN_DEVELOP_ENV — so targets that need no Python (asm-diff, lint) don't
 # print `python: command not found` when neither `python` nor VOLAS_PYTHON is set.
 PY_PREFIX = $(shell $(PYTHON) -c "import sys; print(sys.prefix)")
 MATURIN_DEVELOP_ENV = VIRTUAL_ENV="$(PY_PREFIX)" CONDA_PREFIX="$(PY_PREFIX)"
 
-.PHONY: help install install-rust build build-pkg build-ext clean test test-quick count-indicators coverage coverage-html audit-harness audit-harness-release audit-harness-checked docs benchmark perf-ab asm-diff asm-diff-update hot-asm hot-asm-check hot-asm-update anime-fonts anime lint fix fmt check cargo-test upload publish bump dev ci
+.PHONY: release help install install-rust build build-pkg build-ext clean test test-quick count-indicators coverage coverage-html audit-harness audit-harness-release audit-harness-checked docs benchmark perf-ab asm-diff asm-diff-update hot-asm hot-asm-check hot-asm-update anime-fonts anime lint fix fmt check cargo-test upload publish bump dev ci
 
-# Install all dependencies (Python + Rust)
-install:
-	@echo "\033[1m>> Installing Rust toolchain... <<\033[0m"
-	@which rustup > /dev/null || curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
-	@rustup update stable
-	@echo "\033[1m>> Installing maturin... <<\033[0m"
-	@pip install maturin
-	@echo "\033[1m>> Installing coverage tooling (cargo-llvm-cov + llvm-tools)... <<\033[0m"
-	@rustup component add llvm-tools-preview
-	@cargo install cargo-llvm-cov --locked || true
-	@echo "\033[1m>> Installing Python dependencies... <<\033[0m"
-	@pip install -e .[dev]
+# Both local provisioning and CI read the repository pins through one reader.
+RUST_TOOLCHAIN = $(shell $(PYTHON) scripts/check_toolchain.py --value rust)
+LLVM_COMPONENTS = $(shell $(PYTHON) scripts/check_toolchain.py --value components)
+MATURIN_VERSION = $(shell $(PYTHON) scripts/check_toolchain.py --value maturin)
 
-# Install only the Rust toolchain
+install: install-rust
+	@$(BUILD_ENV) $(PIP) install "maturin==$(MATURIN_VERSION)"
+	@$(BUILD_ENV) cargo install cargo-llvm-cov --locked
+	@$(BUILD_ENV) $(PIP) install --no-build-isolation -e '.[dev]'
+	@$(PYTHON) scripts/check_toolchain.py
+
+# rustup selects rust-toolchain.toml automatically for every repo cargo/rustc.
 install-rust:
-	@which rustup > /dev/null || curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
-	@rustup update stable
+	@which rustup > /dev/null || $(BUILD_ENV) curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | $(BUILD_ENV) sh -s -- -y --default-toolchain none
+	@$(BUILD_ENV) rustup toolchain install $(RUST_TOOLCHAIN) --profile default --component $(LLVM_COMPONENTS)
+	@$(PYTHON) scripts/check_toolchain.py --rust-only
 
 # Build the Rust extension and install the package in-place (development)
-build: clean
-	@echo "\033[1m>> Building Rust extension... <<\033[0m"
-	@$(MATURIN_DEVELOP_ENV) $(MATURIN) develop --release
-	@echo "\033[1m>> Build complete! <<\033[0m"
+BUILD_OPT ?= normal
+ifndef BUILD_ARTIFACTS
+BUILD_ARTIFACTS := $(CURDIR)/target/release-build-$(shell date +%Y%m%d-%H%M%S)
+endif
 
-# Build the release package (wheel and sdist) into dist/
-build-pkg: clean
-	@echo "\033[1m>> Building release package... <<\033[0m"
-	@$(MATURIN) build --release --sdist -o dist
-	@echo "\033[1m>> Package built in dist/ <<\033[0m"
+build:
+	@$(PYTHON) scripts/build_release.py --mode $(BUILD_OPT) --artifacts "$(BUILD_ARTIFACTS)" --install
+
+release: build
+
+build-pkg:
+	@$(PYTHON) scripts/build_release.py --mode $(BUILD_OPT) --artifacts "$(BUILD_ARTIFACTS)" --sdist
 
 # Build the Rust extension only (development mode)
 build-ext:
-	@$(MATURIN_DEVELOP_ENV) $(MATURIN) develop
+	@$(MATURIN_DEVELOP_ENV) $(BUILD_ENV) $(MATURIN) develop
 
 # Clean build artifacts
 clean:
@@ -148,7 +151,7 @@ endif
 endif
 benchmark: build
 	@echo "\033[1m>> Installing dev + benchmark comparison libraries... <<\033[0m"
-	@$(PYTHON) -c "import tomllib; e=tomllib.load(open('pyproject.toml','rb'))['project']['optional-dependencies']; print('\n'.join(e['dev'] + e['benchmark']))" | $(PIP) install -q -r /dev/stdin
+	@$(PYTHON) -c "import tomllib; e=tomllib.load(open('pyproject.toml','rb'))['project']['optional-dependencies']; print('\n'.join(e['dev'] + e['benchmark']))" | $(BUILD_ENV) $(PIP) install -q -r /dev/stdin
 ifdef SECTION
 	@echo "\033[1m>> Benchmarking the '$(SECTION)' section only (console, not archived) <<\033[0m"
 	$(PYTEST) test/test_benchmark.py $(BENCH_OPTS) -k "test_$(SECTION)"
@@ -193,12 +196,12 @@ endif
 # PERF_AB_KSELECT overrides the default full-suite selector for focused probes.
 BASE ?= HEAD~1
 perf-ab:
-	@VOLAS_PYTHON=$(PYTHON) bash scripts/perf_ab.sh "$(BASE)" "$(INDICATOR)" "$(SECTION)"
+	@BUILD_OPT=$(BUILD_OPT) VOLAS_PYTHON=$(PYTHON) bash scripts/perf_ab.sh "$(BASE)" "$(INDICATOR)" "$(SECTION)"
 
 # Instruction-level regression gate: disassemble the hot-kernel probes and compare
 # each instruction count to scripts/asm_baseline.txt (numeric kernels must stay
-# byte-identical, the string kernel must not grow its per-element count). Arch-specific;
-# no-ops on a host whose arch differs from the baseline's.
+# unchanged in instruction count, the string kernel must not grow its per-element count). Arch-specific;
+# reports unsupported on a host whose arch differs from the baseline's.
 #
 #   make asm-diff           # check against the committed baseline
 #   make asm-diff-update     # refresh the baseline after a reviewed, justified change
@@ -212,7 +215,7 @@ asm-diff-update:
 # are too large to inline into an asm-diff wrapper probe. `hot-asm` DUMPS each function's
 # disassembly + instruction count for review; `hot-asm-check` GATES the counts (a `max`
 # gate: a hot path must not grow silently); `hot-asm-update` refreshes the baseline.
-# Counted directly from `rustc --emit asm`. Complements the byte-exact `asm-diff` kernels.
+# Counted directly from `rustc --emit asm`. Complements the exact instruction count `asm-diff` kernels.
 #
 #   make hot-asm               # dump the inventory (FN=combine_at for one function)
 #   make hot-asm-check          # gate the gated functions against scripts/hot_asm_baseline.txt
@@ -228,7 +231,7 @@ hot-asm-update:
 
 # Download/check the fonts used by the README / GitHub Pages animated GIFs.
 anime-fonts:
-	@$(PIP) install -q pillow
+	@$(BUILD_ENV) $(PIP) install -q pillow
 	@$(PYTHON) docs/animated_gif/generate_gif.py --ensure-fonts --check-fonts --strict-fonts --no-render
 
 # Generate the README / GitHub Pages animated explainer GIFs locally and open a
@@ -256,7 +259,7 @@ lint:
 	@echo "\033[1m>> Running mypy (package)... <<\033[0m"
 	@mypy volas
 	@echo "\033[1m>> Running cargo clippy (warnings are errors)... <<\033[0m"
-	@cargo clippy --workspace --all-targets -- -D warnings
+	@$(BUILD_ENV) cargo clippy --workspace --all-targets -- -D warnings
 
 # Static type gates — deterministic oracles that prove the shipped typings are correct
 # (no human review needed). Needs the extension built so the stub is installed.
@@ -285,12 +288,12 @@ fmt:
 
 # Check Rust code
 check:
-	cargo check
-	cargo clippy
+	$(BUILD_ENV) cargo check
+	$(BUILD_ENV) cargo clippy
 
 # Run Rust unit tests
 cargo-test:
-	cargo test
+	$(BUILD_ENV) cargo test
 
 # Publish the Rust crates to crates.io in dependency order. `volas-python` is the
 # PyO3 cdylib (publish = false) and is skipped; the `volas` facade goes last since
@@ -301,17 +304,16 @@ cargo-publish:
 	@flags="--locked"; [ -n "$(DRY)" ] && flags="$$flags --dry-run"; \
 	for c in volas-core volas-arrow volas-compute volas-directive volas-time volas-io volas; do \
 		echo "\033[1m>> cargo publish $$c $$flags <<\033[0m"; \
-		cargo publish -p $$c $$flags || exit 1; \
+		$(BUILD_ENV) cargo publish -p $$c $$flags || exit 1; \
 	done
 
 # Upload to PyPI
 upload:
-	twine upload --config-file ~/.pypirc -r pypi dist/* --verbose
+	@$(PYTHON) scripts/publish_artifacts.py --manifest "$(BUILD_ARTIFACTS)/delivery.json"
 
 # Publish (build package + upload)
-publish:
-	make build-pkg
-	make upload
+publish: build-pkg
+	@$(PYTHON) scripts/publish_artifacts.py --manifest "$(BUILD_ARTIFACTS)/delivery.json"
 
 # Bump the workspace version, commit, tag (no `v` prefix), then push the commit and
 # the tag to origin. The pushed tag triggers the GitHub release workflow, which
