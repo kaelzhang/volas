@@ -94,6 +94,7 @@ mod arrow;
 mod coerce;
 mod convert;
 mod dlpack;
+mod dlpack_tensor;
 mod dt;
 mod frame;
 mod frame_access;

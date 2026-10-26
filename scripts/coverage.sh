@@ -63,6 +63,10 @@ restore() {
 }
 trap restore EXIT
 
+# The exporter metadata owner has a Python-free native allocation test binary.
+# Run it separately because coverage excludes the binding crate.
+cargo test -p volas-python --test dlpack_metadata --quiet
+
 # --- 1. cargo test side ----------------------------------------------------
 # cargo-llvm-cov runs the workspace unit/integration tests under instrumentation
 # and emits LCOV in one self-contained step (its own target dir + profiles).

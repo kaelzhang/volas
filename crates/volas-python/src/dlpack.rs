@@ -24,82 +24,13 @@ use pyo3::prelude::*;
 use volas_core::{Buffer, Column, ColumnBorrowExport, Element, StrBuffer, Validity};
 
 /// (`kDLCPU`, device 0) — the only device volas data lives on.
-pub(crate) const DEVICE_CPU: (i32, i32) = (1, 0);
+pub(crate) use crate::dlpack_tensor::DEVICE_CPU;
 
 const KDL_INT: u8 = 0;
 const KDL_FLOAT: u8 = 2;
 const KDL_BOOL: u8 = 6;
-/// `DLPACK_FLAG_BITMASK_READ_ONLY` — set on a borrowed (non-copy) versioned export.
-const DLPACK_FLAG_READ_ONLY: u64 = 1;
-/// `DLPACK_FLAG_BITMASK_IS_COPIED` — set when the producer materialised an owned copy,
-/// the standard signal a consumer reads to tell a copy from a view.
-const DLPACK_FLAG_IS_COPIED: u64 = 1 << 1;
 
-#[repr(C)]
-#[derive(Clone, Copy)]
-struct DLDevice {
-    device_type: i32,
-    device_id: i32,
-}
-
-#[repr(C)]
-#[derive(Clone, Copy)]
-struct DLDataType {
-    code: u8,
-    bits: u8,
-    lanes: u16,
-}
-
-#[repr(C)]
-struct DLTensor {
-    data: *mut c_void,
-    device: DLDevice,
-    ndim: i32,
-    dtype: DLDataType,
-    shape: *mut i64,
-    strides: *mut i64,
-    byte_offset: u64,
-}
-
-#[repr(C)]
-struct DLManagedTensor {
-    dl_tensor: DLTensor,
-    manager_ctx: *mut c_void,
-    deleter: Option<unsafe extern "C" fn(*mut DLManagedTensor)>,
-}
-
-#[repr(C)]
-#[derive(Clone, Copy)]
-struct DLPackVersion {
-    major: i32,
-    minor: i32,
-}
-
-#[repr(C)]
-struct DLManagedTensorVersioned {
-    version: DLPackVersion,
-    manager_ctx: *mut c_void,
-    deleter: Option<unsafe extern "C" fn(*mut DLManagedTensorVersioned)>,
-    flags: u64,
-    dl_tensor: DLTensor,
-}
-
-/// One allocation owns the ABI tensor, its inline shape and the shared buffer.
-/// `tensor` is first, so the ABI pointer is also the owning allocation's pointer.
-#[repr(C)]
-struct ExportedTensor<T> {
-    tensor: T,
-    _keepalive: Arc<dyn Any + Send + Sync>,
-    shape: [i64; 1],
-}
-
-unsafe extern "C" fn deleter(tensor: *mut DLManagedTensor) {
-    if !tensor.is_null() { drop(Box::from_raw(tensor.cast::<ExportedTensor<DLManagedTensor>>())); }
-}
-
-unsafe extern "C" fn deleter_versioned(tensor: *mut DLManagedTensorVersioned) {
-    if !tensor.is_null() { drop(Box::from_raw(tensor.cast::<ExportedTensor<DLManagedTensorVersioned>>())); }
-}
+use crate::dlpack_tensor::*;
 
 /// Capsule destructor for the unversioned tensor: free it only while still un-taken
 /// (named `"dltensor"`); once a consumer renames it to `"used_dltensor"` it owns it.
@@ -208,37 +139,13 @@ pub(crate) fn column_to_dlpack<'py>(
     }
     let do_copy = copy == Some(true) || !versioned;
     let (data, dtype, len, keepalive) = dl_parts(col, do_copy)?;
-    let dl_tensor = DLTensor {
-        data,
-        device: DLDevice { device_type: DEVICE_CPU.0, device_id: DEVICE_CPU.1 },
-        ndim: 1,
-        dtype,
-        shape: ptr::null_mut(), // filled after the owning allocation is stable
-        strides: ptr::null_mut(), // contiguous
-        byte_offset: 0,
-    };
-    // A consumer that negotiated DLPack ≥ 1.0 gets the versioned tensor (read-only for a
-    // borrow); otherwise the legacy unversioned one (always a copy, see above).
-    // SAFETY: the boxed tensor carries a valid deleter; the capsule takes the pointer and
-    // its destructor reclaims the entire allocation if the consumer never takes it.
+    // Native metadata is built after the optional data copy, in one owned block.
     unsafe {
-        let (ptr, name, dtor): (*mut c_void, &CStr, ffi::PyCapsule_Destructor) = if versioned {
-            let mut t = Box::new(ExportedTensor { tensor: DLManagedTensorVersioned {
-                version: DLPackVersion { major: 1, minor: 0 },
-                manager_ctx: ptr::null_mut(),
-                deleter: Some(deleter_versioned),
-                flags: if do_copy { DLPACK_FLAG_IS_COPIED } else { DLPACK_FLAG_READ_ONLY },
-                dl_tensor,
-            }, _keepalive: keepalive, shape: [len as i64] });
-            t.tensor.dl_tensor.shape = t.shape.as_mut_ptr();
-            (Box::into_raw(t) as *mut c_void, c"dltensor_versioned", capsule_destructor_versioned)
+        let ptr = managed_tensor(data, dtype, len, keepalive, versioned, do_copy);
+        let (name, dtor): (&CStr, ffi::PyCapsule_Destructor) = if versioned {
+            (c"dltensor_versioned", capsule_destructor_versioned)
         } else {
-            let mut t = Box::new(ExportedTensor {
-                tensor: DLManagedTensor { dl_tensor, manager_ctx: ptr::null_mut(), deleter: Some(deleter) },
-                _keepalive: keepalive, shape: [len as i64],
-            });
-            t.tensor.dl_tensor.shape = t.shape.as_mut_ptr();
-            (Box::into_raw(t) as *mut c_void, c"dltensor", capsule_destructor)
+            (c"dltensor", capsule_destructor)
         };
         let cap = ffi::PyCapsule_New(ptr, name.as_ptr(), Some(dtor));
         if cap.is_null() {

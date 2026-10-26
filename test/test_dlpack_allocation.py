@@ -1,4 +1,4 @@
-"""Runtime metadata budget: shape storage lives in its managed tensor block."""
+"""DLPack inline shape layout and lifetime of the owning managed tensor."""
 import ctypes
 
 import numpy as np
@@ -14,7 +14,7 @@ class LegacyTensor(ctypes.Structure):
 
 
 @pytest.mark.parametrize("versioned,copy", [(False, None), (True, False), (True, True)])
-def test_dlpack_metadata_uses_one_allocation(versioned, copy):
+def test_dlpack_inline_shape_layout_and_lifetime(versioned, copy):
     source = DataFrame({"x": [1.0, 2.0, 3.0]})["x"]
     capsule = source.__dlpack__(max_version=(1, 0) if versioned else None, copy=copy)
     get = ctypes.pythonapi.PyCapsule_GetPointer
@@ -25,7 +25,7 @@ def test_dlpack_metadata_uses_one_allocation(versioned, copy):
     tensor = tensor_type.from_address(address)
     shape = ctypes.addressof(tensor.dl_tensor.shape.contents)
     # The only tail is the keepalive's two pointer words followed by inline shape.
-    # A separately allocated shape cannot satisfy this allocation budget.
+    # This checks inline layout, independently of the native allocation budget.
     assert shape == address + ctypes.sizeof(tensor_type) + 2 * ctypes.sizeof(ctypes.c_void_p)
     assert tensor.dl_tensor.shape[0] == 3
     del source
