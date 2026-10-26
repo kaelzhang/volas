@@ -48,8 +48,14 @@ impl Column {
     /// directly to the consumer, without copying its values.
     #[inline]
     pub fn into_export<E: ColumnExport>(self, export: E) -> E::Output {
+        if let ColumnData::F64(v) = self.data { return export.f64(v); }
+        self.into_export_other(export)
+    }
+
+    #[cold]
+    fn into_export_other<E: ColumnExport>(self, export: E) -> E::Output {
         match self.data {
-            ColumnData::F64(v) => export.f64(v),
+            ColumnData::F64(_) => unreachable!("float64 exported before the cold dispatch"), // LCOV_EXCL_LINE
             ColumnData::F32(v) => export.f32(v),
             ColumnData::I64(v, valid) => export.i64(v, &valid),
             ColumnData::I32(v, valid) => export.i32(v, &valid),
