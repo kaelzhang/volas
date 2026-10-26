@@ -903,13 +903,17 @@ mod endpoint_bounds_tests {
     use super::*;
 
     #[test]
-    #[should_panic]
     fn finite_endpoints_validate_the_middle_positions_too() {
         let col = Column::f64(vec![1.; 100]);
         let dense = [(0..100).collect::<Vec<_>>()];
-        RowGroups::new(&dense, col.len()).unwrap().reduce(&col, CombineOp::Sum).unwrap();
+        let out = RowGroups::new(&dense, col.len()).unwrap().reduce(&col, CombineOp::Sum).unwrap();
+        assert_eq!(out.as_f64(), Some(&[100.][..]));
+        let valid = [vec![0, 99, 1]];
+        let out = RowGroups::new(&valid, col.len()).unwrap().reduce(&col, CombineOp::Sum).unwrap();
+        assert_eq!(out.as_f64(), Some(&[3.][..]));
         let invalid = [vec![0, 1000, 1]];
-        RowGroups::new(&invalid, col.len()).unwrap();
+        assert!(matches!(RowGroups::new(&invalid, col.len()),
+            Err((0, VolasError::Shape(message))) if message == "invalid aggregation group or source height"));
     }
 }
 
