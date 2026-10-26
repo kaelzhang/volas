@@ -17,6 +17,12 @@ It is **not** a general-purpose pandas replacement. It is a narrow, fast DataFra
 
 Indexes are checked at construction and after row selection: datetime labels must
 strictly increase and cannot contain NaT; integer and string labels must be unique.
+`DataFrame::series(name)` and `series_at(position)` carry the frame's checked
+shape into a Series. `series_rows(name, start, end)` extracts only the final,
+clamped row extent, without first cloning the full index. `series_at` panics for
+an invalid column position, like indexing `columns()`. Arbitrary independent
+parts still use checked `Series::new`.
+
 The Rust data model exposes checked constructors and read-only Column / Series
 accessors; see the [Rust data-model guide](crates/volas/README.md#the-data-model).
 

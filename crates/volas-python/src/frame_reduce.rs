@@ -124,13 +124,12 @@ impl PyDataFrame {
     pub(crate) fn describe(&self) -> PyResult<PyDataFrame> {
         let view = self.read()?;
         let df = view.as_ref();
-        let idx = df.index();
         let mut names = Vec::new();
         let mut cols = Vec::new();
-        for (name, col) in df.names().iter().zip(df.columns()) {
+        for (position, (name, col)) in df.names().iter().zip(df.columns()).enumerate() {
             if col.dtype().is_numeric() {
                 let s = PySeries {
-                    inner: Series::new(Some(name.clone()), col.clone(), Arc::clone(idx)).map_err(pyerr)?,
+                    inner: df.series_at(position),
                 };
                 names.push(name.clone());
                 cols.push(s.describe()?.inner.into_data());
@@ -188,13 +187,12 @@ impl PyDataFrame {
     fn try_reduce_with(&self, op: impl Fn(&PySeries) -> PyResult<f64>) -> PyResult<PySeries> {
         let view = self.read()?;
         let df = view.as_ref();
-        let idx = df.index();
         let mut names = Vec::new();
         let mut vals = Vec::new();
-        for (name, col) in df.names().iter().zip(df.columns()) {
+        for (position, (name, col)) in df.names().iter().zip(df.columns()).enumerate() {
             if crate::frame::reduces(col) {
                 let s = PySeries {
-                    inner: Series::new(Some(name.clone()), col.clone(), Arc::clone(idx)).map_err(pyerr)?,
+                    inner: df.series_at(position),
                 };
                 names.push(name.clone());
                 vals.push(op(&s)?);

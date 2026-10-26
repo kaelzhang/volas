@@ -73,6 +73,8 @@ assert_eq!(close.as_f64(), Some(&[10.5, 10.5, 13.0][..])); // 借用切片（仅
 `Column::is_valid`（逐单元格 NA 检查）、`Column::len`、`Column::dtype`。
 
 
+`DataFrame::series(name)` 和 `series_at(position)` 将 Frame 已接纳的形状传给 Series；`series_rows(name, start, end)` 直接提取最终夹取的行范围，不先克隆完整索引。`series_at` 对越界列位置会像索引 `columns()` 一样 panic；任意独立 parts 仍使用受检的 `Series::new`。
+
 `Column` 的存储配对及 `Series` 的结构均不公开；通过列的只读类型访问器或借用的 `ColumnView` 读取数据。`Series::new` 在所有构建模式下检查数据与索引的长度，使用 `name()`、`data()` 和 `index()` 借用各部分；受检的 `Series::scatter` 仅更新选中的值，保持结构和标签不变。
 
 带标签的索引统一使用 `Index::new(name, IndexKind::...)` 构造：datetime 标签必须严格递增且不含 NaT，整数和字符串标签必须唯一但不限制顺序。`DataFrame::new` 也验证索引；`Index::take`、`extend` 及 frame 行选择若产生无效标签则返回错误，因此 datetime 索引不能逆序排列。

@@ -30,6 +30,12 @@ impl Series {
         Ok(Self { name, data, index })
     }
 
+    /// Assemble parts whose equal length is already owned by this crate's frame.
+    #[inline]
+    pub(crate) fn from_frame_parts(name: Option<String>, data: Column, index: Arc<Index>) -> Self {
+        Self { name, data, index }
+    }
+
     /// Optional column name.
     pub fn name(&self) -> Option<&str> { self.name.as_deref() }
 

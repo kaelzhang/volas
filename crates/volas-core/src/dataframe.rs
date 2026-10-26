@@ -397,13 +397,28 @@ impl DataFrame {
     }
 
     /// Extract a column as a [`Series`] sharing this frame's index.
-    pub fn series(&self, name: &str) -> Result<Series> {
-        let col = self.column(name)?.clone();
-        Series::new(
-            Some(name.to_string()),
-            col,
-            Arc::clone(&self.index),
-        )
+    pub fn series(&self, name: impl Into<String>) -> Result<Series> {
+        let name = name.into();
+        let col = self.column(&name)?.clone();
+        Ok(Series::from_frame_parts(Some(name), col, Arc::clone(&self.index)))
+    }
+
+    /// Extract a column by position, carrying the frame's admitted shape.
+    /// Panics if `position` is outside the column axis, like indexing `columns()`.
+    #[inline]
+    pub fn series_at(&self, position: usize) -> Series {
+        Series::from_frame_parts(Some(self.names[position].clone()), self.columns[position].clone(), Arc::clone(&self.index))
+    }
+
+    /// Extract one column's contiguous rows, clamped to the frame's height.
+    /// The same admitted extent supplies both values and labels, without first
+    /// constructing a full Series or rechecking their equal length.
+    pub fn series_rows(&self, name: impl Into<String>, start: usize, end: usize) -> Result<Series> {
+        let name = name.into();
+        let col = self.column(&name)?;
+        let start = start.min(self.height);
+        let end = end.max(start).min(self.height);
+        Ok(Series::from_frame_parts(Some(name), col.slice(start, end), Arc::new(self.index.slice(start, end))))
     }
 
     /// Add a new column or replace an existing one (must match `height`, unless

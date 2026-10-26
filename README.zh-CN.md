@@ -15,6 +15,8 @@
 
 **volas** 同时也是一个 Rust [crate](crates/volas/README.zh-CN.md)。
 
+`DataFrame::series(name)` 和 `series_at(position)` 将 Frame 已接纳的形状传给 Series；`series_rows(name, start, end)` 直接提取最终夹取的行范围，不先克隆完整索引。`series_at` 对越界列位置会像索引 `columns()` 一样 panic；任意独立 parts 仍使用受检的 `Series::new`。
+
 索引在构造及行选择后统一受检：datetime 标签必须严格递增且不能包含 NaT，整数和字符串标签必须唯一。Rust 数据模型通过受检构造器和只读 Column / Series 访问器使用，详见 [Rust 数据模型](crates/volas/README.zh-CN.md#数据模型)。
 
 ```python

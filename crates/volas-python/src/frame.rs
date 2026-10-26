@@ -261,23 +261,16 @@ impl PyDataFrame {
         Meta(self)
     }
 
-    /// Present a full-length column as a Series sliced to the logical M view (with
-    /// the matching sliced index) — identity (a plain `wrap_series`) when unbounded.
-    /// Backs windowed `df[name]` so a column read never exposes the hidden margin.
-    pub(crate) fn present_series(&self, name: String, col: Column) -> PyResult<PySeries> {
-        match &self.window {
+    /// Extract the final logical extent from its frame owner, carrying its shape.
+    pub(crate) fn present_series(&self, name: String) -> PyResult<PySeries> {
+        let inner = match &self.window {
             Some(_) => {
                 let (start, len) = self.logical_range();
-                Ok(PySeries {
-                    inner: Series::new(
-                        Some(name),
-                        col.slice(start, start + len),
-                        Arc::new(self.inner.index().slice(start, start + len)),
-                    ).map_err(pyerr)?,
-                })
+                self.inner.series_rows(name, start, start + len).map_err(pyerr)?
             }
-            None => self.wrap_series(name, col),
-        }
+            None => self.inner.series(name).map_err(pyerr)?,
+        };
+        Ok(PySeries { inner })
     }
 
     /// Element-wise comparison backing `__eq__` / `__ne__`: against another
@@ -336,14 +329,10 @@ impl PyDataFrame {
     /// rejects (e.g. a string column under a numeric transform) propagates its error.
     pub(crate) fn map_cols(&self, op: impl Fn(&PySeries) -> PyResult<PySeries>) -> PyResult<PyDataFrame> {
         let df = &self.data_view()?;
-        let idx = df.index();
-        let cols = df
-            .names()
-            .iter()
-            .zip(df.columns())
-            .map(|(name, col)| {
+        let cols = (0..df.width())
+            .map(|position| {
                 let s = PySeries {
-                    inner: Series::new(Some(name.clone()), col.clone(), Arc::clone(idx)).map_err(pyerr)?,
+                    inner: df.series_at(position),
                 };
                 Ok(op(&s)?.inner.into_data())
             })
@@ -676,12 +665,5 @@ impl PyDataFrame {
             }
         };
         DataFrame::new(names, cols, index).map_err(pyerr)
-    }
-
-
-    pub(crate) fn wrap_series(&self, name: String, col: Column) -> PyResult<PySeries> {
-        Ok(PySeries {
-            inner: Series::new(Some(name), col, Arc::clone(self.inner.index())).map_err(pyerr)?,
-        })
     }
 }

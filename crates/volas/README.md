@@ -73,6 +73,12 @@ Column constructors: `Column::f64`, `Column::i64`, `Column::bool`,
 (borrowed, `None` for non-`f64`), `Column::is_valid` (per-cell NA check),
 `Column::len`, and `Column::dtype`.
 
+`DataFrame::series(name)` and `series_at(position)` carry the frame's checked
+shape into a Series. `series_rows(name, start, end)` extracts only the final,
+clamped row extent, without first cloning the full index. `series_at` panics for
+an invalid column position, like indexing `columns()`. Arbitrary independent
+parts still use checked `Series::new`.
+
 `Column` storage and `Series` structure are opaque. Inspect a column with typed
 slice accessors or its borrowed `ColumnView`; constructing that view cannot create
 a `Column`. `Series::new` checks value / index lengths in every build, while

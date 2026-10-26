@@ -18,6 +18,13 @@ enum Resolved {
     New(String, std::sync::Arc<volas_directive::Ast>, String),
 }
 
+/// Publication identifies installed values without constructing an unused Series.
+/// Detached results have not inherited the frame's shape and remain checked.
+pub(crate) enum CachedColumn {
+    Frame(String),
+    Detached(String, Column),
+}
+
 /// A new directive computed over the binding frame, not yet cached.
 struct Computed {
     canonical: String,
@@ -163,8 +170,8 @@ impl PyDataFrame {
         // directive (O(lookback), not O(n)) on the physical frame, then present the
         // result sliced to the logical M view.
         if let Ok(name) = key.extract::<String>() {
-            let (resolved, col) = self.materialize_refresh(&name)?;
-            return Ok(Py::new(py, self.present_series(resolved, col)?)?.into_any());
+            let cached = self.materialize_refresh(&name)?;
+            return Ok(Py::new(py, self.present_cached(cached)?)?.into_any());
         }
         // list of names / directives — each entry auto-refreshes exactly like the
         // single-name form, so `df[['ma:3']]` and `df['ma:3']` stay consistent.
@@ -382,15 +389,14 @@ impl PyDataFrame {
     /// Resolve `name` (a real column or a directive), materializing + caching a
     /// directive on first use and refreshing a cached directive's stale tail
     /// (O(lookback); a no-op for a plain column or an already-fresh one). Returns
-    /// the resolved column name and a clone of its now-fresh data. Shared by the
+    /// the installed identity or a detached computation. Shared by the
     /// single-name and list forms of `__getitem__` so both auto-refresh identically
     /// after an append.
-    fn materialize_refresh(&mut self, name: &str) -> PyResult<(String, Column)> {
+    fn materialize_refresh(&mut self, name: &str) -> PyResult<CachedColumn> {
         match self.resolve(name)? {
             Resolved::Column(name) => {
                 self.refresh_computed(Some(&name))?;
-                let col = self.inner.column(&name).map_err(pyerr)?.clone();
-                Ok((name, col))
+                Ok(CachedColumn::Frame(name))
             }
             Resolved::New(text, node, storage) => {
                 self.admit_bound(&node, &text)?;
@@ -399,16 +405,33 @@ impl PyDataFrame {
         }
     }
 
+    /// Installed values retain the frame's proof. A detached computation has no
+    /// such proof and uses the arbitrary-parts constructor over the final extent.
+    fn present_cached(&self, cached: CachedColumn) -> PyResult<PySeries> {
+        match cached {
+            CachedColumn::Frame(name) => self.present_series(name),
+            CachedColumn::Detached(name, col) => {
+                let (data, index) = match &self.window {
+                    Some(_) => {
+                        let (start, len) = self.logical_range();
+                        (col.slice(start, start + len), Arc::new(self.inner.index().slice(start, start + len)))
+                    }
+                    None => (col, Arc::clone(self.inner.index())),
+                };
+                Ok(PySeries { inner: Series::new(Some(name), data, index).map_err(pyerr)? })
+            }
+        }
+    }
+
     /// Compute the new directive `node` (spelled `text`) over the binding frame and cache
-    /// it: its canonical name and values.
+    /// it, returning the installed identity or the detached computation.
     pub(crate) fn cache_new(
         &mut self,
         storage: &str,
         node: &std::sync::Arc<volas_directive::Ast>,
-    ) -> PyResult<(String, Column)> {
+    ) -> PyResult<CachedColumn> {
         let new = self.compute_new(&*self.binding_frame()?, node, storage)?;
-        let canonical = new.canonical.clone();
-        Ok((canonical, self.cache(new)?))
+        self.cache(new)
     }
 
     /// What a requested name reads: an existing column (data, or a cached directive under
@@ -457,12 +480,12 @@ impl PyDataFrame {
         })
     }
 
-    /// Cache a computed directive under its canonical name and return its values. A
+    /// Cache a computed directive and return its publication identity or detached values. A
     /// data column already holding that name keeps it: the directive's values are
     /// returned, not cached over the data.
-    fn cache(&mut self, new: Computed) -> PyResult<Column> {
+    fn cache(&mut self, new: Computed) -> PyResult<CachedColumn> {
         if self.inner.has_column(&new.canonical) {
-            return Ok(new.col);
+            return Ok(CachedColumn::Detached(new.canonical, new.col));
         }
         let Computed {
             canonical,
@@ -478,7 +501,7 @@ impl PyDataFrame {
         self.inner.set_computed_states(&canonical, state, before);
         // computed over the binding frame from its row 0: the anchors its history passed
         self.inner.keep_computed_anchors(&canonical, anchors);
-        Ok(self.inner.column(&canonical).map_err(pyerr)?.clone())
+        Ok(CachedColumn::Frame(canonical))
     }
 
     /// `df[[...]]` (and the constructor's `columns=`): the named columns / directives

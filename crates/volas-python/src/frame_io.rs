@@ -149,8 +149,7 @@ impl PyDataFrame {
         if self.inner.is_computed(&name) {
             self.refresh_computed(Some(&name))?;
         }
-        let col = self.inner.column(&name).map_err(pyerr)?.clone();
-        self.present_series(name, col)
+        self.present_series(name)
     }
 
     /// A copy of the frame — preserving the cached directive columns / cursor and

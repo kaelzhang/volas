@@ -470,11 +470,7 @@ pub(crate) fn select_2d(
         (RowAxis::One(i), AxisSel::One(j)) => np_scalar_to_py(py, &df.columns()[j], i),
         (RowAxis::Rows(r), AxisSel::One(j)) => {
             let sub = project_cols(df, &[j])?.take(&r.positions()).map_err(pyerr)?;
-            let name = sub.names()[0].clone();
-            let col = sub.columns()[0].clone();
-            let series = PySeries {
-                inner: Series::new(Some(name), col, Arc::clone(sub.index())).map_err(pyerr)?,
-            };
+            let series = PySeries { inner: sub.series_at(0) };
             Ok(Py::new(py, series)?.into_any())
         }
         (RowAxis::One(i), AxisSel::Many(c)) => {

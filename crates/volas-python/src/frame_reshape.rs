@@ -77,15 +77,14 @@ impl PyDataFrame {
     pub(crate) fn mode(&self) -> PyResult<PyDataFrame> {
         let view = self.read()?;
         let df = view.as_ref();
-        let idx = df.index();
         let all_missing = df.columns().iter().all(|c| c.null_count() == c.len());
         if all_missing {
             return Ok(PyDataFrame::plain(DataFrame::new(df.names().to_vec(), df.columns().iter().map(|c| c.take(&[])).collect(), None).map_err(pyerr)?));
         }
         let mut cols = Vec::with_capacity(df.width());
-        for (name, col) in df.names().iter().zip(df.columns()) {
+        for (position, (_name, col)) in df.names().iter().zip(df.columns()).enumerate() {
             let s = PySeries {
-                inner: Series::new(Some(name.clone()), col.clone(), Arc::clone(idx)).map_err(pyerr)?,
+                inner: df.series_at(position),
             };
             let m = s.mode()?;
             cols.push(if m.inner.is_empty() {
@@ -110,11 +109,7 @@ impl PyDataFrame {
                  use df[col].value_counts()",
             ));
         }
-        let name = df.names()[0].clone();
-        let col = df.columns()[0].clone();
-        let s = PySeries {
-            inner: Series::new(Some(name), col, Arc::clone(df.index())).map_err(pyerr)?,
-        };
+        let s = PySeries { inner: df.series_at(0) };
         s.value_counts(false, true, false, true)
     }
 
