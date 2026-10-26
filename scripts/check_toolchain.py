@@ -5,6 +5,7 @@ import argparse
 from pathlib import Path
 
 import sys
+import subprocess
 
 from toolchain import RUST, MATURIN, COMPONENTS
 
@@ -14,7 +15,7 @@ else:
     import build_config as processes
 
 
-def check(rust_only=False):
+def check(rust_only=False, cargo_llvm_cov=False):
     rust = processes.child_output(["rustc", "-Vv"], text=True)
     fields = dict(line.split(": ", 1) for line in rust.splitlines() if ": " in line)
     if fields.get("release") != RUST:
@@ -44,6 +45,19 @@ def check(rust_only=False):
         if fields["LLVM version"] not in version:
             raise ValueError(f"LLVM version mismatch: {path}: {version}")
         print(f"{path}: {version}")
+    if cargo_llvm_cov:
+        try:
+            version = processes.child_output(
+                ["cargo", "llvm-cov", "--version"], text=True,
+                stderr=subprocess.STDOUT,
+            ).strip()
+        except subprocess.CalledProcessError as error:
+            raise ValueError(
+                f"install cargo-llvm-cov (same selector as the coverage job): {error.output}"
+            ) from None
+        if not version.startswith("cargo-llvm-cov "):
+            raise ValueError(f"invalid cargo-llvm-cov version: {version}")
+        print(version)
     print(f"rustc {RUST}; {cargo}; {maturin}")
 
 
@@ -58,6 +72,8 @@ def main():
         "--rust-only", action="store_true", help="check Rust and its LLVM tools"
     )
     ap.add_argument("--value", choices=["rust", "maturin", "components"])
+    ap.add_argument("--cargo-llvm-cov", action="store_true",
+                    help="also check the Cargo plugin required by collected tests")
     args = ap.parse_args()
     values = {"rust": RUST, "maturin": MATURIN, "components": ",".join(COMPONENTS)}
     if args.value:
@@ -66,7 +82,7 @@ def main():
     if args.versions:
         print("\n".join(f"{key}={value}" for key, value in values.items()))
     else:
-        check(args.rust_only)
+        check(args.rust_only, args.cargo_llvm_cov)
 
 
 if __name__ == "__main__":

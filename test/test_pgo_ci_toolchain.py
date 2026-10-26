@@ -10,7 +10,7 @@ import pytest
 
 from test.pgo_toolchain import ROOT, clean_env
 from test.pgo_linked_imports import linked_dump
-from test.pgo_toolchain import HOST
+from test.pgo_toolchain import HOST, SYSROOT
 
 sys.path.insert(0, str(ROOT / "scripts"))
 from build_release import RUST, MATURIN  # noqa: E402
@@ -122,3 +122,52 @@ def test_report_workflows_check_pinned_tools_before_build_or_base_skip(
     )
     assert result.returncode != 0 and f"requires maturin {MATURIN}" in result.stderr
     assert not marker.exists()
+
+
+def test_test_matrix_provisions_coverage_plugin_before_prerequisite_check():
+    text = job_text('test')
+    coverage = job_text('coverage')
+    install = '- name: Install cargo-llvm-cov\n'
+    assert install in text
+    # The coverage job owns the installation selector, including its version.
+    def step(source):
+        return source[source.index(install):].split('\n      - name:', 1)[0].strip()
+    assert step(text) == step(coverage)
+    check = 'python scripts/check_toolchain.py --cargo-llvm-cov'
+    assert text.index(install) < text.index(check) < text.index('run: cargo test')
+    assert text.index(check) < text.index('run: make test-quick')
+
+
+def test_prerequisite_check_rejects_missing_coverage_plugin(tmp_path):
+    bin_ = tmp_path / 'bin'
+    bin_.mkdir()
+    for tool in ('cargo', 'rustc'):
+        (bin_ / tool).symlink_to(SYSROOT / 'bin' / tool)
+    marker = tmp_path / 'tests-started'
+    env = clean_env(PATH=str(bin_), CARGO_HOME=str(tmp_path / 'cargo-home'))
+    absent = subprocess.run(['cargo', 'llvm-cov', '--version'], env=env,
+                            capture_output=True, text=True)
+    assert absent.returncode != 0 and 'no such command:' in absent.stderr and 'llvm-cov' in absent.stderr
+    command = re.search(r'- name: Check build prerequisites\n\s+run: (.+)',
+                        job_text('test'))[1]
+    command = command.replace('python ', f'"{sys.executable}" ', 1)
+    result = subprocess.run(
+        ['/bin/bash', '-ec', command + f'\n/usr/bin/touch "{marker}"'], cwd=ROOT,
+        env=env,
+        capture_output=True, text=True,
+    )
+    assert result.returncode != 0
+    assert 'install cargo-llvm-cov' in result.stderr
+    assert 'no such command:' in result.stderr and 'llvm-cov' in result.stderr
+    assert not marker.exists()
+
+
+def test_prerequisite_check_reports_active_coverage_plugin():
+    result = subprocess.run(
+        [sys.executable, 'scripts/check_toolchain.py', '--cargo-llvm-cov'],
+        cwd=ROOT, env=clean_env(), capture_output=True, text=True,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    actual = subprocess.check_output(['cargo', 'llvm-cov', '--version'],
+                                     cwd=ROOT, env=clean_env(), text=True).strip()
+    assert actual.startswith('cargo-llvm-cov ') and actual in result.stdout

@@ -86,6 +86,11 @@ jobs:
       - name: Cache cargo build
         uses: Swatinem/rust-cache@v2
 
+      - name: Install cargo-llvm-cov
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-llvm-cov
+
       - name: Create virtual environment
         run: |
           python -m venv .venv
@@ -103,7 +108,7 @@ jobs:
           python -c "import sys, numpy as np, pandas as pd, talib; print(sys.version); print('numpy', np.__version__); print('oracles: pandas', pd.__version__, 'TA-Lib', talib.__version__)"
 
       - name: Check build prerequisites
-        run: python scripts/check_toolchain.py
+        run: python scripts/check_toolchain.py --cargo-llvm-cov
 
       - name: Rust unit tests
         run: cargo test --workspace --exclude volas-python
