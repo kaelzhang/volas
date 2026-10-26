@@ -3,12 +3,11 @@
 //! bar in place — and the rule every other change of a tf frame's rows or data
 //! columns keeps the open period in line with.
 
-use std::sync::Arc;
 
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
-use volas_core::{CellWrites, Column, CombineOp, DataFrame, IndexKind};
-use volas_time::{aggregate_period, AggSpec, OpenPeriod, PeriodAggregate, TimeFrame};
+use volas_core::{CellWrites, Column, DataFrame, IndexKind};
+use volas_time::{AggSpec, OpenPeriod, PeriodAggregate, TimeFrame};
 
 #[allow(unused_imports)]
 use crate::*;
@@ -50,26 +49,11 @@ pub(crate) struct TfState {
     aggregate: Option<PeriodAggregate>,
     /// Copy the aggregate into the forming row positionally, skipping cached
     /// directives. Schema writes clear this; materialization changes `names`.
-    fold_plan: Option<FoldPlan>,
+    fold_plan: Option<volas_core::FoldLayout>,
     /// The displayed row is not yet the reduction of the raw bars (a construction
     /// seed, a single-bar write, or a column added as missing). Publish the owner
     /// reduction on the next fold; never classify the displayed accumulator as input.
     refold_next: bool,
-}
-
-#[derive(Clone)]
-struct FoldPlan {
-    names: Arc<Vec<String>>,
-    ops: Vec<(usize, usize, CombineOp)>,
-}
-
-impl FoldPlan {
-    fn build(inner: &DataFrame, aggregate: &DataFrame, spec: &AggSpec) -> Self {
-        let ops = aggregate.names().iter().enumerate().map(|(i, name)| {
-            (inner.column_pos(name).expect("an open period holds the frame's data columns"), i, spec.agg_for(name).as_combine_op())
-        }).collect();
-        Self { names: inner.names_arc().clone(), ops }
-    }
 }
 
 /// `frame`'s data columns — every column but the cached directive ones — in order.
@@ -390,44 +374,34 @@ impl PyDataFrame {
         // over into a non-monotonic index / fold later bars into the wrong period. Late
         // or disordered feed data must be handled explicitly by the caller, never
         // silently corrupt the OHLCV.
-        let tfs = self.tf.as_ref().expect("fold_append on a plain frame");
-        let prev_ts: Option<i64> = match tfs.open.as_ref() {
-            Some(o) => Some(o.last_ts()),
-            None => match self.inner.index().kind() {
-                IndexKind::Datetime(v, _) if !v.is_empty() => Some(v[v.len() - 1]),
-                _ => None,
-            },
-        };
         // Admitted before the order is judged: an instant and a wall clock do not compare.
-        let bars = self.inner.admit_data_rows(fine).map_err(pyerr)?;
-        let bars = bars.as_ref();
-        // The incoming Index already proves strict order and present timestamps;
-        // only its boundary against the latest folded bar remains to check.
-        if let (Some(&first), Some(previous)) = (fine_ts.first(), prev_ts) {
-            if first < previous {
-                return Err(PyValueError::new_err(
-                    "cannot append an out-of-order bar to a time_frame DataFrame \
-                     (its timestamp precedes the forming period's latest bar); handle \
-                     late / re-ordered feed data before folding so the OHLCV stays \
-                     monotonic",
-                ));
-            }
-        }
-        if bars.height() > 1 {
+        let cached = self.tf.as_mut().unwrap().fold_plan.take();
+        let tfs = self.tf.as_ref().unwrap();
+        let plan = match cached.filter(|p| p.matches(&self.inner)) {
+            Some(p) => p,
+            None => volas_core::FoldLayout::new(&self.inner, |n| tfs.cumulators.agg_for(n).as_combine_op()).map_err(pyerr)?,
+        };
+        let bars = plan.admit(&self.inner, fine).map_err(pyerr)?;
+        if bars.rows().height() > 1 {
             // the forming row's data columns only: what the fold reads and writes
             let mut probe = PyDataFrame {
                 inner: self.inner.forming_fold_probe(),
                 tf: self.tf.clone(),
                 window: None,
             };
-            probe.fold_bars(bars)?;
+            let probe_plan = volas_core::FoldLayout::new(&probe.inner, |n| probe.tf.as_ref().unwrap().cumulators.agg_for(n).as_combine_op()).map_err(pyerr)?;
+            let probe_bars = probe_plan.admit(&probe.inner, bars.rows()).map_err(pyerr)?;
+            probe.fold_bars(&probe_bars).map_err(|e| fold_order_error(&self.inner, self.tf.as_ref().unwrap(), fine_ts, e))?;
         }
-        self.fold_bars(bars)
+        let result = self.fold_bars(&bars);
+        self.tf.as_mut().unwrap().fold_plan = Some(plan);
+        result.map_err(|e| fold_order_error(&self.inner, self.tf.as_ref().unwrap(), fine_ts, e))
     }
 
     /// Fold admitted bars of the frame's data columns, in time order (see
     /// [`fold_append`](Self::fold_append)), one by one.
-    fn fold_bars(&mut self, bars: &DataFrame) -> PyResult<()> {
+    fn fold_bars(&mut self, admitted: &volas_core::AdmittedBars<'_, '_>) -> PyResult<()> {
+        let bars = admitted.rows();
         let PyDataFrame { inner, tf, window: _ } = self;
         let tfs = tf.as_mut().expect("fold_append on a plain frame");
         let frame = tfs.time_frame;
@@ -443,9 +417,11 @@ impl PyDataFrame {
             IndexKind::Datetime(_, tz) => tz.clone(),
             _ => bars.index().tz(), // LCOV_EXCL_LINE (a tf frame's index is datetime)
         };
-        for (i, &bar_ts) in fine_ts.iter().enumerate() {
+        for i in 0..fine_ts.len() {
             // A period is identified by its start on the frame's grid.
-            let key = frame.period_start(bar_ts, &tz).map_err(pyerr)?;
+            let proof = admitted.bar(i).map_err(pyerr)?;
+            let timed = volas_time::TimedBar::new(&proof, frame, &tz).map_err(pyerr)?;
+            let key = timed.key();
             // Compute lazy metadata aside too: a rejected publish changes no state.
             // Successful folds memoize the invariant open key below.
             let same_period = match tfs.open.as_ref() {
@@ -460,12 +436,7 @@ impl PyDataFrame {
             };
             // The forming-bar update only reads the bar, so borrow it directly for the
             // common single-row append (no slice copy).
-            let bar = if bars.height() == 1 {
-                std::borrow::Cow::Borrowed(bars)
-            } else {
-                std::borrow::Cow::Owned(bars.slice_data(i, i + 1))
-            };
-            let bar = bar.as_ref();
+            let bar = proof.rows();
             if !same_period {
                 // Roll over: the previous forming bar is final in `inner`; the new row is a
                 // stale row like any appended one, resumed from the state as of the closed
@@ -473,12 +444,9 @@ impl PyDataFrame {
                 // once the row is in.
                 let open = OpenPeriod::new(bar.clone()).map_err(pyerr)?;
                 if let Some(aggregate) = &mut tfs.aggregate {
-                    let restart = aggregate.check_restart(bar, &tfs.cumulators).map_err(pyerr)?;
-                    inner.append_new(restart.current()).map_err(pyerr)?;
-                    restart.land();
+                    aggregate.restart_bar(inner, &timed).map_err(pyerr)?;
                 } else {
-                    let row = aggregate_period(bar, &tfs.cumulators, frame, &tz).map_err(pyerr)?;
-                    inner.append_new(&row).map_err(pyerr)?;
+                    tfs.aggregate = Some(PeriodAggregate::start(inner, &timed).map_err(pyerr)?);
                 }
                 tfs.open = Some(open);
                 tfs.open_key = Some(key);
@@ -489,20 +457,17 @@ impl PyDataFrame {
             let rebuilt = if tfs.aggregate.is_none() {
                 PeriodAggregate::new(open, &tfs.cumulators, frame, &tz).ok()
             } else { None };
-            let plan = if !tfs.fold_plan.as_ref().is_some_and(|plan| Arc::ptr_eq(&plan.names, inner.names_arc())) {
-                Some(FoldPlan::build(inner, bar, &tfs.cumulators))
-            } else { None };
-            let ops = &plan.as_ref().or(tfs.fold_plan.as_ref()).unwrap().ops;
-            let resent = open.last_ts() == bar_ts;
+            // Exceptional re-reduction retains its independent checked entry.
+            let push = open.check_timed(&timed).map_err(pyerr)?;
+            let resent = push.replaces();
             if resent || tfs.refold_next {
-                if let Some(aggregate) = tfs.aggregate.as_ref().or(rebuilt.as_ref()) {
+                if tfs.aggregate.is_some() || rebuilt.is_some() {
                     // Validate each column's reduction AND historical dtype in one
                     // pass, against the destination, before changing a checkpoint.
-                    inner.check_fold_from(aggregate.prefix(resent), bar, ops).map_err(pyerr)?;
+
                     if tfs.aggregate.is_none() { tfs.aggregate = rebuilt; }
                     let aggregate = tfs.aggregate.as_mut().unwrap();
-                    aggregate.check_push(bar, resent).map_err(pyerr)?.land().map_err(pyerr)?;
-                    inner.check_folded_row(aggregate.current(), ops).map_err(pyerr)?.land().map_err(pyerr)?;
+                    aggregate.refold_bar(inner, &push).map_err(pyerr)?;
                 } else {
                     // A lossless dtype write can leave the displayed coarse value
                     // valid while reducing the converted fine bars overflows. Keep
@@ -510,10 +475,10 @@ impl PyDataFrame {
                     // last bar before trying to reduce that exceptional period.
                     let mut next = open.clone();
                     next.push(bar).map_err(pyerr)?;
-                    inner.refold_forming_row(inner.height() - 1, next.bars(), ops).map_err(pyerr)?;
+                    let ops: Vec<_> = bar.names().iter().enumerate().map(|(i, name)| (inner.column_pos(name).unwrap(), i, tfs.cumulators.agg_for(name).as_combine_op())).collect();
+                    inner.refold_forming_row(inner.height() - 1, next.bars(), &ops).map_err(pyerr)?;
                     *open = next;
                     tfs.aggregate = PeriodAggregate::new(open, &tfs.cumulators, frame, &tz).ok();
-                    if plan.is_some() { tfs.fold_plan = plan; }
                     tfs.open_key = Some(key);
                     tfs.refold_next = false;
                     continue;
@@ -521,9 +486,9 @@ impl PyDataFrame {
             } else {
                 // Preserve the single-cell fold as well as the batch reduction:
                 // their NaN payloads (and rounding after a dtype write) can differ.
-                inner.check_forming_fold(inner.height() - 1, bar, 0, ops).map_err(pyerr)?.land().map_err(pyerr)?;
+                proof.fold(inner).map_err(pyerr)?;
                 if tfs.aggregate.is_none() { tfs.aggregate = rebuilt; }
-                if tfs.aggregate.as_mut().is_some_and(|a| a.check_push(bar, false).and_then(|push| push.land()).is_err()) {
+                if tfs.aggregate.as_mut().is_some_and(|a| a.push_bar(&push).is_err()) {
                     // A dtype write can make the raw reduction overflow while the
                     // displayed incremental fold still fits. Its error stays deferred.
                     tfs.aggregate = None;
@@ -531,11 +496,23 @@ impl PyDataFrame {
             }
             // Timestamp order, schema and dtypes were admitted before any fold;
             // this open-period append has no remaining rejection to discover.
-            open.push(bar).map_err(pyerr)?;
-            if plan.is_some() { tfs.fold_plan = plan; }
+            push.land().map_err(pyerr)?;
             tfs.open_key = Some(key);
             tfs.refold_next = false;
         }
         Ok(())
     }
+}
+
+/// Preserve the established late-feed diagnostic without repeating the checked
+/// Index boundary on a successful append. Rejections have not published a bar.
+#[cold]
+fn fold_order_error(inner: &DataFrame, state: &TfState, incoming: &[i64], error: PyErr) -> PyErr {
+    let previous = state.open.as_ref().map(OpenPeriod::last_ts).or_else(|| match inner.index().kind() {
+        IndexKind::Datetime(ts, _) => ts.last().copied(),
+        _ => None,
+    });
+    if incoming.first().zip(previous).is_some_and(|(&first, previous)| first < previous) {
+        PyValueError::new_err("cannot append an out-of-order bar to a time_frame DataFrame (its timestamp precedes the forming period's latest bar); handle late / re-ordered feed data before folding so the OHLCV stays monotonic")
+    } else { error }
 }

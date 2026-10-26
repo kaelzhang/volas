@@ -725,12 +725,12 @@
             None,
         )
         .unwrap();
-        df.fold_forming_row(1, &bar, 0, &[(0, 0, CombineOp::Max), (1, 1, CombineOp::Sum)])
+        df.fold_forming_row(1, &bar, 0, &[(0, 0, CombineOp::Max), (1, 1, CombineOp::Sum)], true)
             .unwrap();
         assert_eq!(df.columns()[0].get_f64(1), 5.0); // max(2, 5)
         assert_eq!(df.columns()[1].get_f64(1), 23.0); // 20 + 3
         // an empty plan is a no-op (and skips the invalidation).
-        df.fold_forming_row(1, &bar, 0, &[]).unwrap();
+        df.fold_forming_row(1, &bar, 0, &[], true).unwrap();
         assert_eq!(df.columns()[0].get_f64(1), 5.0);
     }
 

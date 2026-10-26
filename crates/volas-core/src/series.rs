@@ -53,10 +53,11 @@ impl Series {
     }
 
     /// Admit a column with a fresh checked positional index. Its length supplies
-    /// both parts of the shape, so no independent lengths need comparing.
+    /// both parts of the shape. Valid physical column storage also proves the
+    /// positional labels fit i64, so neither fact needs revalidation.
     #[inline]
     pub fn from_column(name: Option<String>, data: Column) -> Result<Self> {
-        let index = Arc::new(Index::positional(data.len())?);
+        let index = Arc::new(Index::for_column(&data));
         Ok(Self { name, data, index })
     }
 

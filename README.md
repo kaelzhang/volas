@@ -27,6 +27,14 @@ checked append. Reduced rows use `check_folded_row(...).land()`; raw append and
 fold publication helpers are private. `Series::from_column` and
 `DataFrame::from_columns` build checked positional indexes from the admitted shape.
 NumPy and DLPack exports dispatch the storage type once inside the Column owner.
+Composed live folds use opaque `FoldLayout`, `AdmittedBars`, `TimedBar`
+and `OpenBar` proofs: schema, positions and floating-fold infallibility are admitted once, a grid key is computed once,
+and downstream folds consume the proof. Schema changes retire existing layouts;
+independent checked write entries remain available. Scalar replacements consume
+a zero-growth proof; Range continuation uses one checked constant-time step. DLPack tensors own shape and keepalive in the
+same allocation. `Series::from_column` inherits the representable length
+of physical column storage; arbitrary positional lengths remain checked. Source
+caches enter as plain values when those columns belong to the target data.
 Reduction admissions retain an immutable positions slice or an owned range.
 `RowGroups::new` and `RowGroups::from_offsets` validate group counts, nonempty
 groups and every position once; their immutable proof can reduce any column of

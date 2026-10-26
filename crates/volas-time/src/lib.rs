@@ -15,9 +15,12 @@ pub mod time_frame;
 
 pub use agg::{Agg, AggSpec};
 pub use cumulate::{aggregate_period, cumulate, Cumulator};
-pub use open_period::OpenPeriod;
+pub use open_period::{OpenBar, OpenPeriod};
 pub use period_aggregate::{PeriodAggregate, PeriodPush, PeriodRestart};
 pub use time_frame::{Span, TimeFrame};
 
 #[cfg(test)]
 mod cumulate_regression_tests;
+
+mod timed_bar;
+pub use timed_bar::TimedBar;

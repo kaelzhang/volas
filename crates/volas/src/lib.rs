@@ -104,9 +104,25 @@ mod aggregate_admission_examples {}
 /// use volas::{Column, DataFrame};
 /// let mut dst = DataFrame::new(vec!["x".into()], vec![Column::i64(vec![1])], None).unwrap();
 /// let src = dst.clone();
-/// dst.fold_forming_row(0, &src, 0, &[]).unwrap();
+/// dst.fold_forming_row(0, &src, 0, &[], true).unwrap();
 /// ```
 mod forming_admission_examples {}
+
+/// Admitted cell commits are private; standalone Column callers use checked writes.
+///
+/// ```compile_fail
+/// use volas::Column;
+/// let mut dst = Column::f64(vec![1.]);
+/// let src = Column::f64(vec![2.]);
+/// dst.set_last_from_admitted(0, &src, 0);
+/// ```
+///
+/// ```compile_fail
+/// use volas::Column;
+/// let mut dst = Column::f64(vec![1.]);
+/// dst.set_last_na_admitted(0);
+/// ```
+mod last_cell_admission_examples {}
 
 /// Reduction admission freezes positions; a user iterator is not a proof.
 ///

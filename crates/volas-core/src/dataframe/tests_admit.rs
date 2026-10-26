@@ -417,12 +417,12 @@ fn a_fold_that_overflows_changes_nothing() {
     let before = snapshot(&df);
     let bar = ints(&["high", "volume"], &[vec![50, 6]]);
     assert!(matches!(
-        df.fold_forming_row(1, &bar, 0, &ops),
+        df.fold_forming_row(1, &bar, 0, &ops, true),
         Err(VolasError::Overflow(_))
     ));
     assert_eq!(snapshot(&df), before);
     let fits = ints(&["high", "volume"], &[vec![50, 5]]);
-    df.fold_forming_row(1, &fits, 0, &ops).unwrap();
+    df.fold_forming_row(1, &fits, 0, &ops, true).unwrap();
     assert_eq!(
         (df.columns()[0].get_i64(1), df.columns()[1].get_i64(1)),
         (50, i64::MAX)

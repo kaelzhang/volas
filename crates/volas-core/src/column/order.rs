@@ -356,8 +356,18 @@ impl Column {
         if self.dtype() != src.dtype() {
             let cell = src.slice(src_row, src_row + 1);
             let converted = cell.convert_lossless(self.dtype()).map_err(|e| self.append_error(src, e))?;
-            return self.set_last_from(&converted, 0);
+            self.set_last_from_admitted(last, &converted, 0);
+            return Ok(());
         }
+        self.set_last_from_admitted(last, src, src_row);
+        Ok(())
+    }
+
+    /// Commit a last cell whose shape and dtype were admitted by this owner or
+    /// the opaque frame write plan. Safe Rust bounds checks and mask writes stay.
+    #[inline]
+    pub(crate) fn set_last_from_admitted(&mut self, last: usize, src: &Column, src_row: usize) {
+        let n = last + 1;
         match (self, src) {
             (Column { data: ColumnData::F64(a) }, Column { data: ColumnData::F64(b) }) => a.set(last, b[src_row]),
             (Column { data: ColumnData::F32(a) }, Column { data: ColumnData::F32(b) }) => a.set(last, b[src_row]),
@@ -378,9 +388,8 @@ impl Column {
                 a.set_last(b.get(src_row));
                 av.set_in_bounds(last, n, bv.is_valid(src_row));
             }
-            _ => unreachable!("dtypes matched above"), // LCOV_EXCL_LINE
+            _ => unreachable!("dtypes matched at admission"), // LCOV_EXCL_LINE
         }
-        Ok(())
     }
 
     /// Mark the last cell missing in place, dtype-preserving (`NaN` / `NaT`, or an
@@ -388,6 +397,13 @@ impl Column {
     pub fn set_last_na(&mut self) {
         let n = self.len();
         let Some(last) = n.checked_sub(1) else { return };
+        self.set_last_na_admitted(last);
+    }
+
+    /// Commit a missing last cell after the frame/column shape admission.
+    #[inline]
+    pub(crate) fn set_last_na_admitted(&mut self, last: usize) {
+        let n = last + 1;
         match self {
             Column { data: ColumnData::F64(a) } => a.set(last, f64::NAN),
             Column { data: ColumnData::F32(a) } => a.set(last, f32::NAN),

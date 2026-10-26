@@ -432,6 +432,11 @@ impl DataFrame {
                 // A replaced column may feed any cached directive: `name` loses its own
                 // computed status and every other cache goes stale (one rule for every
                 // writer — `df[name] = …`, `astype`, …).
+                // Retire any reusable schema proof before changing the dtype or
+                // turning a cached column into data.
+                if self.columns[i].dtype() != col.dtype() || self.computed.contains_key(name) {
+                    Arc::make_mut(&mut self.names);
+                }
                 self.columns[i] = col;
                 self.invalidate_computed_on_write(name);
             }
@@ -510,6 +515,8 @@ impl DataFrame {
     }
 }
 
+mod fold_input;
+pub use fold_input::{AdmittedAppend, AdmittedBar, AdmittedBars, FoldLayout};
 mod admit;
 pub use admit::{FoldedRow, FormingFold};
 pub use admit::Retained;

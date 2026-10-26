@@ -12,12 +12,13 @@
 
 use crate::column::ColumnData;
 use std::borrow::Cow;
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use crate::column::Column;
 use crate::column::CombineOp;
 use crate::error::{Result, VolasError};
-use crate::index::{AppendMode, AppendPlan, IndexInput};
+use crate::index::{AppendMode, AppendPlan, AppendTail, IndexInput, RowPlan};
 
 use super::{DataFrame, Replay};
 
@@ -64,7 +65,7 @@ pub struct FormingFold<'a> {
 impl FormingFold<'_> {
     /// Check the arithmetic and publish the admitted fold atomically.
     #[inline]
-    pub fn land(self) -> Result<()> { self.frame.fold_forming_row(self.row, self.source, self.source_row, self.ops) }
+    pub fn land(self) -> Result<()> { self.frame.fold_forming_row(self.row, self.source, self.source_row, self.ops, true) }
 }
 
 impl DataFrame {
@@ -100,7 +101,10 @@ impl DataFrame {
     pub fn admit_data_rows<'a>(&self, rows: &'a DataFrame) -> Result<Cow<'a, DataFrame>> {
         let admitted = self.admit_rows(rows)?;
         if admitted.leads && admitted.rows.width() == self.width() - self.computed.len() {
-            return Ok(admitted.rows); // the leading columns, none cached: all the data columns
+            // These are this target's data columns, even if the source computed
+            // some of them. Its cache/history identity must not enter a raw bar.
+            return Ok(if admitted.rows.computed.is_empty() { admitted.rows }
+                else { Cow::Owned(admitted.rows.admitted_values()) });
         }
         let rows = admitted.rows.as_ref();
         let (mut names, mut columns) = (Vec::new(), Vec::new());
@@ -115,6 +119,17 @@ impl DataFrame {
             names.push(name.clone());
         }
         DataFrame::new(names, columns, Some((*rows.index).clone())).map(Cow::Owned)
+    }
+
+    /// The already admitted physical values as a new plain row set. Share the
+    /// checked labels and buffers; no historical values or labels are copied.
+    fn admitted_values(&self) -> DataFrame {
+        DataFrame {
+            names: self.names.clone(), name_to_idx: self.name_to_idx.clone(),
+            columns: self.columns.clone(), index: self.index.clone(), height: self.height,
+            computed: Default::default(), first_computed: None, origin: 0,
+            stale_by: super::STALE_BY_APPEND, lead: None,
+        }
     }
 
     /// Admit `rows` for appending to (or replacing the last row of) this frame — the
@@ -185,11 +200,11 @@ impl DataFrame {
             }
             self.check_lead_values(name, &columns[k], 0, columns[k].len())?;
         }
-        Ok(Admitted {
-            rows: Cow::Owned(rows.same_schema(columns, (*rows.index).clone(), rows.origin)),
-            leads: prefix,
-            index,
-        })
+        let mut converted = rows.same_schema(columns, (*rows.index).clone(), rows.origin);
+        // `convert` already proves a dtype changed. Retire the schema here,
+        // rather than re-reading every dtype on all schema-preserving derivations.
+        converted.names = Arc::new((*rows.names).clone());
+        Ok(Admitted { rows: Cow::Owned(converted), leads: prefix, index })
     }
 
     /// Append `other`'s rows in place, keyed by their labels: a row labelled like the
@@ -204,9 +219,9 @@ impl DataFrame {
     /// decided before the first write, so on an error the frame is unchanged. Deciding
     /// a datetime row is O(1); an integer / string row looks its label up.
     pub fn append(&mut self, other: &DataFrame) -> Result<()> {
-        let admitted = self.admit_rows(other)?;
-        let plan = admitted.index.plan(AppendMode::Rows { from: 0, shown: 0 })?;
-        self.commit_plan(&admitted.rows, admitted.leads, plan)
+        let Admitted { rows, leads, index } = self.admit_rows(other)?;
+        let plan = index.row_plan(0, 0)?;
+        self.commit_rows(&rows, leads, plan)
     }
 
     /// [`append`](Self::append) to a frame that retains only its rows from
@@ -220,27 +235,35 @@ impl DataFrame {
         if retained.from > retained.shown || retained.shown > self.height {
             return Err(VolasError::Shape("retained rows must satisfy from <= shown <= frame height".into()));
         }
-        let admitted = self.admit_rows(other)?;
-        let plan = admitted.index.plan(AppendMode::Rows { from: retained.from, shown: retained.shown })?;
+        let Admitted { rows, leads, index } = self.admit_rows(other)?;
+        let plan = index.row_plan(retained.from, retained.shown)?;
         let from = plan.compact_from();
         if from == 0 {
-            return self.commit_plan(&admitted.rows, admitted.leads, plan);
+            return self.commit_rows(&rows, leads, plan);
         }
         // The same plan proves that only dropped labels collide. Compact through
         // the derivation owner on a candidate, then consume it without re-routing.
         let mut candidate = self.clone();
         candidate.compact_tail(self.height - from, replay);
-        candidate.commit_plan(&admitted.rows, admitted.leads, plan)?;
+        candidate.commit_rows(&rows, leads, plan)?;
         *self = candidate;
         Ok(())
     }
 
-    fn commit_plan(&mut self, rows: &DataFrame, leads: bool, plan: AppendPlan<'_>) -> Result<()> {
-        let replaces = plan.replaces();
-        let added = plan.appended();
-        if replaces && added == 0 {
-            return self.write_last_row(rows, 0, leads);
+    pub(super) fn commit_rows(&mut self, rows: &DataFrame, leads: bool, plan: RowPlan<'_>) -> Result<()> {
+        match plan {
+            RowPlan::Range(step) => {
+                Arc::make_mut(&mut self.index).apply_range_step(step);
+                self.push_columns(rows, leads, 0)
+            }
+            RowPlan::Replacement(_) => self.write_last_row(rows, 0, leads),
+            RowPlan::Append(plan) => self.commit_plan(rows, leads, plan),
         }
+    }
+
+    fn commit_plan(&mut self, rows: &DataFrame, leads: bool, tail: AppendTail<'_>) -> Result<()> {
+        let plan = tail.into_plan();
+        let replaces = plan.replaces();
         if replaces {
             // All label checks precede the replacement. Resource preparation also
             // precedes it, so a representability/capacity error cannot publish it.
@@ -267,8 +290,12 @@ impl DataFrame {
     /// the validated index plan is consumed first, then every
     /// column grows. Columns `rows` lacks are padded; computed metadata is retained,
     /// leaving the new rows stale.
-    fn push_rows(&mut self, rows: &DataFrame, leads: bool, plan: AppendPlan<'_>, start: usize) -> Result<()> {
+    pub(super) fn push_rows(&mut self, rows: &DataFrame, leads: bool, plan: AppendPlan<'_>, start: usize) -> Result<()> {
         Arc::make_mut(&mut self.index).apply_append(plan)?;
+        self.push_columns(rows, leads, start)
+    }
+
+    fn push_columns(&mut self, rows: &DataFrame, leads: bool, start: usize) -> Result<()> {
         let oh = rows.height - start;
         if leads {
             // The rows carry the leading columns in order (the live-streaming case):
@@ -312,8 +339,8 @@ impl DataFrame {
     /// Replace the last row whole with `src`'s row `src_row`, in place: each data column
     /// takes `src`'s value of the same name, or a missing value when `src` lacks it; a
     /// cached directive column is left to its refresh. The label is unchanged. `src`'s
-    /// columns must already have this frame's dtypes (`admit_rows` converts
-    /// them); every column is checked before the first write, so on an error nothing
+    /// values are admitted once, including lossless dtype conversion; every
+    /// column is checked before the first write, so on an error nothing
     /// changes. Only the last row changed, so each cached column keeps what it carries
     /// and is stale from that row on (see `invalidate_computed_forming_row`).
     pub fn replace_last_row(&mut self, src: &DataFrame, src_row: usize) -> Result<()> {
@@ -327,19 +354,27 @@ impl DataFrame {
             )));
         }
         let leads = self.leads_with(src);
+        let mut converted: Option<HashMap<usize, Column>> = None;
         for pos in 0..self.columns.len() {
+            if self.computed.contains_key(self.names[pos].as_str()) { continue; }
             if let Some(j) = Self::source_of(&self.names[pos], pos, src, leads) {
                 let to = self.columns[pos].dtype();
-                if !self.computed.contains_key(self.names[pos].as_str()) {
-                    self.check_lead_values(&self.names[pos], &src.columns[j], src_row, src_row + 1)?;
-                }
-                if src.columns[j].dtype() != to && !self.computed.contains_key(self.names[pos].as_str()) {
-                    // a differently typed value converts losslessly (as an append does)
-                    src.columns[j].slice(src_row, src_row + 1).convert_lossless(to)?;
+                self.check_lead_values(&self.names[pos], &src.columns[j], src_row, src_row + 1)?;
+                if src.columns[j].dtype() != to {
+                    let cell = src.columns[j].slice(src_row, src_row + 1).convert_lossless(to)?;
+                    converted.get_or_insert_with(HashMap::new).insert(j, cell);
                 }
             }
         }
-        self.write_last_row(src, src_row, leads)
+        match converted {
+            None => self.write_last_row(src, src_row, leads),
+            Some(cells) => self.write_last_row_with(|pos, name| {
+                Self::source_of(name, pos, src, leads).map(|j| match cells.get(&j) {
+                    Some(cell) => (cell, 0),
+                    None => (&src.columns[j], src_row),
+                })
+            }),
+        }
     }
 
     /// `src`'s column for this frame's column `pos` (named `name`): positional when
@@ -355,14 +390,18 @@ impl DataFrame {
     /// `src` whose columns already have this frame's dtypes (admitted rows): each data
     /// column takes its value, or a missing one; a cached column is left to its refresh.
     fn write_last_row(&mut self, src: &DataFrame, src_row: usize, leads: bool) -> Result<()> {
+        self.write_last_row_with(|pos, name| Self::source_of(name, pos, src, leads).map(|j| (&src.columns[j], src_row)))
+    }
+
+    fn write_last_row_with<'a>(&mut self, mut source: impl FnMut(usize, &str) -> Option<(&'a Column, usize)>) -> Result<()> {
         let last = self.height - 1;
         for pos in 0..self.columns.len() {
             if !self.computed.is_empty() && self.computed.contains_key(self.names[pos].as_str()) {
                 continue;
             }
-            match Self::source_of(&self.names[pos], pos, src, leads) {
-                Some(j) => self.columns[pos].set_last_from(&src.columns[j], src_row)?,
-                None => self.columns[pos].set_last_na(),
+            match source(pos, &self.names[pos]) {
+                Some((column, row)) => self.columns[pos].set_last_from_admitted(last, column, row),
+                None => self.columns[pos].set_last_na_admitted(last),
             }
         }
         self.invalidate_computed_forming_row(last);
@@ -393,19 +432,28 @@ impl DataFrame {
         src: &DataFrame,
         src_row: usize,
         ops: &[(usize, usize, CombineOp)],
+        arithmetic: bool,
     ) -> Result<()> {
-        for &(dst_col, src_col, op) in ops {
-            let (dst, from) = (&self.columns[dst_col], &src.columns[src_col]);
-            if !cannot_fail(dst, from) {
-                self.check_fold_with_lead(dst_col, dst, (row, op, false), [(from, src_row)])?;
-            }
-        }
+        if arithmetic { self.check_forming_arithmetic(row, src, src_row, ops)?; }
         for &(dst_col, src_col, op) in ops {
             self.columns[dst_col].combine_at(row, op, &src.columns[src_col], src_row)?;
         }
         self.invalidate_computed_forming_row(row);
         #[cfg(debug_assertions)]
         self.debug_check();
+        Ok(())
+    }
+
+    // Schema-admitted floating plans have already proved this loop vacuous.
+    // Independent checked entries and fallible layouts retain the full preflight.
+    #[inline(never)]
+    fn check_forming_arithmetic(&self, row: usize, src: &DataFrame, src_row: usize, ops: &[(usize, usize, CombineOp)]) -> Result<()> {
+        for &(dst_col, src_col, op) in ops {
+            let (dst, from) = (&self.columns[dst_col], &src.columns[src_col]);
+            if !cannot_fail(dst, from) {
+                self.check_fold_with_lead(dst_col, dst, (row, op, false), [(from, src_row)])?;
+            }
+        }
         Ok(())
     }
 
@@ -422,16 +470,22 @@ impl DataFrame {
         if self.height != 1 || before.height != 1 || self.names != before.names || self.columns.iter().zip(&before.columns).any(|(a, b)| a.dtype() != b.dtype()) || missing.len() < src.width() {
             return Err(VolasError::Shape("fold checkpoint schema or missing mask does not match".into()));
         }
-        for &(dst_col, src_col, op) in ops {
-            let dst = if replace { &before.columns[dst_col] } else { &self.columns[dst_col] };
-            let from = &src.columns[src_col];
-            if !cannot_fail(dst, from) { self.check_fold_with_lead(dst_col, dst, (0, op, false), [(from, 0)])?; }
+        self.fold_checkpoint_admitted(before, src, ops, missing, replace, true)
+    }
+
+    pub(super) fn fold_checkpoint_admitted(&mut self, before: &mut DataFrame, src: &DataFrame, ops: &[(usize, usize, CombineOp)], missing: &[bool], replace: bool, arithmetic: bool) -> Result<()> {
+        if arithmetic {
+            for &(dst_col, src_col, op) in ops {
+                let dst = if replace { &before.columns[dst_col] } else { &self.columns[dst_col] };
+                let from = &src.columns[src_col];
+                if !cannot_fail(dst, from) { self.check_fold_with_lead(dst_col, dst, (0, op, false), [(from, 0)])?; }
+            }
         }
         for &(dst_col, src_col, op) in ops {
             if replace {
-                self.columns[dst_col].set_last_from(&before.columns[dst_col], 0)?;
+                self.columns[dst_col].set_last_from_admitted(0, &before.columns[dst_col], 0);
             } else {
-                before.columns[dst_col].set_last_from(&self.columns[dst_col], 0)?;
+                before.columns[dst_col].set_last_from_admitted(0, &self.columns[dst_col], 0);
             }
             self.columns[dst_col].combine_reduced_at(0, op, &src.columns[src_col], 0, missing[src_col])?;
         }
@@ -485,15 +539,16 @@ impl DataFrame {
     /// repeated. Missing integer / bool / string cells retain the destination's
     /// unused payload, as `refold_forming_row` does; floats keep the reduced NaN bits.
     pub(crate) fn write_folded_row(&mut self, src: &DataFrame, ops: &[(usize, usize, CombineOp)]) -> Result<()> {
+        let last = self.height - 1;
         for &(dst_col, src_col, _) in ops {
             let from = &src.columns[src_col];
             if matches!(from, Column { data: ColumnData::F64(_) } | Column { data: ColumnData::F32(_) }) || from.is_valid(0) {
-                self.columns[dst_col].set_last_from(from, 0)?;
+                self.columns[dst_col].set_last_from_admitted(last, from, 0);
             } else {
-                self.columns[dst_col].set_last_na();
+                self.columns[dst_col].set_last_na_admitted(last);
             }
         }
-        self.invalidate_computed_forming_row(self.height - 1);
+        self.invalidate_computed_forming_row(last);
         Ok(())
     }
 
@@ -542,10 +597,16 @@ impl DataFrame {
         ops: &[(usize, usize, CombineOp)],
     ) -> Result<()> {
         self.check_fold_positions(row, src, None, ops)?;
-        for &(dst_col, src_col, op) in ops {
-            let (dst, from) = (&self.columns[dst_col], &src.columns[src_col]);
-            if !cannot_fail(dst, from) {
-                self.check_fold_with_lead(dst_col, dst, (row, op, true), (0..src.height).map(|r| (from, r)))?;
+        self.refold_admitted(row, src, ops, true)
+    }
+
+    pub(super) fn refold_admitted(&mut self, row: usize, src: &DataFrame, ops: &[(usize, usize, CombineOp)], arithmetic: bool) -> Result<()> {
+        if arithmetic {
+            for &(dst_col, src_col, op) in ops {
+                let (dst, from) = (&self.columns[dst_col], &src.columns[src_col]);
+                if !cannot_fail(dst, from) {
+                    self.check_fold_with_lead(dst_col, dst, (row, op, true), (0..src.height).map(|r| (from, r)))?;
+                }
             }
         }
         for &(dst_col, src_col, op) in ops {
@@ -618,7 +679,7 @@ fn py_str(s: &str) -> String {
 /// Whether folding `src` into `dst` cannot fail, so its check is skipped (the live
 /// float bar): a float column of the source's own dtype takes every aggregation.
 #[inline]
-fn cannot_fail(dst: &Column, src: &Column) -> bool {
+pub(super) fn cannot_fail(dst: &Column, src: &Column) -> bool {
     dst.dtype().is_float() && dst.dtype() == src.dtype()
 }
 

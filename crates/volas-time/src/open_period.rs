@@ -1,7 +1,7 @@
 //! The open (forming) period of a cumulation: the small frame of fine bars whose
 //! cumulation is the forming coarse bar.
 
-use volas_core::{DataFrame, IndexKind, Result, VolasError};
+use volas_core::{AdmittedAppend, AdmittedBar, FoldLayout,DataFrame, IndexKind, Result, VolasError};
 
 /// The fine bars of the period still forming — the small frame a time-frame
 /// frame (and a [`crate::Cumulator`]) keeps, whose cumulation is the forming coarse
@@ -13,6 +13,7 @@ use volas_core::{DataFrame, IndexKind, Result, VolasError};
 #[derive(Clone, Debug)]
 pub struct OpenPeriod {
     bars: DataFrame,
+    layout: Option<FoldLayout>,
 }
 
 impl OpenPeriod {
@@ -23,7 +24,7 @@ impl OpenPeriod {
         if ts.is_empty() {
             return Err(VolasError::Value("an open period needs at least one bar".into()));
         }
-        Ok(OpenPeriod { bars })
+        Ok(OpenPeriod { bars, layout: None })
     }
 
     /// The bars, one per timestamp in increasing order.
@@ -53,9 +54,31 @@ impl OpenPeriod {
         Ok(())
     }
 
+    /// Consume a complete schema-admitted bar without checking its columns again.
+    pub fn push_bar(&mut self, bar: &AdmittedBar<'_, '_>) -> Result<()> {
+        self.check_bar(bar)?.land()
+    }
+
+    /// Prepare this bar's single append boundary before any displayed or
+    /// checkpoint row changes. The returned plan holds the period exclusively.
+    pub fn check_bar<'f, 'r>(&'f mut self, bar: &'r AdmittedBar<'_, '_>) -> Result<AdmittedAppend<'f, 'r>> {
+        if !self.layout.as_ref().is_some_and(|p| bar.accepts(p) && p.matches(&self.bars)) {
+            self.layout = Some(bar.project(&self.bars)?);
+        }
+        bar.prepare_append(&mut self.bars, self.layout.as_ref().unwrap())
+    }
+
+    /// Admit a timed bar's one index boundary and bind it to this open period.
+    /// Aggregates consume its order/re-send decision instead of comparing again.
+    pub fn check_timed<'f, 'r, 'a, 'p, 'z>(&'f mut self, timed: &crate::TimedBar<'r, 'a, 'p, 'z>) -> Result<OpenBar<'f, 'r, 'a, 'p, 'z>> {
+        let previous = self.last_ts();
+        let append = self.check_bar(timed.bar())?;
+        Ok(OpenBar { append, bar: timed.bar(), previous, timestamp: timed.timestamp(), key: timed.key(), tf: timed.time_frame(), tz: timed.zone() })
+    }
+
     /// The period with only the columns `names` (a projection keeps every bar).
     pub fn select(&self, names: &[String]) -> Result<OpenPeriod> {
-        Ok(OpenPeriod { bars: self.bars.select(names)? })
+        Ok(OpenPeriod { bars: self.bars.select(names)?, layout: None })
     }
 }
 
@@ -78,3 +101,27 @@ fn stamps(bars: &DataFrame) -> &[i64] {
 #[cfg(test)]
 #[path = "open_period_tests.rs"]
 mod tests;
+
+/// A timed, schema-admitted bar whose append/re-send decision is bound to the
+/// exclusively borrowed open period. Only `OpenPeriod::check_timed` constructs it.
+pub struct OpenBar<'f, 'r, 'a, 'p, 'z> {
+    append: AdmittedAppend<'f, 'r>,
+    bar: &'r AdmittedBar<'a, 'p>,
+    previous: i64,
+    timestamp: i64,
+    key: i64,
+    tf: crate::TimeFrame,
+    tz: &'z volas_core::Tz,
+}
+impl<'a, 'p> OpenBar<'_, '_, 'a, 'p, '_> {
+    /// The one Index-owner routing decision.
+    pub fn replaces(&self) -> bool { self.append.replaces() }
+    /// Publish the raw fine bar after the aggregate and destination accept it.
+    pub fn land(self) -> Result<()> { self.append.land() }
+    pub(crate) fn bar(&self) -> &AdmittedBar<'a, 'p> { self.bar }
+    pub(crate) fn previous(&self) -> i64 { self.previous }
+    pub(crate) fn timestamp(&self) -> i64 { self.timestamp }
+    pub(crate) fn key(&self) -> i64 { self.key }
+    pub(crate) fn time_frame(&self) -> crate::TimeFrame { self.tf }
+    pub(crate) fn zone(&self) -> &volas_core::Tz { self.tz }
+}

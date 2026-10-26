@@ -23,6 +23,7 @@ pub struct Cumulator {
     /// Absent only before any bar or while the open period cannot aggregate (an
     /// integer overflow is reported by frame/last, or when the period closes).
     aggregate: Option<PeriodAggregate>,
+    fold_layout: Option<volas_core::FoldLayout>,
 }
 
 impl Cumulator {
@@ -34,6 +35,7 @@ impl Cumulator {
             closed: None,
             open: None,
             aggregate: None,
+            fold_layout: None,
         }
     }
 
@@ -146,19 +148,27 @@ impl Cumulator {
     fn append_one(&mut self, fine: &DataFrame) -> Result<bool> {
         let (Some(open), Some(aggregate)) = (&mut self.open, &mut self.aggregate) else { return Ok(false) };
         let IndexKind::Datetime(ts, _) = fine.index().kind() else { return Ok(false) };
-        if ts.len() != 1 || ts[0] < open.last_ts() { return Ok(false); }
-        let bars = open.bars().admit_data_rows(fine)?;
+        if ts.len() != 1 { return Ok(false); }
+        if !self.fold_layout.as_ref().is_some_and(|p| p.matches(open.bars())) {
+            self.fold_layout = Some(volas_core::FoldLayout::new(open.bars(), |n| self.spec.agg_for(n).as_combine_op())?);
+        }
+        let admitted = self.fold_layout.as_ref().unwrap().admit(open.bars(), fine)?;
+        let proof = admitted.bar(0)?;
+        let bars = proof.rows();
         let tz = open.bars().index().tz();
-        let key = self.tf.period_start(ts[0], &tz)?;
+        let timed = crate::TimedBar::new(&proof, self.tf, &tz)?;
+        let key = timed.key();
         let open_key = match aggregate.current().index().kind() {
             IndexKind::Datetime(keys, _) => keys[0],
             _ => unreachable!("an aggregate has a datetime index"), // LCOV_EXCL_LINE
         };
+        let push = open.check_timed(&timed)?;
         if key != open_key {
+            // The unused plan lends only until this branch; the boundary is checked.
             let index = Index::new(None, IndexKind::Datetime(ts.to_vec(), tz.clone()))?.with_name(open.bars().index().name().map(String::from));
             let columns = bars.columns().iter().map(|c| c.slice(0, 1)).collect();
             let next = OpenPeriod::new(DataFrame::new(bars.names().to_vec(), columns, Some(index))?)?;
-            let next_aggregate = PeriodAggregate::new(&next, &self.spec, self.tf, &tz).ok();
+            let next_aggregate = PeriodAggregate::from_bar(&timed, open.bars().index().name().map(String::from)).ok();
             match &mut self.closed {
                 Some(closed) => closed.append(aggregate.current())?,
                 None => self.closed = Some(aggregate.current().clone()),
@@ -166,10 +176,10 @@ impl Cumulator {
             self.open = Some(next);
             self.aggregate = next_aggregate;
         } else {
-            let resent = ts[0] == open.last_ts();
-            open.push(&bars)?;
             // append has always deferred errors in the still-open aggregate.
-            if aggregate.push_admitted(&bars, resent, ts[0]).is_err() { self.aggregate = None; }
+            let failed = aggregate.push_bar(&push).is_err();
+            push.land()?;
+            if failed { self.aggregate = None; }
         }
         Ok(true)
     }

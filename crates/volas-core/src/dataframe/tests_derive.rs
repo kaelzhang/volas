@@ -605,7 +605,7 @@ fn an_integer_fold_cannot_make_the_float_lead_join_inexact() {
     let before = tail.clone();
     let one = DataFrame::new(vec!["close".into()], vec![Column::i64(vec![1])], None).unwrap();
     let ops = [(0, 0, crate::CombineOp::Sum)];
-    assert!(matches!(tail.fold_forming_row(0, &one, 0, &ops), Err(VolasError::DType(_))));
+    assert!(matches!(tail.fold_forming_row(0, &one, 0, &ops, true), Err(VolasError::DType(_))));
     assert!(tail.equals(&before));
     let src = DataFrame::new(vec!["close".into()], vec![Column::i64(vec![1 << 53, 1])], None).unwrap();
     assert!(matches!(tail.refold_forming_row(0, &src, &ops), Err(VolasError::DType(_))));
@@ -745,12 +745,12 @@ fn exact_integer_folds_with_float_history_succeed_and_inexact_folds_are_atomic()
     tail.set_column("close", Column::i64(vec![3, 4])).unwrap();
     let bar = DataFrame::new(vec!["close".into()], vec![Column::i64(vec![10])], None).unwrap();
     let ops = [(0, 0, crate::CombineOp::Sum)];
-    tail.fold_forming_row(0, &bar, 0, &ops).unwrap();
+    tail.fold_forming_row(0, &bar, 0, &ops, true).unwrap();
     assert_eq!(tail.column("close").unwrap().get_i64(0), 13);
     assert_eq!(tail.led(&tail, tail.lead_rows()).column("close").unwrap().get_f64(tail.lead_rows()), 13.0);
     let before = tail.clone();
     let bad = DataFrame::new(vec!["close".into()], vec![Column::i64(vec![1 << 53])], None).unwrap();
-    assert!(matches!(tail.fold_forming_row(0, &bad, 0, &ops), Err(VolasError::DType(_))));
+    assert!(matches!(tail.fold_forming_row(0, &bad, 0, &ops, true), Err(VolasError::DType(_))));
     assert!(tail.equals(&before));
 }
 
@@ -884,7 +884,7 @@ fn an_integer_history_keeps_native_integer_folds_outside_float_precision() {
     source.set_computed("ma", Arc::new(()), Reach { lookback: 2, resume: 3, continuation: 2, history: History::Window });
     let mut tail = source.rows(2, 4, &NoReplay);
     let bar = DataFrame::new(vec!["volume".into()], vec![Column::i64(vec![1 << 53])], None).unwrap();
-    tail.fold_forming_row(0, &bar, 0, &[(0, 0, crate::CombineOp::Sum)]).unwrap();
+    tail.fold_forming_row(0, &bar, 0, &[(0, 0, crate::CombineOp::Sum)], true).unwrap();
     assert_eq!(tail.column("volume").unwrap().get_i64(0), (1 << 53) + 3);
     let joined = tail.led(&tail, tail.lead_rows());
     assert_eq!(joined.column("volume").unwrap().dtype(), crate::DType::I64);

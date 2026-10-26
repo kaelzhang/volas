@@ -46,6 +46,8 @@ pip install volas
 
 Rust 写入会在发布前检查完整选择：`Column::scatter` 检查位置和值数量，`DataFrame::append` 在提交前检查 schema、值和一份索引接纳计划；`OpenPeriod::push` 复用相同的受检追加。已聚合行通过 `check_folded_row(...).land()` 发布，原始追加及聚合提交 helper 为私有。`Series::from_column` 和 `DataFrame::from_columns` 根据接纳的形状构建受检位置索引；NumPy 与 DLPack 导出由 Column owner 完成一次类型分派。
 
+组合式实时 fold 使用不可伪造的 `FoldLayout`、`AdmittedBars`、`TimedBar` 与 `OpenBar` 凭证：schema、位置与浮点 fold 不失败的结论接纳一次，周期 key 计算一次，下游消费凭证；schema 变更使旧计划失效，独立受检写入口保留。单条替换消费不增长索引的凭证，Range 延长仅执行一次常数时间受检步骤。DLPack tensor、shape 和 keepalive 共用一份分配；Series factory 继承物理列存储的长度可表示性，任意独立位置长度仍需受检；源缓存列若属于目标的数据列，会按普通值接纳，源计算身份与历史不会进入 open period。
+
 
 ## 为什么选 volas
 

@@ -73,12 +73,12 @@ fn append_by_name_pads_a_missing_column_with_nan() {
 #[test]
 fn fold_forming_row_writing_a_nan() {
     let mut df = known_clean();
-    df.fold_forming_row(2, &row(NAN, NAN), 0, &[(0, 0, CombineOp::Replace)])
+    df.fold_forming_row(2, &row(NAN, NAN), 0, &[(0, 0, CombineOp::Replace)], true)
         .unwrap();
     assert!(x(&df).has_nan());
     // a running max / sum folding in a NaN too
     let mut df = known_clean();
-    df.fold_forming_row(2, &row(NAN, NAN), 0, &[(0, 0, CombineOp::Sum)])
+    df.fold_forming_row(2, &row(NAN, NAN), 0, &[(0, 0, CombineOp::Sum)], true)
         .unwrap();
     assert!(x(&df).has_nan());
 }
@@ -90,7 +90,7 @@ fn fold_forming_row_over_the_only_nan() {
     let src = DataFrame::new(vec!["x".into()], vec![Column::f64(vec![5.0])], None).unwrap();
     // a missing aggregate stays missing through a fold; re-cumulating the period
     // (its re-sent bar) writes the value and clears the fact
-    df.fold_forming_row(1, &src, 0, &[(0, 0, CombineOp::Replace)])
+    df.fold_forming_row(1, &src, 0, &[(0, 0, CombineOp::Replace)], true)
         .unwrap();
     assert!(x(&df).has_nan());
     df.refold_forming_row(1, &src, &[(0, 0, CombineOp::Replace)]).unwrap();

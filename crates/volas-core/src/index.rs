@@ -5,7 +5,7 @@ use crate::datetime::NAT;
 use crate::error::{Result, VolasError};
 use crate::tz::Tz;
 mod admission;
-pub(crate) use admission::{AppendMode, AppendPlan, IndexInput};
+pub(crate) use admission::{AppendMode, AppendPlan, AppendTail, IndexInput, RowPlan};
 use admission::ValidatedLabels;
 
 /// Row labels plus an optional name.
@@ -198,6 +198,12 @@ impl Index {
     #[inline]
     pub fn positional(len: usize) -> Result<Self> {
         ValidatedLabels::range(0, len).map(|labels| Self::from_validated(None, labels))
+    }
+
+    /// Inherit the representable length of admitted physical column storage.
+    #[inline]
+    pub(crate) fn for_column(column: &Column) -> Self {
+        Self::from_validated(None, ValidatedLabels::column(column))
     }
 
     /// Whether this index carries the checked strictly increasing datetime fact.
@@ -663,10 +669,15 @@ fn validate_labels(kind: &IndexKind) -> Result<LabelOrder> {
 #[inline]
 fn validate_range(start: i64, len: usize) -> Result<()> {
     if len > 0 && i64::try_from(len - 1).ok().and_then(|span| start.checked_add(span)).is_none() {
-        return Err(VolasError::Overflow("range index labels overflow int64".into()));
+        return Err(range_overflow());
     }
     Ok(())
 }
+
+/// Keep allocation and error construction out of positional factories and steps.
+#[cold]
+#[inline(never)]
+fn range_overflow() -> VolasError { VolasError::Overflow("range index labels overflow int64".into()) }
 
 /// Detailed failures stay off the valid, single-pass datetime construction path.
 #[cold]

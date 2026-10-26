@@ -19,6 +19,14 @@ impl ValidatedLabels {
         Ok(Self { kind: IndexKind::Range { start, len }, order: LabelOrder::ascending(len) })
     }
 
+    /// A checked Column owns valid Rust storage. Its length is bounded by a
+    /// real slice/Vec allocation (at most isize::MAX bytes), so positional i64
+    /// labels cannot overflow. No independent arbitrary length enters here.
+    pub(super) fn column(column: &crate::Column) -> Self {
+        let len = column.len();
+        Self { kind: IndexKind::Range { start: 0, len }, order: LabelOrder::ascending(len) }
+    }
+
     pub(super) fn into_parts(self) -> (IndexKind, LabelOrder) { (self.kind, self.order) }
 }
 
@@ -69,7 +77,50 @@ pub(crate) struct IndexInput<'target, 'rows> {
     target: &'target Index,
     rows: &'rows Index,
 }
+/// Checked positional continuation, consumed only by the frame's append owner.
+pub(crate) struct RangeStep { len: usize }
+pub(crate) struct Replacement { _private: () }
+
+/// The minimal proof for a row operation: replacements have no appended labels
+/// or capacity work. Only a genuine appended tail needs the general plan.
+pub(crate) enum RowPlan<'a> {
+    Range(RangeStep),
+    Replacement(Replacement),
+    Append(AppendTail<'a>),
+}
+/// A general row tail, sealed by Index's row router. A replacement carried by
+/// this type always has appended rows; zero-growth replacements use their own
+/// proof. Other modules cannot wrap an arbitrary generic Index plan as a tail.
+#[repr(transparent)]
+pub(crate) struct AppendTail<'a> { plan: AppendPlan<'a> }
+impl<'a> AppendTail<'a> {
+    #[inline]
+    pub(crate) fn into_plan(self) -> AppendPlan<'a> { self.plan }
+}
+
+impl RowPlan<'_> {
+    pub(crate) fn compact_from(&self) -> usize { match self { Self::Append(p) => p.plan.compact_from(), _ => 0 } }
+    pub(crate) fn replaces(&self) -> bool { match self { Self::Replacement(_) => true, Self::Append(p) => p.plan.replaces(), _ => false } }
+}
 impl<'rows> IndexInput<'_, 'rows> {
+    pub(crate) fn range_step(&self) -> Result<Option<RangeStep>> {
+        let (IndexKind::Range { start, len }, IndexKind::Range { start: 0, len: added }) = (&self.target.kind, &self.rows.kind) else { return Ok(None); };
+        let total = len.checked_add(*added).ok_or_else(|| VolasError::Overflow("range index length overflow".into()))?;
+        validate_range(*start, total)?;
+        Ok(Some(RangeStep { len: total }))
+    }
+
+    pub(crate) fn row_plan(self, from: usize, shown: usize) -> Result<RowPlan<'rows>> {
+        if let Some(step) = self.range_step()? { return Ok(RowPlan::Range(step)); }
+        if self.rows.len() == 1 {
+            let replaces = !self.rows.is_unlabelled() && !self.target.is_empty()
+                && self.target.same_label(self.target.len() - 1, self.rows, 0);
+            if replaces { return Ok(RowPlan::Replacement(Replacement { _private: () })); }
+            return self.target.plan_routed(self.rows, AppendMode::Rows { from, shown }, false).map(|plan| RowPlan::Append(AppendTail { plan }));
+        }
+        self.target.plan_compatible(self.rows, AppendMode::Rows { from, shown }).map(|plan| RowPlan::Append(AppendTail { plan }))
+    }
+
     pub(crate) fn plan(self, mode: AppendMode) -> Result<AppendPlan<'rows>> {
         self.target.plan_compatible(self.rows, mode)
     }
@@ -92,6 +143,12 @@ impl AppendPlan<'_> {
 }
 
 impl Index {
+    pub(crate) fn apply_range_step(&mut self, step: RangeStep) {
+        let IndexKind::Range { len, .. } = &mut self.kind else { unreachable!("range admission binds the target kind") }; // LCOV_EXCL_LINE
+        *len = step.len;
+        self.order = LabelOrder::ascending(step.len);
+    }
+
     pub(super) fn validated_slice(&self, start: usize, end: usize) -> ValidatedSlice<'_> {
         let start = start.min(self.len());
         let end = end.max(start).min(self.len());
@@ -126,12 +183,16 @@ impl Index {
     }
 
     fn plan_compatible<'a>(&self, other: &'a Index, mode: AppendMode) -> Result<AppendPlan<'a>> {
+        let replaces = matches!(mode, AppendMode::Rows { .. }) && !other.is_unlabelled()
+            && !self.is_empty() && !other.is_empty() && self.same_label(self.len() - 1, other, 0);
+        self.plan_routed(other, mode, replaces)
+    }
+
+    fn plan_routed<'a>(&self, other: &'a Index, mode: AppendMode, replaces: bool) -> Result<AppendPlan<'a>> {
         let (from, shown) = match mode {
             AppendMode::Rows { from, shown } => (from, shown),
             _ => (0, 0),
         };
-        let replaces = matches!(mode, AppendMode::Rows { .. }) && !other.is_unlabelled()
-            && !self.is_empty() && !other.is_empty() && self.same_label(self.len() - 1, other, 0);
         // Checked datetime sources already prove their internal order. Every
         // append mode shares the one cross-boundary comparison below.
         if matches!(mode, AppendMode::NewRows) && !matches!(&other.kind, IndexKind::Datetime(..)) {

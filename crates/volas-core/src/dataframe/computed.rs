@@ -129,7 +129,7 @@ impl DataFrame {
     /// current rows), its history starting at this frame's row 0, reading `reach` rows
     /// around its own.
     pub fn set_computed(&mut self, name: &str, directive: Directive, reach: Reach) {
-        self.computed.insert(
+        let new_role = self.computed.insert(
             Arc::from(name),
             ComputedMeta {
                 directive,
@@ -146,7 +146,8 @@ impl DataFrame {
                 lost: None,
                 first_present: None,
             },
-        );
+        ).is_none();
+        if new_role { Arc::make_mut(&mut self.names); }
         let (origin, height) = (self.origin, self.height);
         if let (Some(pos), Some(meta)) = (self.name_to_idx.get(name), self.computed.get_mut(name)) {
             meta.note_written(&self.columns[*pos], origin, 0, height);
@@ -403,14 +404,6 @@ impl DataFrame {
         self.write_computed(name, row, 1, |column| write_scalar_value(name, column, row, value))
     }
 
-    /// Drop the computed (cached-directive) status of the column at `col`, if any.
-    fn drop_computed_at(&mut self, col: usize) {
-        if let Some(name) = self.names.get(col) {
-            self.computed.remove(name.as_str());
-            self.note_computed();
-        }
-    }
-
     /// The last row changed in place (a time-frame forming bar folded or replaced, or a
     /// row appended with the last row's label): mark each cached column stale from
     /// `last_row` on but **keep** what it carries. A column that was valid through that
@@ -442,13 +435,17 @@ impl DataFrame {
     /// read raises until `fulfill`, exactly like an append). Conservative (no per-column
     /// dependency tracking), but writes are rare relative to reads.
     pub(super) fn invalidate_computed_on_write_at(&mut self, col: usize) {
-        self.drop_computed_at(col);
+        // Only CellWrites::land calls this: its opaque plan has already
+        // checked every column position and cannot change the schema's width.
+        let name = &self.names[col];
+        if self.computed.remove(name.as_str()).is_some() { Arc::make_mut(&mut self.names); }
+        self.note_computed();
         self.stale_every_computed();
     }
 
     /// Name-based variant for the `df[name] = value` whole-column replace path.
     pub fn invalidate_computed_on_write(&mut self, written_name: &str) {
-        self.computed.remove(written_name);
+        if self.computed.remove(written_name).is_some() { Arc::make_mut(&mut self.names); }
         self.note_computed();
         self.stale_every_computed();
     }

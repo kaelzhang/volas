@@ -84,7 +84,8 @@ impl DataFrame {
     /// Build a frame that **shares this frame's schema** (names + lookup, both
     /// `Arc`-cloned) over freshly derived `columns` / `index`, with no cached column and
     /// no lead — the shape every derivation starts from. Row 0 of the result is at
-    /// absolute position `origin`.
+    /// absolute position `origin`. Slice/take/reduce retain the source dtypes;
+    /// coercion retires the schema identity at its checked conversion boundary.
     pub(super) fn same_schema(&self, columns: Vec<Column>, index: Index, origin: usize) -> DataFrame {
         let height = columns.first().map_or(index.len(), |c| c.len()); // no columns: the index
         DataFrame {

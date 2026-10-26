@@ -134,6 +134,7 @@ impl<T: Element> Buffer<T> {
     /// # Safety
     /// `ptr` must point to `len` initialised, contiguous `T` that stay valid and
     /// immutable for as long as `guard` is alive; `guard` must own that allocation.
+    /// The region must be a valid Rust slice, including the `isize::MAX` byte bound.
     #[inline]
     pub unsafe fn from_foreign(
         ptr: NonNull<T>,
