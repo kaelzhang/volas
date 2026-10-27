@@ -286,8 +286,7 @@ impl PySeries {
     fn extreme_rows(&self, n: usize, ascending: bool) -> PyResult<PySeries> {
         let col = self.inner.data();
         col.require_numeric().map_err(pyerr)?;
-        let mut positions: Vec<usize> = col.argsort(ascending).into_iter()
-            .filter(|&i| col.is_valid(i)).collect();
+        let mut positions: Vec<usize> = col.argsort(ascending);
         positions.truncate(n);
         self.reindexed(&positions)
     }

@@ -150,7 +150,7 @@ via DLPack (`np.from_dlpack(series)`) — see
 [Arrow & DLPack interop](interop.md#arrow--dlpack-interop-zero-copy).
 
 
-`nlargest(n)` and `nsmallest(n)` drop missing values and validate only the final
+`nlargest(n)` and `nsmallest(n)` keep missing values last and validate only the final
 selection after truncation. With a datetime index, an empty or single-row result
 is valid; a longer result must retain increasing timestamps, even if sorting all
 values would produce an invalid index.
