@@ -11,20 +11,27 @@ sys.path.insert(0, str(ROOT / "scripts"))
 import pgo_asm  # noqa: E402
 from build_release import source_hash  # noqa: E402
 
+FOLD_CONTAINER = (
+    "volas_rs::frame_tf::_$LT$impl$u20$volas_rs..frame..PyDataFrame$GT$::fold_bars"
+)
+EXECUTE_CONTAINER = "volas_directive::exec::execute_node"
+
 
 @pytest.mark.parametrize("suffix", ["", "::h0123456789abcdef"])
-def test_final_report_covers_inlined_inventory_without_zero_counts(tmp_path, monkeypatch, suffix):
+@pytest.mark.parametrize("prefix", ["", "_"])
+@pytest.mark.parametrize("fold", [FOLD_CONTAINER, "volas_rs::frame_tf::<impl volas_rs::frame::PyDataFrame>::fold_bars"])
+def test_final_report_covers_inlined_inventory_without_zero_counts(tmp_path, monkeypatch, suffix, prefix, fold):
     site = tmp_path / "site"
     site.mkdir()
     (site / "volas_rs.so").touch()
     source = source_hash(ROOT)
     monkeypatch.setattr(pgo_asm, "manifest", lambda _: {"identity": {"source": source}})
-    monkeypatch.setattr(pgo_asm, "disassemble", lambda *a: """00001000 <volas_rs::frame_tf::PyDataFrame::fold_bars>:
+    monkeypatch.setattr(pgo_asm, "disassemble", lambda *a: f"""00001000 <{prefix}{fold}{suffix}>:
 1000: bl 0x2000
 1004: ret
-00002000 <volas_directive::exec::execute_node>:
+00002000 <{prefix}{EXECUTE_CONTAINER}{suffix}>:
 2000: ret
-""".replace(">:", suffix + ">:"))
+""")
     inventory = tmp_path / "hot_asm_inventory.txt"
     inventory.write_text("core|fold_forming_row|max|fold\ndirective|execute|-|eval\n")
     monkeypatch.setattr(pgo_asm, "__file__", str(tmp_path / "pgo_asm.py"))
@@ -36,7 +43,8 @@ def test_final_report_covers_inlined_inventory_without_zero_counts(tmp_path, mon
     assert report["missing_symbols"] == []
     assert report["status"] == "review-required"
     assert all(f["non_nop"] > 0 for f in report["functions"].values())
-    assert "volas_rs::frame_tf::PyDataFrame::fold_bars" + suffix in report["functions"]
+    assert prefix + fold + suffix in report["functions"]
+    assert all(e["isolated_instruction_count"] is None for e in report["inline_sites"].values())
     assert all("source" in evidence for evidence in report["inline_sites"].values())
 
 
@@ -77,7 +85,7 @@ def test_incomplete_base_report_cannot_claim_complete_comparison(tmp_path, monke
     site.mkdir()
     (site / "volas_rs.so").touch()
     monkeypatch.setattr(pgo_asm, "manifest", lambda _: {"identity": {"source": source_hash(ROOT)}})
-    monkeypatch.setattr(pgo_asm, "disassemble", lambda *a: """00001000 <volas_rs::frame_tf::PyDataFrame::fold_bars>:
+    monkeypatch.setattr(pgo_asm, "disassemble", lambda *a: f"""00001000 <{FOLD_CONTAINER}>:
 1000: ret
 00002000 <volas_directive::exec::execute_node>:
 2000: ret
@@ -97,3 +105,82 @@ def test_incomplete_base_report_cannot_claim_complete_comparison(tmp_path, monke
     assert report["missing_symbols"] == []
     assert report["base_missing_symbols"] == missing
     assert report["comparison_complete"] is False
+
+
+@pytest.fixture
+def inline_report_entry(tmp_path, monkeypatch):
+    """Run the real report entry with controlled linked text and real source."""
+    site = tmp_path / "site"
+    site.mkdir()
+    (site / "volas_rs.so").touch()
+    monkeypatch.setattr(pgo_asm, "manifest", lambda _: {"identity": {"source": source_hash(ROOT)}})
+    monkeypatch.setattr(pgo_asm, "output", lambda cmd: (
+        "host: aarch64-apple-darwin" if "-Vv" in cmd else "/toolchain"
+    ))
+    (tmp_path / "hot_asm_inventory.txt").write_text(
+        "core|fold_forming_row|max|fold\ndirective|execute|-|eval\n"
+    )
+    monkeypatch.setattr(pgo_asm, "__file__", str(tmp_path / "pgo_asm.py"))
+    report_path = tmp_path / "report/report.json"
+
+    def run(fold=FOLD_CONTAINER, execute=EXECUTE_CONTAINER, base=None):
+        monkeypatch.setattr(pgo_asm, "disassemble", lambda *a: (
+            f"00001000 <{fold}>:\n1000: ret\n"
+            f"00002000 <{execute}>:\n2000: ret\n"
+        ))
+        argv = ["pgo_asm", "--site", str(site), "--output", str(report_path.parent), "--source", str(ROOT)]
+        if base is not None:
+            base_path = tmp_path / "base"
+            base_path.mkdir()
+            (base_path / "report.json").write_text(json.dumps(base))
+            argv += ["--base-report", str(base_path)]
+        monkeypatch.setattr(sys, "argv", argv)
+        pgo_asm.main()
+
+    return run, report_path
+
+
+@pytest.mark.parametrize("item,symbol", [
+    ("execute", "other_volas_directive::exec::execute_node"),
+    ("execute", "other::volas_directive::exec::execute_node"),
+    ("execute", "volas_directive::wrong::execute_node"),
+    ("execute", EXECUTE_CONTAINER + "_other"),
+    ("execute", EXECUTE_CONTAINER + "::h0123456789abcdeg"),
+    ("execute", EXECUTE_CONTAINER + "::h0123456789abcdef_extra"),
+    ("fold_forming_row", "volas_rs::frame_tf::WrongType::fold_bars"),
+    ("fold_forming_row", FOLD_CONTAINER.replace("PyDataFrame", "WrongType")),
+    ("fold_forming_row", "volas_rs::frame_tf::<impl volas_rs::frame::WrongType>::fold_bars"),
+    ("fold_forming_row", "other_" + FOLD_CONTAINER),
+    ("fold_forming_row", FOLD_CONTAINER.replace("..frame..", "..wrong..")),
+    ("fold_forming_row", FOLD_CONTAINER + "_other"),
+])
+def test_final_entry_rejects_unrelated_inline_container(inline_report_entry, item, symbol):
+    run, report_path = inline_report_entry
+    kwargs = {"execute" if item == "execute" else "fold": symbol}
+    with pytest.raises(ValueError, match="missing inventory symbols"):
+        run(**kwargs)
+    report = json.loads(report_path.read_text())
+    assert report["missing_symbols"] == [item]
+    assert report["comparison_complete"] is False
+    assert item not in report["inline_sites"]
+    assert symbol not in report["functions"]
+
+
+@pytest.mark.parametrize("missing", [
+    {}, {"missing_symbols": None}, {"missing_symbols": ""},
+    {"missing_symbols": {}}, {"missing_symbols": [None]},
+    {"missing_symbols": ["execute", 1]},
+], ids=["absent", "null", "string", "object", "null-element", "mixed-elements"])
+def test_final_entry_rejects_invalid_base_missing_symbols(inline_report_entry, missing):
+    run, report_path = inline_report_entry
+    with pytest.raises(ValueError, match="base report.*missing_symbols.*list of strings"):
+        run(base={"functions": {}, "comparison_complete": False, **missing})
+    assert not report_path.exists()
+
+
+def test_final_entry_accepts_explicit_empty_base_missing_symbols(inline_report_entry):
+    run, report_path = inline_report_entry
+    run(base={"functions": {}, "missing_symbols": [], "comparison_complete": True})
+    report = json.loads(report_path.read_text())
+    assert report["base_missing_symbols"] == []
+    assert report["comparison_complete"] is True

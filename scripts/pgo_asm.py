@@ -27,21 +27,27 @@ def inline_carriers(source, functions):
         "fold_forming_row": (
             "crates/volas-python/src/frame_tf.rs",
             "inner.fold_forming_row(inner.height() - 1, bar, 0, ops)",
-            r"volas_rs::frame_tf::.*::fold_bars(?:::h[0-9a-f]{16})?$",
+            (
+                "volas_rs::frame_tf::_$LT$impl$u20$volas_rs..frame..PyDataFrame$GT$::fold_bars",
+                "volas_rs::frame_tf::<impl volas_rs::frame::PyDataFrame>::fold_bars",
+            ),
             "source-callsite-container",
         ),
         "execute": (
             "crates/volas-directive/src/exec.rs",
             "execute_node(df, node.node())",
-            r"volas_directive::exec::execute_node(?:::h[0-9a-f]{16})?$",
+            ("volas_directive::exec::execute_node",),
             "forwarding-wrapper-target",
         ),
     }
     evidence = {}
-    for name, (path, statement, pattern, kind) in mappings.items():
+    for name, (path, statement, symbols, kind) in mappings.items():
         lines = (source / path).read_text().splitlines()
         locations = [n + 1 for n, line in enumerate(lines) if statement in line]
-        hits = [symbol for symbol in functions if re.search(pattern, symbol)]
+        # LLVM can retain legacy Rust escapes and a Mach-O leading underscore.
+        # Only these exact display forms and an optional Rust hash are admitted.
+        pattern = r"_?(?:" + "|".join(re.escape(s) for s in symbols) + r")(?:::h[0-9a-f]{16})?"
+        hits = [symbol for symbol in functions if re.fullmatch(pattern, symbol)]
         if len(locations) == 1 and hits:
             evidence[name] = {
                 "kind": kind,
@@ -56,6 +62,18 @@ def inventory_complete(functions, missing):
     return not missing and not any(
         "@unresolved(" in i for f in functions.values() for i in f["normalized"]
     )
+
+
+def read_base_report(path):
+    report = json.loads((path / "report.json").read_text())
+    if (
+        not isinstance(report, dict)
+        or "missing_symbols" not in report
+        or not isinstance(report["missing_symbols"], list)
+        or not all(isinstance(name, str) for name in report["missing_symbols"])
+    ):
+        raise ValueError("base report missing_symbols must be present and a list of strings")
+    return report
 
 
 def main():
@@ -154,9 +172,9 @@ def main():
     }
     base_missing = []
     if args.base_report:
-        base_report = json.loads((args.base_report / "report.json").read_text())
+        base_report = read_base_report(args.base_report)
         base = base_report["functions"]
-        base_missing = base_report.get("missing_symbols", [])
+        base_missing = base_report["missing_symbols"]
         report["base_missing_symbols"] = base_missing
         report["added"] = sorted(selected.keys() - base.keys())
         report["removed"] = sorted(base.keys() - selected.keys())

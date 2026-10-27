@@ -352,12 +352,16 @@ reviewed `fold_forming_row` call container (`fold_bars`) and the `execute`
 forwarding target (`execute_node`) when standalone symbols are absent. The
 source hash must match the installed build. `inline_sites` records the source
 statement and actual container symbols; `standalone_missing_symbols` retains
-the absent names. Container counts cover the entire container and are never
+the absent names. Containers must match the entire crate, module, owning type
+and function name; LLVM's escaped impl spelling, Mach-O leading underscore and
+optional Rust hash suffix are handled explicitly. Container counts cover the entire container and are never
 isolated counts for inlined functions. Reports remain `review-required`;
 unknown missing symbols still fail with `comparison_complete=false`, and this
 option does not change normal gates.
 An incomplete base report also fails and records `base_missing_symbols`; regenerate
 that report with its matching source before comparing it with a complete head.
+Base reports must contain `missing_symbols` as a list of strings; an absent,
+null or otherwise invalid value is rejected when read.
 
 Normal assembly baselines remain unchanged. Missing symbols fail gates and other
 architectures report unsupported. To inspect a final wheel separately, run
