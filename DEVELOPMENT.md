@@ -358,8 +358,11 @@ optional Rust hash suffix are handled explicitly. Container counts cover the ent
 isolated counts for inlined functions. Reports remain `review-required`;
 unknown missing symbols still fail with `comparison_complete=false`, and this
 option does not change normal gates.
-An incomplete base report also fails and records `base_missing_symbols`; regenerate
-that report with its matching source before comparing it with a complete head.
+A base report with missing inventory symbols also fails and records
+`base_missing_symbols`; regenerate that report with its matching source before
+comparing it with a complete head. Unresolved references in either report make
+the comparison incomplete (`comparison_complete=false`) without failing on
+their own.
 Base reports must contain `missing_symbols` as a list of strings; an absent,
 null or otherwise invalid value is rejected when read.
 
