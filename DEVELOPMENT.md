@@ -141,6 +141,16 @@ by section, and enforces the original cost-ratio bounds on release builds.
 Correctness runs keep the same operations and value assertions without timing
 bounds on instrumented code. See [gate details](benchmarks/README.md).
 
+Long-history `tails` and `middle` selections use ten warmups and fixed single-call
+samples (500 rounds, spread across A/B pairs). The timer measures selection and
+keeps its result alive until it stops; result disposal occurs between samples.
+Both performance drivers use `scripts/perf_runtime.py` for their worker protocol.
+On macOS they set `MallocMaxMagazines=1` and `MallocMaxMediumMagazines=1` before
+worker startup, so fixture pages and selection allocations share one allocator
+magazine even when the worker migrates between CPUs. This controls allocator
+page reuse without changing release builds. Saved `runtime.json` files record
+these settings; CPU outputs retain them as `<output>.runtime.json`.
+
 The locally generated `./benchmark-report.html` (and the always-current
 published copy at <https://volas.ost.ai>, deployed by the
 `pages` workflow) keeps the append and

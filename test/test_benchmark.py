@@ -146,7 +146,8 @@ APPEND_ROUNDS = max(5, ceil(500 / int(os.environ.get('VOLAS_BENCHMARK_PAIRS', '1
 #   v2: the append sections measure the STEADY-STATE per-bar cost (the setup
 #       performs one warm-up append, so the one-time Vec capacity-doubling
 #       memcpy of a fresh frame is no longer charged to every measured round).
-METHODOLOGY = "append-steady-state-v2"
+#   v3: long selections retain their result past the timer, with fixed samples.
+METHODOLOGY = "append-steady-state-selection-v3"
 
 
 # --- pandas-ta (the `.ta` DataFrame accessor) ------------------------------
@@ -879,7 +880,7 @@ def _api_registry():
 API_REG = _api_registry()
 for _cand, _ops in bench_long.ops().items():  # `tails` / `middle` over a long history
     API_REG[_cand].update(_ops)
-API_OPS = ['construct', 'getcol', 'slice', 'mask', 'setitem', 'setcell', 'copy', 'tails', 'middle']
+API_OPS = ['construct', 'getcol', 'slice', 'mask', 'setitem', 'setcell', 'copy', *bench_long.OPERATIONS]
 API_CANDIDATES = ['pandas', 'polars', 'volas']
 
 
@@ -893,7 +894,12 @@ def test_api(benchmark, indicator, candidate):
     fn = API_REG.get(candidate, {}).get(indicator)
     if fn is None:
         pytest.skip(f'{candidate} has no {indicator}')
-    benchmark(fn)
+    if indicator in bench_long.OPERATIONS:
+        # A single call retains its result beyond the timer. Automatic loops
+        # discard it inside the timer and calibrate against allocator cold starts.
+        benchmark.pedantic(fn, rounds=APPEND_ROUNDS, iterations=1, warmup_rounds=10)
+    else:
+        benchmark(fn)
 
 
 @pytest.fixture(scope='module', params=[N, 1_000_000], ids=['api-length', 'million'])

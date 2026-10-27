@@ -9,9 +9,9 @@ import statistics
 import subprocess
 
 import sys
-import time
 
 from build_pair import validate
+from perf_runtime import Capture, allocator_settings, environment, measure
 
 if __package__:
     from . import build_config as processes
@@ -20,26 +20,6 @@ else:
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 os.environ.setdefault("NUMBA_CACHE_DIR", str(ROOT / "target/numba"))
-
-
-class Capture:
-    def __init__(self):
-        self.extra_info = {}
-        self.fn = None
-        self.setup = None
-        self.args = ()
-        self.kwargs = {}
-
-    def __call__(self, fn, *args, **kwargs):
-        self.fn = fn
-        self.args = args
-        self.kwargs = kwargs
-
-    def pedantic(self, fn, args=(), kwargs=None, setup=None, **options):
-        self.fn = fn
-        self.setup = setup
-        self.args = args
-        self.kwargs = kwargs or {}
 
 
 if sys.argv[1] == "worker":
@@ -125,34 +105,19 @@ if sys.argv[1] == "worker":
                 cap.fn(*a, **k)
             cache[name] = cap
         cap = cache[name]
-        if cap.setup:
-            wall = cpu = 0
-            for _ in range(reps):
-                a, k = cap.setup()
-                c = time.process_time_ns()
-                w = time.perf_counter_ns()
-                cap.fn(*a, **k)
-                wall += time.perf_counter_ns() - w
-                cpu += time.process_time_ns() - c
-        else:
-            c = time.process_time_ns()
-            w = time.perf_counter_ns()
-            for _ in range(reps):
-                cap.fn(*cap.args, **cap.kwargs)
-            wall = time.perf_counter_ns() - w
-            cpu = time.process_time_ns() - c
-        print(json.dumps({"wall": wall / reps, "cpu": cpu / reps}), flush=True)
+        print(json.dumps(measure(cap, reps)), flush=True)
     sys.exit()
 base, head, out, manifest = sys.argv[1:5]
 
 provenance = validate(base, head, os.environ.get("PERF_COMPARE", "regression"))
 pathlib.Path(out + ".builds.json").write_text(json.dumps(provenance, indent=2))
+pathlib.Path(out + ".runtime.json").write_text(json.dumps(allocator_settings(), indent=2))
 requests = json.loads(pathlib.Path(manifest).read_text())
 workers = []
 for site in (base, head):
     p = processes.popen_child(
         [sys.executable, __file__, "worker", site],
-        env=dict(os.environ),
+        env=environment(),
         stdin=subprocess.PIPE,
         stdout=subprocess.PIPE,
         text=True,

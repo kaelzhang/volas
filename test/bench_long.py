@@ -17,6 +17,7 @@ except ImportError:  # pragma: no cover
 LONG_N = 1_000_000
 CACHED = ['ma:20', 'ema:20', 'macd', 'sar', 'boll', 'rsi:14', 'atr:14']
 TAILS = (100, 1_000, 5_000)
+OPERATIONS = ('tails', 'middle')
 
 
 def _columns():

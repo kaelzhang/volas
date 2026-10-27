@@ -13,7 +13,6 @@ import argparse
 import copy
 import json
 import math
-import os
 from pathlib import Path
 from statistics import median
 import subprocess
@@ -21,15 +20,13 @@ import subprocess
 import sys
 import time
 
-if __package__:
-    from . import build_config as processes
-else:
-    import build_config as processes
-
 try:
+    from scripts import build_config as processes, perf_runtime
     from scripts.perf_costs import COST_TESTS, cost_verdict
     from scripts.perf_items import benchmark_key
 except ModuleNotFoundError:
+    import build_config as processes
+    import perf_runtime
     from perf_costs import COST_TESTS, cost_verdict
     from perf_items import benchmark_key
 
@@ -112,7 +109,8 @@ def run_pairs(python: str, root: Path, sites: dict[str, str], directory: Path,
     full_gate = not scoped or '--volas-cost-checks' in options
     options = [option for option in options if option != '--volas-cost-checks']
     started = time.monotonic()
-    environment = dict(os.environ, VOLAS_BENCHMARK_PAIRS=str(rounds))
+    environment = dict(perf_runtime.environment(), VOLAS_BENCHMARK_PAIRS=str(rounds))
+    (directory / 'runtime.json').write_text(json.dumps(perf_runtime.allocator_settings(), indent=2))
     for pair in range(rounds):
         order = ('base', 'head') if pair % 2 == 0 else ('head', 'base')
         for side in order:
