@@ -347,6 +347,18 @@ AB/BA process-CPU pairs per item; launch it twice with fresh workers for two run
 With `PERF_AB_JSON_DIR`, perf-ab also retains each side's build manifests, logs,
 raw/indexed profiles, wheels and installed sites. Cargo target caches are excluded.
 
+For linked LTO reports, add `--source <matching-source-tree>` to resolve the
+reviewed `fold_forming_row` call container (`fold_bars`) and the `execute`
+forwarding target (`execute_node`) when standalone symbols are absent. The
+source hash must match the installed build. `inline_sites` records the source
+statement and actual container symbols; `standalone_missing_symbols` retains
+the absent names. Container counts cover the entire container and are never
+isolated counts for inlined functions. Reports remain `review-required`;
+unknown missing symbols still fail with `comparison_complete=false`, and this
+option does not change normal gates.
+An incomplete base report also fails and records `base_missing_symbols`; regenerate
+that report with its matching source before comparing it with a complete head.
+
 Normal assembly baselines remain unchanged. Missing symbols fail gates and other
 architectures report unsupported. To inspect a final wheel separately, run
 `python scripts/pgo_asm.py --site <use/site> --output <report-dir>` (optionally
