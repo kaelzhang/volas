@@ -4,6 +4,7 @@
 //! it builds and unit-tests with plain `cargo test` and is reusable as a library.
 
 pub mod buffer;
+mod capacity;
 pub mod column;
 pub mod dataframe;
 pub mod datetime;
@@ -26,7 +27,7 @@ pub use column::{BinOp, BoolOp, CmpOp, Column, ColumnExport, ColumnBorrowExport,
 pub use numeric::{binary_supertype, fits, Numeric};
 pub use validity::{Bitmap, Validity};
 pub use dataframe::{
-    AdmittedAppend, AdmittedBar, AdmittedBars, FoldLayout, Anchors, CellWrite, CellWrites, Checkpoint, CheckpointRef, DataFrame, Directive, History, Reach, Replay, Retained, StaleComputed, StateWords,
+    AdmittedAppend, AdmittedBar, AdmittedBars, CheckpointFold, FoldLayout, Anchors, CellWrite, CellWrites, Checkpoint, CheckpointRef, DataFrame, Directive, History, Reach, Replay, Retained, StaleComputed, StateWords,
 };
 pub use dtype::DType;
 pub use error::{Result, VolasError};

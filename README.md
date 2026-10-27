@@ -41,6 +41,11 @@ a zero-growth proof; Range continuation uses one checked constant-time step. DLP
 same allocation. `Series::from_column` inherits the representable length
 of physical column storage; arbitrary positional lengths remain checked. Source
 caches enter as plain values when those columns belong to the target data.
+`DataFrame::set_computed_column` installs values and computed identity together.
+`FoldLayout::admit_cached` selects and admits a cached schema once;
+`AdmittedBar::prepare_append_cached` and `prepare_checkpoint` return plans holding
+exclusive destination borrows through commit. Column storage and bitmap growth
+are prepared before labels, replacement values or cache cursors are published.
 Reduction admissions retain an immutable positions slice or an owned range.
 `RowGroups::new` and `RowGroups::from_offsets` validate group counts, nonempty
 groups and every position once; their immutable proof can reduce any column of
@@ -284,9 +289,10 @@ window, decay, quantile, rank, or input-shape parameters; see the
 empty or out-of-range selections. `time::aggregate_period` requires non-empty,
 strictly increasing, NaT-free datetime bars within one period; consecutive raw
 re-sends enter through `time::RawFineInput` before checked frame construction.
-Low-level grouped `Column` reductions take repeatable (`Clone`) group iterators;
-dense selections reuse finite-input facts, while sparse selections inspect only
-their selected values.
+Low-level grouped reductions first construct immutable `RowGroups`, bound to
+the source height, then reuse `reduce` / `reduce_with_spare` across its columns.
+Dense selections reuse finite-input facts; sparse selections inspect only their
+selected values.
 
 # Contributing & feedback
 

@@ -965,7 +965,7 @@ Python 选择会检查布尔 Series 的索引对齐，并读取 NumPy MaskedArra
 ## 内置指标
 完整 directive 参考见 [INDICATORS.md](INDICATORS.md)，其中覆盖 Volas 独有指标、内置统计命令，以及与 TA-Lib 兼容的 directive。
 
-Rust 调用方通过 `parse` 或 `bind_frame` 获得经过校验、不可变更内部表示的 `volas_directive::Ast`。通过 `node()` 与 `continuation()` 查看它；命令参数提供只读的 `values()`、`spec()` 与 `bare()` 访问器。执行、lookback 与续算 API 都接受 `&Ast`。binder 在绑定时一次性准备续算计划，包括其中的有状态子树及其隐藏输入列。`stringify` 接受 `&Ast` 或宽松的 `&Form`，使用同一个规范渲染器。底层 Rust 分组 `Column` 归约的分组迭代器须可重复遍历（`Clone`）；密集选择复用输入有限性事实，稀疏选择不会扫描整列。
+Rust 调用方通过 `parse` 或 `bind_frame` 获得经过校验、不可变更内部表示的 `volas_directive::Ast`。通过 `node()` 与 `continuation()` 查看它；命令参数提供只读的 `values()`、`spec()` 与 `bare()` 访问器。执行、lookback 与续算 API 都接受 `&Ast`。binder 在绑定时一次性准备续算计划，包括其中的有状态子树及其隐藏输入列。`stringify` 接受 `&Ast` 或宽松的 `&Form`，使用同一个规范渲染器。底层 Rust 分组归约先构造绑定源高度的不可变 `RowGroups`，再经 `reduce` / `reduce_with_spare` 在同高各列复用；密集选择复用输入有限性事实，稀疏选择不会扫描整列。
 
 # 参与与反馈
 
@@ -983,5 +983,7 @@ Rust 调用方通过 `parse` 或 `bind_frame` 获得经过校验、不可变更�
 [DEVELOPMENT.md](DEVELOPMENT.md) 中。
 
 Rust 归约接纳保存不可变位置切片或拥有型 Range，不能依赖任意 Clone 迭代器。`RowGroups::new` / `from_offsets` 一次验证分组数量、非空及每个位置；不可变凭证经 `reduce` / `reduce_with_spare` 可供同一已接纳高度的各列复用。
+
+`DataFrame::set_computed_column` 一次安装列值和 computed 身份；`FoldLayout::admit_cached` 一次选择并接纳缓存 schema，`AdmittedBar::prepare_append_cached` / `prepare_checkpoint` 返回持有目标独占借用的提交计划。列值缓冲区和 validity 的增长容量先准备完毕，随后才发布索引、替换值和缓存游标。
 
 底层缺失占位增长仅供已接纳的 frame 写入内部使用；公开列扩展经 `Column::append` 追加同 dtype 的缺失列。

@@ -62,10 +62,7 @@ impl OpenPeriod {
     /// Prepare this bar's single append boundary before any displayed or
     /// checkpoint row changes. The returned plan holds the period exclusively.
     pub fn check_bar<'f, 'r>(&'f mut self, bar: &'r AdmittedBar<'_, '_>) -> Result<AdmittedAppend<'f, 'r>> {
-        if !self.layout.as_ref().is_some_and(|p| bar.accepts(p) && p.matches(&self.bars)) {
-            self.layout = Some(bar.project(&self.bars)?);
-        }
-        bar.prepare_append(&mut self.bars, self.layout.as_ref().unwrap())
+        bar.prepare_append_cached(&mut self.bars, &mut self.layout)
     }
 
     /// Admit a timed bar's one index boundary and bind it to this open period.

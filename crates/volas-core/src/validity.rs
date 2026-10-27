@@ -31,6 +31,9 @@ pub struct Bitmap {
     len: usize,
     /// The number of clear bits among the first `len`.
     nulls: usize,
+    // A Column transaction may reserve a first mask before writing its hole.
+    // Keep that capacity across replacement writes until append or cancellation.
+    prepared: bool,
 }
 
 /// Words needed to hold `len` bits.
@@ -49,12 +52,12 @@ impl Bitmap {
                 *last = (1u64 << used) - 1;
             }
         }
-        Bitmap { words, len, nulls: 0 }
+        Bitmap { words, len, nulls: 0, prepared: false }
     }
 
     /// Build from an iterator of `valid` flags (true = present).
     pub fn from_valid_iter(len: usize, valid: impl IntoIterator<Item = bool>) -> Bitmap {
-        let mut bm = Bitmap { words: vec![0; words_for(len)], len, nulls: 0 };
+        let mut bm = Bitmap { words: vec![0; words_for(len)], len, nulls: 0, prepared: false };
         for (i, v) in valid.into_iter().enumerate().take(len) {
             if v {
                 bm.words[i / 64] |= 1u64 << (i % 64);
@@ -199,11 +202,53 @@ impl Validity {
                 // `has_nulls` / `null_count` / `PartialEq` / the NA-aware export paths
                 // rely on. The bitmap keeps its missing count, so this is O(1).
                 bm.set(i, valid);
-                if bm.null_count() == 0 {
+                if bm.null_count() == 0 && !bm.prepared {
                     self.0 = None;
                 }
             }
         }
+    }
+
+    /// Reserve a possible first missing bit, keeping all existing bits intact.
+    /// An all-present prepared bitmap is private to the column transaction.
+    pub(crate) fn prepare_growth(&mut self, len: usize, added: usize, missing: bool) -> Result<()> {
+        if self.0.is_none() && !missing { return Ok(()); }
+        let total = len.checked_add(added).ok_or_else(crate::column::capacity::capacity_error)?;
+        let words = words_for(total);
+        if let Some(bitmap) = self.0.as_mut().and_then(Arc::get_mut) {
+            bitmap.words.try_reserve(words - bitmap.words.len()).map_err(crate::column::capacity::allocation_error)?;
+            bitmap.prepared = true;
+            return Ok(());
+        }
+        let mut storage = Vec::new();
+        storage.try_reserve(crate::capacity::growth_capacity(words_for(len), words))
+            .map_err(crate::column::capacity::allocation_error)?;
+        let (nulls, old_len) = if let Some(bitmap) = &self.0 {
+            storage.extend_from_slice(&bitmap.words);
+            (bitmap.nulls, bitmap.len)
+        } else {
+            storage.resize(words_for(len), u64::MAX);
+            if !len.is_multiple_of(64) { *storage.last_mut().unwrap() = (1u64 << (len % 64)) - 1; }
+            (0, len)
+        };
+        self.0 = Some(Arc::new(Bitmap { words: storage, len: old_len, nulls, prepared: true }));
+        Ok(())
+    }
+
+    pub(crate) fn finish_growth(&mut self) {
+        if let Some(b) = self.0.as_mut().and_then(Arc::get_mut) { b.prepared = false; }
+        if self.0.as_ref().is_some_and(|b| b.nulls == 0) { self.0 = None; }
+    }
+
+    /// Append prepared validity bits without a temporary per-row flags vector.
+    pub(crate) fn append_from(&mut self, len: usize, source: &Self, rows: std::ops::Range<usize>) {
+        if self.0.is_none() && !source.has_nulls() { return; }
+        let count = rows.len();
+        if self.0.is_none() { self.0 = Some(Arc::new(Bitmap::all_valid(len))); }
+        let bitmap = Arc::make_mut(self.0.as_mut().unwrap());
+        bitmap.grow_missing(count);
+        for (offset, row) in rows.enumerate() { if source.is_valid(row) { bitmap.set(len + offset, true); } }
+        self.finish_growth();
     }
 
     /// Grow the mask of a `len`-value column by `count` missing values, in place:
@@ -224,6 +269,7 @@ impl Validity {
                 self.0 = Some(Arc::new(bm));
             }
         }
+        self.finish_growth();
     }
 
     /// Whether this validity masks exactly `len` values: a dense validity fits every
@@ -484,5 +530,25 @@ mod tests {
         assert_eq!(a.and(&dense), a); // holed ∧ dense -> holed
         // hole from either side wins
         assert_eq!(a.and(&b), Validity::from_valid_iter(3, [true, false, false]));
+    }
+}
+
+#[cfg(test)]
+mod growth_spare_tests {
+    use super::*;
+    #[test]
+    fn shared_and_first_masks_keep_the_next_words_spare() {
+        let sparse = Validity::from_valid_iter(512, (0..512).map(|i| i != 0));
+        let snapshot = sparse.clone();
+        for mut mask in [sparse, Validity::dense()] {
+            let nulls = mask.null_count();
+            mask.prepare_growth(512, 1, true).unwrap();
+            assert!(mask.bitmap().unwrap().words.capacity() >= words_for(577), "mask growth must retain the next word's spare");
+            mask.extend_missing(512, 1);
+            assert_eq!(mask.null_count(), nulls + 1);
+            assert!(!mask.is_valid(512));
+        }
+        assert_eq!(snapshot.bitmap().unwrap().len(), 512);
+        assert_eq!(snapshot.null_count(), 1);
     }
 }

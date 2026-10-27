@@ -154,7 +154,8 @@ impl StrBuffer {
     pub fn iter(&self) -> impl Iterator<Item = &str> + '_ {
         let off = self.offsets.as_slice();
         let data = self.data.as_slice();
-        (0..self.len()).map(move |i| {
+        // The resolved offsets already carry the admitted cell count.
+        (0..off.len() - 1).map(move |i| {
             // SAFETY: `i < len` ⟹ `i + 1 <= len < off.len()`, and offsets are monotonic
             // with `off[len] == data.len()`, so `off[i]..off[i + 1]` is in bounds of `data`
             // and valid UTF-8 (the invariant every constructor establishes).
@@ -175,6 +176,11 @@ impl StrBuffer {
     /// bytes; `Buffer` borrowing of a sub-span is a future refinement).
     pub fn slice(&self, start: usize, end: usize) -> StrBuffer {
         (start..end).map(|i| self.get(i)).collect()
+    }
+
+    pub(crate) fn prepare_growth(&mut self, rows: usize, bytes: usize) -> Result<()> {
+        self.offsets.try_reserve(rows)?;
+        self.data.try_reserve(bytes)
     }
 
     /// Append the cells of `items` **in place** — the offset and data buffers grow via

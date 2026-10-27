@@ -496,8 +496,7 @@ impl PyDataFrame {
             before,
             anchors,
         } = new;
-        self.inner.set_column(&canonical, col).map_err(pyerr)?;
-        self.inner.set_computed(&canonical, directive, reach);
+        self.inner.set_computed_column(&canonical, col, directive, reach).map_err(pyerr)?;
         self.inner.set_computed_states(&canonical, state, before);
         // computed over the binding frame from its row 0: the anchors its history passed
         self.inner.keep_computed_anchors(&canonical, anchors);

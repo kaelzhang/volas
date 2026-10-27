@@ -213,3 +213,76 @@ fn decreasing_string_prefix_does_not_hide_late_duplicate_labels() {
     let error = Index::new(None, IndexKind::Str(labels)).unwrap_err();
     assert!(error.to_string().contains("duplicate labels"));
 }
+
+#[test]
+fn range_append_column_capacity_error_preserves_frame_and_caches() {
+    let rows = DataFrame::from_columns(vec![], vec![], 1usize << 60).unwrap();
+    let mut target = DataFrame::new(vec!["x".into()], vec![Column::f64(vec![1.])], None).unwrap();
+    target.set_computed("x", std::sync::Arc::new("x".to_string()), crate::Reach { lookback: 0, resume: 0, continuation: 0, history: crate::History::Window });
+    let before = target.clone();
+    let result = target.append(&rows);
+    assert!(matches!(result, Err(VolasError::Overflow(_))), "{result:?}");
+    assert!(target.equals(&before));
+    assert_eq!((target.height(), target.index().len()), (1, 1));
+    assert!(std::sync::Arc::ptr_eq(target.index(), before.index()));
+    assert_eq!(target.has_stale_computed(), before.has_stale_computed());
+    assert_eq!(target.computed_since("x"), before.computed_since("x"));
+    assert_eq!(target.series("x").unwrap().len(), 1);
+    assert_eq!(target.index().len(), target.series("x").unwrap().len());
+}
+
+#[test]
+fn typed_same_last_route_borrows_datetime_and_string_labels() {
+    for (held, incoming, expected) in [
+        (IndexKind::Datetime(vec![1, 2], Tz::Utc), IndexKind::Datetime(vec![2], Tz::Utc), true),
+        (IndexKind::Datetime(vec![1, 2], Tz::Utc), IndexKind::Datetime(vec![3], Tz::Utc), false),
+        (IndexKind::Str(vec!["a".into()]), IndexKind::Str(vec!["a".into()]), true),
+        (IndexKind::Range { start: -2, len: 2 }, IndexKind::Int64(vec![-1]), true),
+        (IndexKind::Int64(vec![2]), IndexKind::Range { start: 2, len: 1 }, true),
+    ] {
+        let held = Index::new(None, held).unwrap();
+        let incoming = Index::new(None, incoming).unwrap();
+        assert_eq!(held.admit_input(&incoming).unwrap().same_last(), expected);
+    }
+}
+
+#[test]
+fn every_storage_capacity_returns_error_without_publication() {
+    let rows = DataFrame::from_columns(vec![], vec![], isize::MAX as usize).unwrap();
+    let columns = [
+        Column::f64(vec![1.]), Column::f32(vec![1.]), Column::i64(vec![1]),
+        Column::i32(vec![1]), Column::bool(vec![true]), Column::str(vec!["x".into()]),
+        Column::datetime(vec![1]), Column::i64_from_options([None]),
+        Column::bool_from_options([None]), Column::str_from_options([None]),
+    ];
+    for column in columns {
+        let mut target = DataFrame::new(vec!["x".into()], vec![column], None).unwrap();
+        let before = target.clone();
+        assert!(matches!(target.append(&rows), Err(VolasError::Overflow(_))));
+        assert!(target.equals(&before));
+        assert!(std::sync::Arc::ptr_eq(target.index(), before.index()));
+        assert_eq!(target.height(), target.index().len());
+    }
+}
+
+#[test]
+fn physical_column_extent_carries_positional_capacity() {
+    let column = Column::i64(vec![4, 5]);
+    let extent = column.extent();
+    assert_eq!(extent.len(), 2);
+    let index = Index::for_extent(extent);
+    assert_eq!(index.to_i64_labels(), [0, 1]);
+    let empty = Column::str(vec![]);
+    assert!(Index::for_extent(empty.extent()).is_empty());
+    assert!(Index::positional(usize::MAX).is_err());
+}
+
+#[test]
+fn completing_partial_rows_admits_missing_column_capacity() {
+    let rows = DataFrame::from_columns(vec![], vec![], 1usize << 60).unwrap();
+    let target = DataFrame::new(vec!["x".into()], vec![Column::f64(vec![1.])], None).unwrap();
+    let before = target.clone();
+    assert!(matches!(target.admit_data_rows(&rows), Err(VolasError::Overflow(_))));
+    assert!(target.equals(&before));
+    assert!(std::sync::Arc::ptr_eq(target.index(), before.index()));
+}

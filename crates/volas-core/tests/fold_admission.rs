@@ -320,3 +320,124 @@ fn schema_preserving_derivation_reuses_proof_and_coercion_retires_it() {
     assert!(proof.matches(&source));
     assert_eq!(source.columns()[0].as_i64().unwrap(), &[3, 4]);
 }
+
+#[test]
+fn cached_admission_and_bound_checkpoint_carry_each_target_once() {
+    let mut target = frame(vec![2.]);
+    let rows = frame(vec![3.]);
+    let mut cached = None;
+    let bars = FoldLayout::admit_cached(&mut cached, &target, &rows, |_| CombineOp::Sum).unwrap();
+    let bar = bars.bar(0).unwrap();
+    let mut current = frame(vec![2.]);
+    let mut before = current.clone();
+    let mut projections = None;
+    bar.prepare_checkpoint(&mut current, &mut before, &mut projections, &[false], false, || Ok(()))
+        .unwrap().refold(&mut target, true).unwrap();
+    assert_eq!(target.column("x").unwrap().get_f64(0), 5.);
+    assert_eq!(current.column("x").unwrap().get_f64(0), 5.);
+    assert_eq!(before.column("x").unwrap().get_f64(0), 2.);
+    target.set_column("x", Column::i64(vec![7])).unwrap();
+    // A changed schema is rebound at the single outer admission, not reused.
+    let bars = FoldLayout::admit_cached(&mut cached, &target, &rows, |_| CombineOp::Sum).unwrap();
+    assert_eq!(bars.rows().column("x").unwrap().dtype(), volas_core::DType::I64);
+}
+
+#[test]
+fn bound_checkpoint_rejects_shape_schema_and_overflow_before_publication() {
+    let mut target = frame(vec![2.]);
+    let rows = frame(vec![3.]);
+    let mut cached = None;
+    let bars = FoldLayout::admit_cached(&mut cached, &target, &rows, |_| CombineOp::Sum).unwrap();
+    let bar = bars.bar(0).unwrap();
+    let mut current = target.clone();
+    let mut before = target.clone();
+    let mut projections = None;
+    assert!(bar.prepare_checkpoint(&mut current, &mut before, &mut projections, &[], false, || Ok(())).is_err());
+    let mut empty = frame(vec![]);
+    assert!(bar.prepare_checkpoint(&mut empty, &mut before, &mut projections, &[false], false, || Ok(())).is_err());
+    assert!(bar.prepare_checkpoint(&mut current, &mut empty, &mut projections, &[false], false, || Ok(())).is_err());
+    let plan = bar.prepare_checkpoint(&mut current, &mut before, &mut projections, &[false], false, || Ok(())).unwrap();
+    assert!(plan.refold(&mut empty, true).is_err());
+    let mut foreign = DataFrame::new(vec!["y".into()], vec![Column::f64(vec![1.])], None).unwrap();
+    let plan = bar.prepare_checkpoint(&mut current, &mut before, &mut projections, &[false], false, || Ok(())).unwrap();
+    assert!(plan.refold(&mut foreign, true).is_err());
+    assert!(current.equals(&target) && before.equals(&target));
+    bar.prepare_checkpoint(&mut current, &mut before, &mut projections, &[false], false, || Ok(())).unwrap().refold(&mut target, true).unwrap();
+    assert_eq!(target.column("x").unwrap().get_f64(0), 5.);
+
+    let make = |value| DataFrame::new(vec!["x".into()], vec![Column::i64(vec![value])], None).unwrap();
+    let mut target = make(i64::MAX);
+    let source = make(1);
+    let layout = FoldLayout::new(&target, |_| CombineOp::Sum).unwrap();
+    let bars = layout.admit(&target, &source).unwrap();
+    let bar = bars.bar(0).unwrap();
+    let mut current = target.clone();
+    let mut before = current.clone();
+    let snapshot = current.clone();
+    let mut projections = None;
+    assert!(bar.prepare_checkpoint(&mut current, &mut before, &mut projections, &[false], false, || Ok(())).unwrap().refold(&mut target, true).is_err());
+    assert!(current.equals(&snapshot) && before.equals(&snapshot) && target.equals(&snapshot));
+    assert!(bar.prepare_checkpoint(&mut current, &mut before, &mut projections, &[false], false, || Ok(())).unwrap().land(true).is_err());
+}
+
+#[test]
+fn bound_checkpoint_keeps_retained_lead_and_cancelled_append_keeps_dense_mask() {
+    let mut parent = DataFrame::new(vec!["x".into(), "cache".into()], vec![Column::f64(vec![1., 2., 3.]), Column::f64(vec![1., 2., 3.])], None).unwrap();
+    parent.set_computed("cache", Arc::new(()), Reach { lookback: 1, resume: 1, continuation: 1, history: History::Window });
+    let slice = parent.rows(2, 3, &NoReplay);
+    let mut before = slice.forming_fold_probe();
+    let mut current = before.clone();
+    let plan = FoldLayout::new(&current, |_| CombineOp::Sum).unwrap();
+    let rows = DataFrame::new(vec!["x".into()], vec![Column::f64(vec![4.])], None).unwrap();
+    let bars = plan.admit(&current, &rows).unwrap();
+    let bar = bars.bar(0).unwrap();
+    let mut projected = None;
+    bar.prepare_checkpoint(&mut current, &mut before, &mut projected, &[false], false, || Ok(())).unwrap().land(false).unwrap();
+    assert_eq!(current.column("x").unwrap().get_f64(0), 7.);
+    assert!(before.lead_rows() > 0);
+
+    let mut target = DataFrame::new(vec!["x".into()], vec![Column::i64(vec![1])], None).unwrap();
+    let rows = DataFrame::new(vec!["x".into()], vec![Column::i64_from_options([None])], None).unwrap();
+    let layout = FoldLayout::new(&target, |_| CombineOp::Sum).unwrap();
+    let bars = layout.admit(&target, &rows).unwrap();
+    let bar = bars.bar(0).unwrap();
+    let snapshot = target.clone();
+    let mut projected = None;
+    let plan = bar.prepare_append_cached(&mut target, &mut projected).unwrap();
+    assert!(!plan.replaces());
+    drop(plan);
+    assert!(target.equals(&snapshot));
+    assert_eq!(target.column("x").unwrap().null_count(), 0);
+    bar.prepare_append_cached(&mut target, &mut projected).unwrap().land().unwrap();
+    assert_eq!(target.column("x").unwrap().null_count(), 1);
+}
+
+#[test]
+fn operation_admission_is_cached_only_after_its_owner_accepts_it() {
+    use std::cell::Cell;
+    let target = frame(vec![2.]);
+    let rows = frame(vec![3.]);
+    let layout = FoldLayout::new(&target, |_| CombineOp::Sum).unwrap();
+    let bars = layout.admit(&target, &rows).unwrap();
+    let bar = bars.bar(0).unwrap();
+    let mut current = target.clone();
+    let mut before = target.clone();
+    let mut projected = None;
+    let checks = Cell::new(0);
+    let rejected = bar.prepare_checkpoint(&mut current, &mut before, &mut projected, &[false], false, || {
+        checks.set(checks.get() + 1);
+        Err(volas_core::VolasError::Value("operation rejected".into()))
+    });
+    assert!(rejected.is_err());
+    drop(rejected);
+    assert!(projected.is_none());
+    bar.prepare_checkpoint(&mut current, &mut before, &mut projected, &[false], false, || {
+        checks.set(checks.get() + 1);
+        Ok(())
+    }).unwrap().land(false).unwrap();
+    bar.prepare_checkpoint(&mut current, &mut before, &mut projected, &[false], false, || {
+        panic!("the cached operation admission must flow to its consumer")
+    }).unwrap().land(true).unwrap();
+    assert_eq!(checks.get(), 2);
+    assert_eq!(current.column("x").unwrap().get_f64(0), 8.);
+}

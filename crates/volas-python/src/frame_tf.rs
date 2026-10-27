@@ -375,13 +375,9 @@ impl PyDataFrame {
         // or disordered feed data must be handled explicitly by the caller, never
         // silently corrupt the OHLCV.
         // Admitted before the order is judged: an instant and a wall clock do not compare.
-        let cached = self.tf.as_mut().unwrap().fold_plan.take();
+        let mut plan = self.tf.as_mut().unwrap().fold_plan.take();
         let tfs = self.tf.as_ref().unwrap();
-        let plan = match cached.filter(|p| p.matches(&self.inner)) {
-            Some(p) => p,
-            None => volas_core::FoldLayout::new(&self.inner, |n| tfs.cumulators.agg_for(n).as_combine_op()).map_err(pyerr)?,
-        };
-        let bars = plan.admit(&self.inner, fine).map_err(pyerr)?;
+        let bars = volas_core::FoldLayout::admit_cached(&mut plan, &self.inner, fine, |n| tfs.cumulators.agg_for(n).as_combine_op()).map_err(pyerr)?;
         if bars.rows().height() > 1 {
             // the forming row's data columns only: what the fold reads and writes
             let mut probe = PyDataFrame {
@@ -389,12 +385,12 @@ impl PyDataFrame {
                 tf: self.tf.clone(),
                 window: None,
             };
-            let probe_plan = volas_core::FoldLayout::new(&probe.inner, |n| probe.tf.as_ref().unwrap().cumulators.agg_for(n).as_combine_op()).map_err(pyerr)?;
-            let probe_bars = probe_plan.admit(&probe.inner, bars.rows()).map_err(pyerr)?;
+            let mut probe_plan = None;
+            let probe_bars = volas_core::FoldLayout::admit_cached(&mut probe_plan, &probe.inner, bars.rows(), |n| probe.tf.as_ref().unwrap().cumulators.agg_for(n).as_combine_op()).map_err(pyerr)?;
             probe.fold_bars(&probe_bars).map_err(|e| fold_order_error(&self.inner, self.tf.as_ref().unwrap(), fine_ts, e))?;
         }
         let result = self.fold_bars(&bars);
-        self.tf.as_mut().unwrap().fold_plan = Some(plan);
+        self.tf.as_mut().unwrap().fold_plan = plan;
         result.map_err(|e| fold_order_error(&self.inner, self.tf.as_ref().unwrap(), fine_ts, e))
     }
 
@@ -473,6 +469,7 @@ impl PyDataFrame {
                     // valid while reducing the converted fine bars overflows. Keep
                     // the original error timing and let a correction repair the
                     // last bar before trying to reduce that exceptional period.
+                    drop(push);
                     let mut next = open.clone();
                     next.push(bar).map_err(pyerr)?;
                     let ops: Vec<_> = bar.names().iter().enumerate().map(|(i, name)| (inner.column_pos(name).unwrap(), i, tfs.cumulators.agg_for(name).as_combine_op())).collect();

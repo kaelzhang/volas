@@ -85,6 +85,13 @@ impl FoldLayout {
         Ok(Self { all_float: self.all_float, leads: true, complete: true, target: frame.names.clone(), source: self.source.clone(), ops })
     }
 
+    /// Reuse or rebuild a cached layout, binding its target exactly once.
+    /// The selected layout's fact flows straight into input admission.
+    pub fn admit_cached<'a, 'p>(cache: &'p mut Option<Self>, frame: &DataFrame, rows: &'a DataFrame, operation: impl Fn(&str) -> CombineOp) -> Result<AdmittedBars<'a, 'p>> {
+        if !cache.as_ref().is_some_and(|p| p.matches(frame)) { *cache = Some(Self::new(frame, operation)?); }
+        Ok(AdmittedBars { rows: frame.admit_data_rows(rows)?, layout: cache.as_ref().unwrap() })
+    }
+
     /// Admit schema and values once at the outer boundary. Index compatibility
     /// is checked by the frame owner, while time ordering belongs to the period.
     pub fn admit<'a, 'p>(&'p self, frame: &DataFrame, rows: &'a DataFrame) -> Result<AdmittedBars<'a, 'p>> {
@@ -119,7 +126,7 @@ impl AdmittedBar<'_, '_> {
             for &(dst, from, _) in &self.layout.ops { frame.check_lead_values(&frame.names[dst], &self.rows.columns[from], 0, 1)?; }
         }
         let plan = frame.index.plan_append(&self.rows.index, crate::index::AppendMode::NewRows)?;
-        frame.push_rows(&self.rows, self.layout.leads, plan, 0)
+        frame.push_rows(&self.rows, self.layout.leads, plan)
     }
 
     /// The admitted operation for a source column (not a mutable plan).
@@ -149,15 +156,7 @@ impl AdmittedBar<'_, '_> {
         self.bind(frame, self.layout)?;
         let row = last(frame)?;
         if let Some((prefix, layout)) = prefix { self.bind(prefix, layout)?; last(prefix)?; }
-        if self.layout.all_float { return Ok(()); }
-        for &(dst, from, op) in &self.layout.ops {
-            let (to, value) = (&frame.columns[dst], &self.rows.columns[from]);
-            if !self.layout.source[from].1.is_float() {
-                let cells = prefix.map(|(p, l)| (&p.columns[l.ops[from].0], p.height - 1)).into_iter().chain([(value, 0)]);
-                frame.check_fold_with_lead(dst, to, (row, op, true), cells)?;
-            }
-        }
-        Ok(())
+        self.check_prefix_bound(frame, row, prefix)
     }
 
     /// Copy an admitted reduction to the forming row. Historical dtype rules
@@ -167,10 +166,7 @@ impl AdmittedBar<'_, '_> {
         self.bind(reduced, layout)?;
         last(frame)?;
         if !layout.complete || reduced.height != 1 { return Err(schema_error()); }
-        for &(dst, from, _) in &self.layout.ops {
-            frame.check_lead_values(&frame.names[dst], &reduced.columns[layout.ops[from].0], 0, 1)?;
-        }
-        frame.write_folded_row(reduced, &self.layout.ops)
+        self.publish_bound(frame, reduced, layout)
     }
 
     /// Fold a one-row aggregate and checkpoint using their checked layouts.
@@ -217,12 +213,17 @@ impl AdmittedBar<'_, '_> {
     /// callers can check other aggregates before this infallible-schema commit.
     pub fn prepare_append<'f, 'r>(&'r self, frame: &'f mut DataFrame, layout: &FoldLayout) -> Result<AdmittedAppend<'f, 'r>> {
         self.bind(frame, layout)?;
+        self.prepare_append_bound(frame, layout)
+    }
+
+    fn prepare_append_bound<'f, 'r>(&'r self, frame: &'f mut DataFrame, layout: &FoldLayout) -> Result<AdmittedAppend<'f, 'r>> {
         if !layout.complete { return Err(schema_error()); }
         if frame.lead.is_some() {
             for (name, col) in frame.names.iter().zip(self.rows.columns()) { frame.check_lead_values(name, col, 0, 1)?; }
         }
         let plan = frame.index.admit_input(&self.rows.index)?.row_plan(0, 0)?;
-        Ok(AdmittedAppend { frame, rows: &self.rows, plan })
+        frame.prepare_columns(&self.rows, true, plan.appended(), plan.replaces(), None)?;
+        Ok(AdmittedAppend { frame, rows: &self.rows, plan: Some(plan) })
     }
 }
 
@@ -235,11 +236,22 @@ fn last(frame: &DataFrame) -> Result<usize> { frame.height.checked_sub(1).ok_or_
 pub struct AdmittedAppend<'f, 'r> {
     frame: &'f mut DataFrame,
     rows: &'r DataFrame,
-    plan: crate::index::RowPlan<'r>,
+    plan: Option<crate::index::RowPlan<'r>>,
 }
 impl AdmittedAppend<'_, '_> {
     /// Whether this bar replaces the destination's latest row.
-    pub fn replaces(&self) -> bool { self.plan.replaces() }
+    pub fn replaces(&self) -> bool { self.plan.as_ref().unwrap().replaces() }
     /// Publish the single admitted index plan and its bar.
-    pub fn land(self) -> Result<()> { self.frame.commit_rows(self.rows, true, self.plan) }
+    pub fn land(mut self) -> Result<()> {
+        let result = self.frame.commit_prepared_rows(self.rows, true, self.plan.take().unwrap());
+        if result.is_err() { for col in &mut self.frame.columns { col.finish_growth(); } }
+        result
+    }
 }
+
+impl Drop for AdmittedAppend<'_, '_> {
+    fn drop(&mut self) { if self.plan.is_some() { for col in &mut self.frame.columns { col.finish_growth(); } } }
+}
+
+mod bound;
+pub use bound::CheckpointFold;

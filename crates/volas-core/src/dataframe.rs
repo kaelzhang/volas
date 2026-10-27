@@ -243,13 +243,15 @@ impl DataFrame {
             )));
         }
         // a frame of no columns is as tall as its index (pandas `df[[]]`)
-        let height = height.or_else(|| columns.first().map(Column::len)).or_else(|| index.as_ref().map(Index::len)).unwrap_or(0);
-        for (n, c) in names.iter().zip(&columns) {
-            if c.len() != height {
+        let extent = columns.first().map(Column::extent);
+        let height = height.or_else(|| extent.map(|e| e.len())).or_else(|| index.as_ref().map(Index::len)).unwrap_or(0);
+        for (pos, (n, c)) in names.iter().zip(&columns).enumerate() {
+            let len = if pos == 0 { extent.unwrap().len() } else { c.len() };
+            if len != height {
                 return Err(VolasError::Shape(format!(
                     "column \"{}\" has length {} but frame height is {}",
                     n,
-                    c.len(),
+                    len,
                     height
                 )));
             }
@@ -267,7 +269,7 @@ impl DataFrame {
                 }
                 ix
             }
-            None => Index::positional(height)?,
+            None => match extent { Some(extent) => Index::for_extent(extent), None => Index::positional(height)? },
         };
         let mut name_to_idx = FxHashMap::with_capacity_and_hasher(names.len(), Default::default());
         for (i, n) in names.iter().enumerate() {
@@ -425,6 +427,17 @@ impl DataFrame {
     /// the frame currently has no columns). Replacing a column invalidates the
     /// directive cache (see `invalidate_computed_on_write`); adding one leaves it.
     pub fn set_column(&mut self, name: &str, col: Column) -> Result<()> {
+        self.install_column(name, col, false)
+    }
+
+    /// Install values and computed identity in one schema transaction.
+    pub fn set_computed_column(&mut self, name: &str, col: Column, directive: Directive, reach: Reach) -> Result<()> {
+        self.install_column(name, col, true)?;
+        self.record_computed(name, directive, reach);
+        Ok(())
+    }
+
+    fn install_column(&mut self, name: &str, col: Column, computed: bool) -> Result<()> {
         admit_layout(name, &col)?;
         if self.columns.is_empty() {
             self.height = col.len();
@@ -449,11 +462,19 @@ impl DataFrame {
                 // writer — `df[name] = …`, `astype`, …).
                 // Retire any reusable schema proof before changing the dtype or
                 // turning a cached column into data.
-                if self.columns[i].dtype() != col.dtype() || self.computed.contains_key(name) {
+                if self.columns[i].dtype() != col.dtype() || self.computed.contains_key(name) != computed {
                     Arc::make_mut(&mut self.names);
                 }
                 self.columns[i] = col;
-                self.invalidate_computed_on_write(name);
+                if computed {
+                    // The same computed role survives. Other dependencies still
+                    // become stale when its installed values are replaced.
+                    self.stale_every_computed();
+                } else {
+                    self.computed.remove(name);
+                    self.note_computed();
+                    self.stale_every_computed();
+                }
             }
             None => {
                 Arc::make_mut(&mut self.name_to_idx).insert(name.to_string(), self.columns.len());
@@ -531,7 +552,7 @@ impl DataFrame {
 }
 
 mod fold_input;
-pub use fold_input::{AdmittedAppend, AdmittedBar, AdmittedBars, FoldLayout};
+pub use fold_input::{AdmittedAppend, AdmittedBar, AdmittedBars, CheckpointFold, FoldLayout};
 mod admit;
 pub use admit::{FoldedRow, FormingFold};
 pub use admit::Retained;

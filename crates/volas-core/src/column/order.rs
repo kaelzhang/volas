@@ -288,11 +288,22 @@ impl Column {
             let converted = other.convert_lossless(self.dtype()).map_err(|e| self.append_error(other, e))?;
             return self.append(&converted);
         }
-        self.append_from(other, 0)
+        self.prepare_growth(other.len(), Some(other), None, false)?;
+        let result = self.append_whole(other.whole());
+        self.finish_growth();
+        result
     }
 
     /// Commit the already admitted suffix without materializing columns or labels.
-    pub(crate) fn append_from(&mut self, other: &Column, start: usize) -> Result<()> {
+    pub(crate) fn whole(&self) -> WholeColumn<'_> { WholeColumn(self) }
+
+    pub(crate) fn append_whole(&mut self, source: WholeColumn<'_>) -> Result<()> {
+        self.append_from::<0>(source.0)
+    }
+
+    #[inline]
+    pub(crate) fn append_from<const START: usize>(&mut self, other: &Column) -> Result<()> {
+        let start = START;
         match (self, other) {
             (Column { data: ColumnData::F64(a) }, Column { data: ColumnData::F64(b) }) => {
                 a.append(&b[start..]);

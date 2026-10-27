@@ -22,8 +22,8 @@ impl ValidatedLabels {
     /// A checked Column owns valid Rust storage. Its length is bounded by a
     /// real slice/Vec allocation (at most isize::MAX bytes), so positional i64
     /// labels cannot overflow. No independent arbitrary length enters here.
-    pub(super) fn column(column: &crate::Column) -> Self {
-        let len = column.len();
+    pub(super) fn extent(extent: crate::column::ColumnExtent) -> Self {
+        let len = extent.len();
         Self { kind: IndexKind::Range { start: 0, len }, order: LabelOrder::ascending(len) }
     }
 
@@ -78,7 +78,7 @@ pub(crate) struct IndexInput<'target, 'rows> {
     rows: &'rows Index,
 }
 /// Checked positional continuation, consumed only by the frame's append owner.
-pub(crate) struct RangeStep { len: usize }
+pub(crate) struct RangeStep { len: usize, added: usize }
 pub(crate) struct Replacement { _private: () }
 
 /// The minimal proof for a row operation: replacements have no appended labels
@@ -99,6 +99,7 @@ impl<'a> AppendTail<'a> {
 }
 
 impl RowPlan<'_> {
+    pub(crate) fn appended(&self) -> usize { match self { Self::Range(s) => s.added, Self::Replacement(_) => 0, Self::Append(p) => p.plan.appended() } }
     pub(crate) fn compact_from(&self) -> usize { match self { Self::Append(p) => p.plan.compact_from(), _ => 0 } }
     pub(crate) fn replaces(&self) -> bool { match self { Self::Replacement(_) => true, Self::Append(p) => p.plan.replaces(), _ => false } }
 }
@@ -107,14 +108,19 @@ impl<'rows> IndexInput<'_, 'rows> {
         let (IndexKind::Range { start, len }, IndexKind::Range { start: 0, len: added }) = (&self.target.kind, &self.rows.kind) else { return Ok(None); };
         let total = len.checked_add(*added).ok_or_else(|| VolasError::Overflow("range index length overflow".into()))?;
         validate_range(*start, total)?;
-        Ok(Some(RangeStep { len: total }))
+        Ok(Some(RangeStep { len: total, added: *added }))
+    }
+
+    #[inline]
+    pub(super) fn same_last(&self) -> bool {
+        if self.rows.is_unlabelled() || self.target.is_empty() || self.rows.is_empty() { return false; }
+        self.target.same_label(self.target.len() - 1, self.rows, 0)
     }
 
     pub(crate) fn row_plan(self, from: usize, shown: usize) -> Result<RowPlan<'rows>> {
         if let Some(step) = self.range_step()? { return Ok(RowPlan::Range(step)); }
         if self.rows.len() == 1 {
-            let replaces = !self.rows.is_unlabelled() && !self.target.is_empty()
-                && self.target.same_label(self.target.len() - 1, self.rows, 0);
+            let replaces = self.same_last();
             if replaces { return Ok(RowPlan::Replacement(Replacement { _private: () })); }
             return self.target.plan_routed(self.rows, AppendMode::Rows { from, shown }, false).map(|plan| RowPlan::Append(AppendTail { plan }));
         }
@@ -268,10 +274,15 @@ impl Index {
         }
     }
 
+    #[inline]
     fn same_label(&self, at: usize, other: &Index, row: usize) -> bool {
         match (&self.kind, &other.kind) {
             (IndexKind::Str(a), IndexKind::Str(b)) => a[at] == b[row],
-            _ => self.label_at(at) == other.label_at(row),
+            (IndexKind::Datetime(a, _), IndexKind::Datetime(b, _)) | (IndexKind::Int64(a), IndexKind::Int64(b)) => a[at] == b[row],
+            (IndexKind::Range { start: a, .. }, IndexKind::Range { start: b, .. }) => *a as i128 + at as i128 == *b as i128 + row as i128,
+            (IndexKind::Range { start, .. }, IndexKind::Int64(b)) => *start as i128 + at as i128 == b[row] as i128,
+            (IndexKind::Int64(a), IndexKind::Range { start, .. }) => a[at] as i128 == *start as i128 + row as i128,
+            _ => false,
         }
     }
 
@@ -371,4 +382,17 @@ fn joined_order<T: Ord>(a: LabelOrder, last: Option<&T>, b: LabelOrder, first: O
 
 fn label_text(label: &Label) -> String {
     match label { Label::I64(v) => v.to_string(), Label::Str(v) => format!("{v:?}") }
+}
+
+#[cfg(test)]
+mod label_tests {
+    use super::*;
+
+#[test]
+fn unlike_label_domains_never_compare_equal_in_the_owner() {
+    let integer = Index::new(None, IndexKind::Int64(vec![1])).unwrap();
+    let string = Index::new(None, IndexKind::Str(vec!["1".into()])).unwrap();
+    assert!(!integer.same_label(0, &string, 0));
+    assert!(integer.admit_input(&string).is_err());
+}
 }

@@ -149,10 +149,7 @@ impl Cumulator {
         let (Some(open), Some(aggregate)) = (&mut self.open, &mut self.aggregate) else { return Ok(false) };
         let IndexKind::Datetime(ts, _) = fine.index().kind() else { return Ok(false) };
         if ts.len() != 1 { return Ok(false); }
-        if !self.fold_layout.as_ref().is_some_and(|p| p.matches(open.bars())) {
-            self.fold_layout = Some(volas_core::FoldLayout::new(open.bars(), |n| self.spec.agg_for(n).as_combine_op())?);
-        }
-        let admitted = self.fold_layout.as_ref().unwrap().admit(open.bars(), fine)?;
+        let admitted = volas_core::FoldLayout::admit_cached(&mut self.fold_layout, open.bars(), fine, |n| self.spec.agg_for(n).as_combine_op())?;
         let proof = admitted.bar(0)?;
         let bars = proof.rows();
         let tz = open.bars().index().tz();
@@ -164,7 +161,8 @@ impl Cumulator {
         };
         let push = open.check_timed(&timed)?;
         if key != open_key {
-            // The unused plan lends only until this branch; the boundary is checked.
+            // Release the unused target-bound plan after its boundary check.
+            drop(push);
             let index = Index::new(None, IndexKind::Datetime(ts.to_vec(), tz.clone()))?.with_name(open.bars().index().name().map(String::from));
             let columns = bars.columns().iter().map(|c| c.slice(0, 1)).collect();
             let next = OpenPeriod::new(DataFrame::new(bars.names().to_vec(), columns, Some(index))?)?;

@@ -224,3 +224,12 @@ fn consuming_typed_exports_move_unique_buffers_and_convert_other_dtypes() {
     assert_eq!(values.as_ptr(), ptr);
     assert!(Column::f64(vec![1.0]).into_bool_vec().is_err());
 }
+
+#[test]
+fn whole_column_append_consumes_the_owners_complete_extent() {
+    let source = Column::i64_from_options([Some(2), None]);
+    let mut target = Column::i64(vec![1]);
+    let whole = source.whole();
+    target.append_whole(whole).unwrap();
+    assert_eq!(target, Column::i64_from_options([Some(1), Some(2), None]));
+}

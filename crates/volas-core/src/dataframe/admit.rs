@@ -114,7 +114,12 @@ impl DataFrame {
             }
             columns.push(match rows.column_pos(name) {
                 Some(j) => rows.columns[j].clone(),
-                None => Column::na_of(col.dtype(), rows.height),
+                None => {
+                    let mut missing = Column::na_of(col.dtype(), 0);
+                    missing.prepare_growth(rows.height, None, None, false)?;
+                    missing.append_na(rows.height);
+                    missing
+                },
             });
             names.push(name.clone());
         }
@@ -251,12 +256,27 @@ impl DataFrame {
     }
 
     pub(super) fn commit_rows(&mut self, rows: &DataFrame, leads: bool, plan: RowPlan<'_>) -> Result<()> {
+        self.prepare_columns(rows, leads, plan.appended(), plan.replaces(), None)?;
+        let result = self.commit_prepared_rows(rows, leads, plan);
+        if result.is_err() { for col in &mut self.columns { col.finish_growth(); } }
+        result
+    }
+
+    /// Consume the Column owners' capacity preparation exactly once.
+    pub(super) fn commit_prepared_rows(&mut self, rows: &DataFrame, leads: bool, plan: RowPlan<'_>) -> Result<()> {
+        let added = plan.appended();
         match plan {
             RowPlan::Range(step) => {
                 Arc::make_mut(&mut self.index).apply_range_step(step);
-                self.push_columns(rows, leads, 0)
+                self.push_columns::<0>(rows, leads, added)
             }
-            RowPlan::Replacement(_) => self.write_last_row(rows, 0, leads),
+            RowPlan::Replacement(_) => {
+                self.write_last_row(rows, 0, leads)?;
+                for col in &mut self.columns { col.finish_growth(); }
+                #[cfg(debug_assertions)]
+                self.debug_check();
+                Ok(())
+            },
             RowPlan::Append(plan) => self.commit_plan(rows, leads, plan),
         }
     }
@@ -269,9 +289,9 @@ impl DataFrame {
             // precedes it, so a representability/capacity error cannot publish it.
             Arc::make_mut(&mut self.index).prepare_replacement(&plan)?;
             self.write_last_row(rows, 0, leads)?;
-            self.push_rows(rows, leads, plan, 1)
+            self.push_prepared_rows::<1>(rows, leads, plan)
         } else {
-            self.push_rows(rows, leads, plan, 0)
+            self.push_prepared_rows::<0>(rows, leads, plan)
         }
     }
 
@@ -283,26 +303,48 @@ impl DataFrame {
         let admitted = self.admit_rows(other)?;
         let rows = admitted.rows.as_ref();
         let plan = admitted.index.plan(AppendMode::NewRows)?;
-        self.push_rows(rows, admitted.leads, plan, 0)
+        self.push_rows(rows, admitted.leads, plan)
     }
 
     /// Append admitted rows (see `admit_rows`) at the end — the commit step:
     /// the validated index plan is consumed first, then every
     /// column grows. Columns `rows` lacks are padded; computed metadata is retained,
     /// leaving the new rows stale.
-    pub(super) fn push_rows(&mut self, rows: &DataFrame, leads: bool, plan: AppendPlan<'_>, start: usize) -> Result<()> {
-        Arc::make_mut(&mut self.index).apply_append(plan)?;
-        self.push_columns(rows, leads, start)
+    pub(super) fn push_rows(&mut self, rows: &DataFrame, leads: bool, plan: AppendPlan<'_>) -> Result<()> {
+        self.prepare_columns(rows, leads, plan.appended(), false, None)?;
+        let result = self.push_prepared_rows::<0>(rows, leads, plan);
+        if result.is_err() { for col in &mut self.columns { col.finish_growth(); } }
+        result
     }
 
-    fn push_columns(&mut self, rows: &DataFrame, leads: bool, start: usize) -> Result<()> {
-        let oh = rows.height - start;
+    fn push_prepared_rows<const START: usize>(&mut self, rows: &DataFrame, leads: bool, plan: AppendPlan<'_>) -> Result<()> {
+        let added = plan.appended();
+        Arc::make_mut(&mut self.index).apply_append(plan)?;
+        self.push_columns::<START>(rows, leads, added)
+    }
+
+    /// Column owns storage bounds, COW, payload and bitmap reservation. Every
+    /// fallible reservation precedes index, replacement values, height and cache writes.
+    pub(super) fn prepare_columns(&mut self, rows: &DataFrame, leads: bool, added: usize, replaces: bool, cell: Option<usize>) -> Result<()> {
+        if added == 0 && !replaces { return Ok(()); }
+        for pos in 0..self.columns.len() {
+            if added == 0 && self.computed.contains_key(self.names[pos].as_str()) { continue; }
+            let source = Self::source_of(&self.names[pos], pos, rows, leads).map(|j| &rows.columns[j]);
+            if let Err(error) = self.columns[pos].prepare_growth(added, source, cell, replaces) {
+                for col in &mut self.columns { col.finish_growth(); }
+                return Err(error);
+            }
+        }
+        Ok(())
+    }
+
+    fn push_columns<const START: usize>(&mut self, rows: &DataFrame, leads: bool, oh: usize) -> Result<()> {
         if leads {
             // The rows carry the leading columns in order (the live-streaming case):
             // append them positionally and pad the rest.
             let w = rows.width();
             for (dst, src) in self.columns.iter_mut().zip(&rows.columns) {
-                dst.append_from(src, start)?;
+                if START == 0 { dst.append_whole(src.whole())?; } else { dst.append_from::<START>(src)?; }
             }
             for pos in w..self.names.len() {
                 self.pad_rows(pos, oh)?;
@@ -311,7 +353,7 @@ impl DataFrame {
             for pos in 0..self.names.len() {
                 let n = &self.names[pos];
                 match rows.column_pos(n) {
-                    Some(j) => self.columns[pos].append_from(&rows.columns[j], start)?,
+                    Some(j) => if START == 0 { self.columns[pos].append_whole(rows.columns[j].whole())?; } else { self.columns[pos].append_from::<START>(&rows.columns[j])?; },
                     None => self.pad_rows(pos, oh)?,
                 }
             }
@@ -366,7 +408,8 @@ impl DataFrame {
                 }
             }
         }
-        match converted {
+        self.prepare_columns(src, leads, 0, true, Some(src_row))?;
+        let result = match converted {
             None => self.write_last_row(src, src_row, leads),
             Some(cells) => self.write_last_row_with(|pos, name| {
                 Self::source_of(name, pos, src, leads).map(|j| match cells.get(&j) {
@@ -374,7 +417,11 @@ impl DataFrame {
                     None => (&src.columns[j], src_row),
                 })
             }),
-        }
+        };
+        for col in &mut self.columns { col.finish_growth(); }
+        #[cfg(debug_assertions)]
+        self.debug_check();
+        result
     }
 
     /// `src`'s column for this frame's column `pos` (named `name`): positional when
@@ -405,8 +452,6 @@ impl DataFrame {
             }
         }
         self.invalidate_computed_forming_row(last);
-        #[cfg(debug_assertions)]
-        self.debug_check();
         Ok(())
     }
 

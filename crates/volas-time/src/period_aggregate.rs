@@ -110,7 +110,9 @@ impl PeriodAggregate {
         if timed.time_frame() != self.tf || timed.zone() != self.grid().1 || timed.key() <= self.grid().0 {
             return Err(VolasError::Value("period aggregate restart requires a later period on the same grid".into()));
         }
-        self.prepare_layouts(timed.bar())?;
+        if !self.layouts.as_ref().is_some_and(|(layout, _)| timed.bar().accepts(layout)) {
+            Self::check_operations(&self.ops, timed.bar())?;
+        }
         let current = timed.start(target)?;
         self.restart(current, timed.bar().rows());
         Ok(())
@@ -120,8 +122,7 @@ impl PeriodAggregate {
     /// owner once; cached projected layouts inherit the same source proof.
     pub fn push_bar(&mut self, timed: &crate::OpenBar<'_, '_, '_, '_, '_>) -> Result<()> {
         self.check_open_bar(timed)?;
-        self.prepare_layouts(timed.bar())?;
-        self.push_prepared_bar(timed)
+        self.push_prepared_bar(timed, None)
     }
 
     fn check_open_bar(&self, timed: &crate::OpenBar<'_, '_, '_, '_, '_>) -> Result<()> {
@@ -131,18 +132,21 @@ impl PeriodAggregate {
         Ok(())
     }
 
-    // Both public entries have already bound this bar to these projections.
-    fn push_prepared_bar(&mut self, timed: &crate::OpenBar<'_, '_, '_, '_, '_>) -> Result<()> {
+    // Both public entries have checked time; this binds the snapshots once.
+    fn push_prepared_bar(&mut self, timed: &crate::OpenBar<'_, '_, '_, '_, '_>, target: Option<&mut DataFrame>) -> Result<()> {
         let bar = timed.bar();
         let timestamp = timed.timestamp();
         let resent = timed.replaces();
-        let (current, before) = self.layouts.as_ref().unwrap();
+        let missing = if resent { &self.before_missing } else { &self.missing };
+        let ops = &self.ops;
+        let plan = bar.prepare_checkpoint(&mut self.current, &mut self.before_last, &mut self.layouts, missing, resent, || Self::check_operations(ops, bar))?;
+        match target {
+            Some(target) => plan.refold(target, self.has_before)?,
+            None => plan.land(self.has_before)?,
+        }
         if resent && !self.has_before {
-            bar.reduce(&mut self.current, current)?;
             for (missing, col) in self.missing.iter_mut().zip(bar.rows().columns()) { *missing = col.is_missing_input(0); }
         } else {
-            let missing = if resent { &self.before_missing } else { &self.missing };
-            bar.checkpoint(&mut self.current, current, &mut self.before_last, before, missing, resent)?;
             if resent { self.missing.copy_from_slice(&self.before_missing); }
             else { self.before_missing.copy_from_slice(&self.missing); self.has_before = true; }
             for (missing, col) in self.missing.iter_mut().zip(bar.rows().columns()) { *missing |= col.is_missing_input(0); }
@@ -154,24 +158,13 @@ impl PeriodAggregate {
     /// Validate a proposed aggregate against its displayed destination before
     /// any checkpoint changes, then publish without repeating position checks.
     pub fn refold_bar(&mut self, target: &mut DataFrame, timed: &crate::OpenBar<'_, '_, '_, '_, '_>) -> Result<()> {
-        let bar = timed.bar();
-        self.prepare_layouts(bar)?;
-        let (current, before) = self.layouts.as_ref().unwrap();
-        let resent = timed.replaces();
-        let prefix = if !resent { Some((&self.current, current)) }
-            else if self.has_before { Some((&self.before_last, before)) } else { None };
-        bar.check_from(target, prefix)?;
         self.check_open_bar(timed)?;
-        self.push_prepared_bar(timed)?;
-        bar.publish(target, &self.current, &self.layouts.as_ref().unwrap().0)
+        self.push_prepared_bar(timed, Some(target))
     }
 
-    fn prepare_layouts(&mut self, bar: &AdmittedBar<'_, '_>) -> Result<()> {
-        if !self.layouts.as_ref().is_some_and(|(a,b)| bar.accepts(a) && a.matches(&self.current) && b.matches(&self.before_last)) {
-            if self.ops.iter().any(|&(_, from, op)| bar.operation(from) != Some(op)) {
-                return Err(VolasError::Value("period aggregate bar must keep its aggregation spec".into()));
-            }
-            self.layouts = Some((bar.project(&self.current)?, bar.project(&self.before_last)?));
+    fn check_operations(ops: &[(usize, usize, CombineOp)], bar: &AdmittedBar<'_, '_>) -> Result<()> {
+        if ops.iter().any(|&(_, from, op)| bar.operation(from) != Some(op)) {
+            return Err(VolasError::Value("period aggregate bar must keep its aggregation spec".into()));
         }
         Ok(())
     }

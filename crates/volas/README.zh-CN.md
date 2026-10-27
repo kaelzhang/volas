@@ -263,6 +263,8 @@ assert!(bad.is_err());
 
 [MIT](https://github.com/kaelzhang/volas/blob/main/LICENSE)
 
-Rust 归约接纳保存不可变位置切片或拥有型 Range，不能依赖任意 Clone 迭代器。`RowGroups::new` / `from_offsets` 一次验证分组数量、非空及每个位置；不可变凭证经 `reduce` / `reduce_with_spare` 可供同一已接纳高度的各列复用。
+Rust 归约接纳保存不可变位置切片或拥有型 Range，不能依赖任意 Clone 迭代器。`RowGroups::new` / `from_offsets` 一次验证分组数量、非空及每个位置；不可变凭证经 `groups.reduce(&column, op)` / `groups.reduce_with_spare(&column, op, spare_rows, spare_bytes)` 可供同一已接纳源高度的各列复用。
+
+`DataFrame::set_computed_column` 一次安装列值和 computed 身份；`FoldLayout::admit_cached` 一次选择并接纳缓存 schema，`AdmittedBar::prepare_append_cached` / `prepare_checkpoint` 返回持有目标独占借用的提交计划。列值缓冲区和 validity 的增长容量先准备完毕，随后才发布索引、替换值和缓存游标。
 
 底层缺失占位增长仅供已接纳的 frame 写入内部使用；公开列扩展经 `Column::append` 追加同 dtype 的缺失列。

@@ -203,7 +203,13 @@ impl Index {
     /// Inherit the representable length of admitted physical column storage.
     #[inline]
     pub(crate) fn for_column(column: &Column) -> Self {
-        Self::from_validated(None, ValidatedLabels::column(column))
+        Self::for_extent(column.extent())
+    }
+
+    /// Consume an already admitted physical extent without reading storage again.
+    #[inline]
+    pub(crate) fn for_extent(extent: crate::column::ColumnExtent) -> Self {
+        Self::from_validated(None, ValidatedLabels::extent(extent))
     }
 
     /// Whether this index carries the checked strictly increasing datetime fact.
@@ -748,7 +754,9 @@ fn unique_unordered_labels<T: std::hash::Hash + Ord>(labels: &[T], kind: &str) -
 /// labels and any incoming tail before writing the local candidate.
 fn materialize_range(start: i64, len: usize, tail: usize) -> Result<Vec<i64>> {
     let mut labels = Vec::new();
-    reserve_integer_labels(&mut labels, len.saturating_add(tail))?;
+    let needed = len.saturating_add(tail);
+    labels.try_reserve(crate::capacity::growth_capacity(len, needed))
+        .map_err(|_| integer_capacity_error(needed))?;
     labels.extend((0..len).map(|i| start + i as i64));
     Ok(labels)
 }

@@ -26,19 +26,25 @@ use std::any::Any;
 use std::fmt;
 use std::ops::Deref;
 use std::ptr::NonNull;
-use std::sync::atomic::{AtomicU8, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::Arc;
 
 /// Where a buffer's bytes live.
 enum Data<T> {
     /// volas-owned, `Arc`-shared (cheap clone, copy-on-write mutation).
-    Owned(Arc<Vec<T>>),
+    Owned { values: Arc<Vec<T>>, unique: AtomicBool },
     /// A guarded zero-copy range of foreign or immutable Rust-owned memory.
     Borrowed {
         ptr: NonNull<T>,
         len: usize,
         guard: Arc<dyn Any + Send + Sync>,
     },
+}
+
+impl<T> Data<T> {
+    fn owned(values: Vec<T>) -> Self {
+        Self::Owned { values: Arc::new(values), unique: AtomicBool::new(true) }
+    }
 }
 
 /// Whether the values hold a NaN: not yet known, known not to, or known to.
@@ -126,7 +132,7 @@ impl<T: Element> Buffer<T> {
     /// An owned buffer from a `Vec` (the volas-computed path).
     #[inline]
     pub fn from_vec(v: Vec<T>) -> Self {
-        Buffer::with(Data::Owned(Arc::new(v)), UNKNOWN)
+        Buffer::with(Data::owned(v), UNKNOWN)
     }
 
     /// A zero-copy borrow of foreign memory.
@@ -147,7 +153,7 @@ impl<T: Element> Buffer<T> {
     #[inline]
     pub fn len(&self) -> usize {
         match &self.data {
-            Data::Owned(a) => a.len(),
+            Data::Owned { values, .. } => values.len(),
             Data::Borrowed { len, .. } => *len,
         }
     }
@@ -160,7 +166,7 @@ impl<T: Element> Buffer<T> {
     #[inline]
     pub fn as_slice(&self) -> &[T] {
         match &self.data {
-            Data::Owned(a) => a.as_slice(),
+            Data::Owned { values, .. } => values.as_slice(),
             // SAFETY: `from_foreign` or checked `from_shared_range` gives a guard
             // that keeps these `len` initialized, immutable values alive.
             Data::Borrowed { ptr, len, .. } => unsafe {
@@ -223,7 +229,10 @@ impl<T: Element + Send + Sync + 'static> Buffer<T> {
     #[inline]
     pub fn keepalive(&self) -> Arc<dyn Any + Send + Sync> {
         match &self.data {
-            Data::Owned(a) => a.clone(),
+            Data::Owned { values, unique } => {
+                unique.store(false, Ordering::Relaxed);
+                values.clone()
+            },
             Data::Borrowed { guard, .. } => guard.clone(),
         }
     }
@@ -239,10 +248,14 @@ impl<T: Element + Clone> Buffer<T> {
         self.missing.set(UNKNOWN);
         if self.is_borrowed() {
             let owned = self.as_slice().to_vec();
-            self.data = Data::Owned(Arc::new(owned));
+            self.data = Data::owned(owned);
         }
         match &mut self.data {
-            Data::Owned(a) => Arc::make_mut(a),
+            Data::Owned { values, unique } => {
+                let values = Arc::make_mut(values);
+                unique.store(true, Ordering::Relaxed);
+                values
+            },
             Data::Borrowed { .. } => unreachable!("materialised to Owned above"), // LCOV_EXCL_LINE
         }
     }
@@ -251,7 +264,7 @@ impl<T: Element + Clone> Buffer<T> {
     #[inline]
     pub fn into_vec(self) -> Vec<T> {
         match self.data {
-            Data::Owned(a) => Arc::try_unwrap(a).unwrap_or_else(|a| (*a).clone()),
+            Data::Owned { values, .. } => Arc::try_unwrap(values).unwrap_or_else(|a| (*a).clone()),
             Data::Borrowed { .. } => self.as_slice().to_vec(),
         }
     }
@@ -273,7 +286,7 @@ impl<T: Element + Clone> Buffer<T> {
             UNKNOWN
         };
         let out = Buffer::with(
-            Data::Owned(Arc::new(values)),
+            Data::owned(values),
             nan,
         );
         if self.missing.get() == NO_NAN { out.missing.set(NO_NAN); }
@@ -285,7 +298,7 @@ impl<T: Element + Clone> Buffer<T> {
     where T: Copy {
         let nan = self.nan_state();
         let missing = self.missing.get();
-        if let Data::Owned(values) = &mut self.data {
+        if let Data::Owned { values, unique } = &mut self.data {
             // A unique seed may still be enormous. Keep only bounded capacity,
             // just as for borrowed or shared sources, rather than pin that seed.
             if values.capacity() <= (end - start).saturating_add(spare) {
@@ -293,6 +306,7 @@ impl<T: Element + Clone> Buffer<T> {
                     values.copy_within(start..end, 0);
                     values.truncate(end - start);
                     values.reserve_exact(spare);
+                    unique.store(true, Ordering::Relaxed);
                     self.nan.set(if nan == NO_NAN { NO_NAN } else { UNKNOWN });
                     self.missing.set(if missing == NO_NAN { NO_NAN } else { UNKNOWN });
                     return;
@@ -342,6 +356,9 @@ fn scan_nan<T: Float>(x: &[T]) -> bool {
     }
     chunks.remainder().iter().any(|&v| v.is_nan_value())
 }
+
+#[path = "buffer/capacity.rs"]
+mod capacity;
 
 impl<T: Float> Buffer<T> {
     /// Whether any computation input is non-finite. Remember only Rust-owned bytes.
@@ -418,7 +435,7 @@ impl<T: Float> Buffer<T> {
     fn copy_in(&mut self) {
         let owned = self.as_slice().to_vec();
         let state = if scan_nan(&owned) { SOME_NAN } else { NO_NAN };
-        self.data = Data::Owned(Arc::new(owned));
+        self.data = Data::owned(owned);
         self.set_nan_state(state);
         self.missing.set(if T::scan_missing(self.as_slice()) { SOME_NAN } else { NO_NAN });
     }
@@ -507,7 +524,11 @@ impl<T: Element + Clone> Clone for Buffer<T> {
     #[inline]
     fn clone(&self) -> Self {
         let data = match &self.data {
-            Data::Owned(a) => Data::Owned(Arc::clone(a)),
+            Data::Owned { values, unique } => {
+                // Retire the admitted uniqueness fact before exposing an alias.
+                unique.store(false, Ordering::Relaxed);
+                Data::Owned { values: Arc::clone(values), unique: AtomicBool::new(false) }
+            },
             Data::Borrowed { ptr, len, guard } => Data::Borrowed {
                 ptr: *ptr,
                 len: *len,
@@ -912,3 +933,7 @@ mod tests {
         assert!(!t.has_nan());
     }
 }
+
+#[cfg(test)]
+#[path = "buffer/capacity_tests.rs"]
+mod capacity_tests;

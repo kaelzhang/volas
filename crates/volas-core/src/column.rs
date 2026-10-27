@@ -63,6 +63,16 @@ pub struct Column {
     pub(crate) data: ColumnData,
 }
 
+/// Representable row extent inherited from physical Rust column storage.
+/// Only Column constructs this fact; arbitrary nominal heights remain checked.
+#[derive(Clone, Copy)]
+pub(crate) struct ColumnExtent { len: usize }
+impl ColumnExtent {
+    pub(crate) fn len(self) -> usize { self.len }
+}
+
+pub(crate) struct WholeColumn<'a>(&'a Column);
+
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) enum ColumnData {
     /// 64-bit floats; `NaN` denotes missing.
@@ -165,6 +175,8 @@ mod order;
 mod transform;
 
 impl Column {
+    pub(crate) fn extent(&self) -> ColumnExtent { ColumnExtent { len: self.len() } }
+
     /// Number of elements.
     pub fn len(&self) -> usize {
         match self {
@@ -606,15 +618,7 @@ fn diff_kernel<T: Copy + std::ops::Sub<Output = T>>(v: &[T], n: isize, missing: 
 /// column's validity) so it stays aligned after an `append`. Dense + dense is a
 /// no-op (the result is still fully present).
 fn append_validity(av: &mut Validity, alen: usize, bv: &Validity, rows: std::ops::Range<usize>) {
-    if !av.has_nulls() && !bv.has_nulls() {
-        return;
-    }
-    let blen = rows.len();
-    let flags: Vec<bool> = (0..alen)
-        .map(|i| av.is_valid(i))
-        .chain(rows.map(|i| bv.is_valid(i)))
-        .collect();
-    *av = Validity::from_valid_iter(alen + blen, flags);
+    av.append_from(alen, bv, rows);
 }
 
 /// Sum of the present values in their element type (skip `volas.NA`), checked
@@ -900,6 +904,8 @@ mod tests_fold;
 mod tests_layout;
 #[cfg(test)]
 mod tests_arithmetic_bits;
+
+pub(crate) mod capacity;
 
 mod export;
 pub use export::{ColumnExport, ColumnBorrowExport};

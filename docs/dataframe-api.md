@@ -402,7 +402,7 @@ read back from the frame (`df.index[-1]` — a UTC `datetime64` on a tz-aware fr
 row's `.name`, an aware `Timestamp`) is
 the same label, so it replaces that row. Each value is one cell: an array (even of one
 element) raises. A positional (`RangeIndex`) frame continues its labels, a bounded window's too.
-Cached directive columns are not supplied — they are padded and refreshed automatically.
+Cached directive columns are not supplied — they are padded and refreshed automatically. Column and validity capacity is admitted before publication; a capacity error leaves the index, values, height and caches unchanged.
 
 Rows are keyed by their index label:
 

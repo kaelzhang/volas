@@ -129,7 +129,13 @@ impl DataFrame {
     /// current rows), its history starting at this frame's row 0, reading `reach` rows
     /// around its own.
     pub fn set_computed(&mut self, name: &str, directive: Directive, reach: Reach) {
-        let new_role = self.computed.insert(
+        if !self.computed.contains_key(name) { Arc::make_mut(&mut self.names); }
+        self.record_computed(name, directive, reach);
+    }
+
+    /// The schema installer already decided and published the final column role.
+    pub(super) fn record_computed(&mut self, name: &str, directive: Directive, reach: Reach) {
+        self.computed.insert(
             Arc::from(name),
             ComputedMeta {
                 directive,
@@ -146,8 +152,7 @@ impl DataFrame {
                 lost: None,
                 first_present: None,
             },
-        ).is_none();
-        if new_role { Arc::make_mut(&mut self.names); }
+        );
         let (origin, height) = (self.origin, self.height);
         if let (Some(pos), Some(meta)) = (self.name_to_idx.get(name), self.computed.get_mut(name)) {
             meta.note_written(&self.columns[*pos], origin, 0, height);
@@ -451,7 +456,7 @@ impl DataFrame {
     }
 
     /// Every cached column is stale from row 0, carrying nothing.
-    fn stale_every_computed(&mut self) {
+    pub(super) fn stale_every_computed(&mut self) {
         self.stale_by = STALE_BY_WRITE;
         for meta in self.computed.values_mut() {
             meta.valid_rows = 0;
