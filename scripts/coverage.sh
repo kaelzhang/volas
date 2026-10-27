@@ -40,6 +40,11 @@ export VIRTUAL_ENV="$PY_PREFIX" CONDA_PREFIX="$PY_PREFIX"
 # ignores the other).
 export MallocPreScribble=1 MALLOC_PERTURB_=170
 
+# Budget tests inspect existing buffer facts and allocations in the real bindings.
+# Link their executable to Python without changing the extension-module feature.
+echo ">> Python entry-point behaviour budgets..."
+"$PYTHON" scripts/test_python_budgets.py
+
 PROF_DIR="target/volas-cov"
 rm -rf "$PROF_DIR"
 mkdir -p "$PROF_DIR"

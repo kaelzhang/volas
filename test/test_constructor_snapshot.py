@@ -1,19 +1,8 @@
 """The no-override constructor copies once and preserves copy semantics."""
-from pathlib import Path
-
 import numpy as np
 import pytest
 
 from volas import DataFrame
-
-
-def test_no_override_constructor_returns_before_staging_snapshot():
-    # Rust-internal copies do not dispatch through the Python copy method. Guard
-    # this allocation budget at its owner, alongside behavioral coverage below.
-    source = (Path(__file__).resolve().parents[1] / 'crates' / 'volas-python' / 'src' /
-              'frame_construct.rs').read_text()
-    constructor = source.split('pub(crate) fn new(', 1)[1].split('/// The DatetimeIndex', 1)[0]
-    assert constructor.index('return Ok(other.copy())') < constructor.index('let mut staged')
 
 
 @pytest.mark.parametrize('kind', ['plain', 'window', 'tf', 'stale'])

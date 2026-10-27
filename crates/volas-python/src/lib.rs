@@ -14,6 +14,10 @@ use pyo3::prelude::*;
 use volas_core::{datetime, Column, Index, Series, VolasError};
 use volas_directive::parse;
 
+#[cfg(test)]
+#[path = "../tests/entry_budget/mod.rs"]
+mod entry_budget;
+
 mod format;
 mod readers;
 mod timeframe;
