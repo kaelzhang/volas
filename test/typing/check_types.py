@@ -8,12 +8,14 @@ file also executes cleanly as a smoke test. Not collected by pytest (no ``test_`
 
 from __future__ import annotations
 
-from typing import Any, assert_type
+from collections.abc import Sequence
+from typing import Any, Literal, assert_type
 
 import numpy as np
 import numpy.typing as npt
 
 import volas
+import volas_rs
 from volas import DataFrame, Row, Series, Timestamp, TimeFrame
 from volas_rs import NAType
 
@@ -73,3 +75,25 @@ assert_type(df.where(fmask, volas.NA), DataFrame)
 assert_type(df.mask(fmask, 0), DataFrame)
 assert_type(df.fillna("z"), DataFrame)
 assert_type(df.fillna(volas.NA), DataFrame)
+
+# Directive facts have two distinct schemas, selected by columns=None vs a sequence.
+command_facts = volas_rs._directive_facts("ema:2")
+assert_type(command_facts["history"], Literal["window", "accumulating", "recursive"])
+assert_type(command_facts["resume"], Literal["recompute", "rows", "step"])
+assert_type(command_facts["accumulates"], bool)
+assert_type(command_facts["position"], bool)
+assert_type(command_facts["bare"], bool)
+assert_type(volas_rs._directive_facts("ema:2", None, "ema:2")["bare"], bool)
+
+bound_facts = volas_rs._directive_facts("ema:2+close", columns=["close"], shadow="EMA:02")
+assert_type(bound_facts["lookback"], int)
+assert_type(bound_facts["history_class"], Literal[1, 2, 3])
+assert_type(bound_facts["shadows"], bool)
+assert_type(volas_rs._directive_facts("ema:2+close", ("close",), None)["lookback"], int)
+assert_type(volas_rs._directive_facts("1", columns=[])["history_class"], Literal[1, 2, 3])
+assert_type(volas_rs._directive_facts("ema:2", shadow=None)["position"], bool)
+
+
+def check_optional_fact_columns(columns: Sequence[str] | None) -> None:
+    # A caller's optional schema must also resolve across both overloads.
+    volas_rs._directive_facts("ema:2", columns, shadow=None)

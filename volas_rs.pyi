@@ -12,8 +12,8 @@ from __future__ import annotations
 
 import datetime
 import os
-from collections.abc import Iterator
-from typing import Any, ClassVar, TypeAlias, final, overload
+from collections.abc import Iterator, Sequence
+from typing import Any, ClassVar, Literal, TypeAlias, TypedDict, final, overload, type_check_only
 
 import numpy as np
 import numpy.typing as npt
@@ -730,7 +730,29 @@ _dtypes: list[str]
 _directive_commands: list[str]
 _directive_bare_commands: list[str]
 
-def _directive_facts(directive: str) -> dict[str, Any]: ...
+@type_check_only
+class _CommandFacts(TypedDict):
+    history: Literal["window", "accumulating", "recursive"]
+    accumulates: bool
+    resume: Literal["recompute", "rows", "step"]
+    position: bool
+    bare: bool
+
+@type_check_only
+class _BoundDirectiveFacts(TypedDict):
+    lookback: int
+    history_class: Literal[1, 2, 3]
+    shadows: bool
+
+# Without columns, inspect one command; a column sequence binds any expression.
+@overload
+def _directive_facts(
+    directive: str, columns: None = None, shadow: str | None = None,
+) -> _CommandFacts: ...
+@overload
+def _directive_facts(
+    directive: str, columns: Sequence[str], shadow: str | None = None,
+) -> _BoundDirectiveFacts: ...
 
 # --- window aggregators ------------------------------------------------------
 
