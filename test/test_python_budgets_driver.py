@@ -44,3 +44,27 @@ def test_driver_main_rejects_silent_success(monkeypatch, tmp_path, execution):
     monkeypatch.setattr(DRIVER, 'run', lambda *a, **k: next(outputs))
     with pytest.raises(RuntimeError, match='required'):
         DRIVER.main()
+
+
+def test_embed_link_arguments_apply_only_to_final_test(monkeypatch, tmp_path):
+    monkeypatch.chdir(Path(__file__).resolve().parents[1])
+    calls = []
+    monkeypatch.setattr(DRIVER.subprocess, 'run', lambda *a, **k: None)
+    def capture(command, **kwargs):
+        calls.append((command, kwargs))
+        if command[0] == 'cargo':
+            return '{"reason":"compiler-artifact","executable":"test-binary"}'
+        return '-I/include' if '--includes' in command else '-lpython-test'
+    monkeypatch.setattr(DRIVER, 'run', capture)
+    env = {'RUSTFLAGS': '-C debuginfo=1', 'CARGO_ENCODED_RUSTFLAGS': '-C\x1fopt-level=1'}
+    inherited = env.copy()
+    assert DRIVER.build(env, tmp_path) == 'test-binary'
+    command, options = calls[-1]
+    assert {key: env[key] for key in inherited} == inherited
+    assert command[:2] == ['cargo', 'rustc']
+    assert '--profile' in command and command[command.index('--profile') + 1] == 'test'
+    assert '--lib' in command
+    final = command[command.index('--') + 1:]
+    assert any(arg.endswith('.o') for arg in final)
+    assert 'link-arg=-lpython-test' in final
+    assert options['env'] is env

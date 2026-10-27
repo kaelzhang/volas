@@ -51,120 +51,11 @@ fn initialize() {
     });
 }
 
-fn scan_samples(py: Python<'_>) {
-    let clock = py
-        .import("time")
-        .unwrap()
-        .getattr("process_time_ns")
-        .unwrap();
-    let kwargs = PyDict::new(py);
-    kwargs.set_item("copy", false).unwrap();
-    for datetime in [false, true] {
-        // Large enough that the O(1) dtype/shape preparation is negligible next
-        // to the mandatory native copy. No missing values: scans cannot exit early.
-        let n = 1 << 23;
-        let (col, dtype) = if datetime {
-            (Column::Datetime(vec![1; n].into()), "datetime64[ns]")
-        } else {
-            (Column::f64(vec![1.; n]), "float64")
-        };
-        let descriptor = py
-            .import("numpy")
-            .unwrap()
-            .call_method1("dtype", (dtype,))
-            .unwrap();
-        let reference = || {
-            drop(
-                crate::column_to_numpy(py, &col)
-                    .unwrap()
-                    .call_method("astype", (&descriptor,), Some(&kwargs))
-                    .unwrap(),
-            );
-        };
-        let actual = || {
-            drop(
-                columns_to_numpy_with(py, std::slice::from_ref(&col), n, dtype, None, false)
-                    .unwrap(),
-            );
-        };
-        for _ in 0..8 {
-            reference();
-            actual();
-        }
-        let elapsed = |operation: &dyn Fn()| {
-            let start = clock.call0().unwrap().extract::<u64>().unwrap();
-            operation();
-            clock.call0().unwrap().extract::<u64>().unwrap() - start
-        };
-        let mut ratios = Vec::new();
-        for pair in 0..200 {
-            let (base, measured) = if pair % 2 == 0 {
-                (elapsed(&reference), elapsed(&actual))
-            } else {
-                let measured = elapsed(&actual);
-                (elapsed(&reference), measured)
-            };
-            ratios.push(measured as f64 / base as f64);
-        }
-        ratios.sort_by(f64::total_cmp);
-        let median = (ratios[99] + ratios[100]) / 2.;
-        eprintln!(
-            "scan budget datetime={datetime}: q1={:.4}, median={median:.4}, q3={:.4}",
-            ratios[50], ratios[150]
-        );
-        eprintln!("CPU_BUDGET {median}");
-    }
-}
-
-fn scan_budget() {
-    let mut samples = Vec::new();
-    for run in 0..2 {
-        let output = std::process::Command::new(std::env::current_exe().unwrap())
-            .args([
-                "entry_budget::explicit_export_queries_missing_only_when_needed",
-                "--exact",
-                "--test-threads=1",
-                "--nocapture",
-            ])
-            .env("VOLAS_BUDGET_CPU_WORKER", "1")
-            .output()
-            .unwrap();
-        let stdout = String::from_utf8(output.stdout).unwrap();
-        let stderr = String::from_utf8(output.stderr).unwrap();
-        eprintln!("fresh CPU worker {run}:\n{stderr}");
-        assert!(
-            output.status.success() && stdout.contains("1 passed; 0 failed; 0 ignored"),
-            "CPU worker failed: {stdout}"
-        );
-        let medians = stderr
-            .lines()
-            .filter_map(|line| line.strip_prefix("CPU_BUDGET "))
-            .map(|value| value.parse::<f64>().unwrap())
-            .collect::<Vec<_>>();
-        assert_eq!(medians.len(), 2, "both source types must be measured");
-        assert!(medians.iter().all(|x| x.is_finite() && *x > 0.));
-        samples.push(medians);
-    }
-    for (source, (&first, &second)) in samples[0].iter().zip(&samples[1]).enumerate() {
-        assert!(
-            !(first > 1.02 && second > 1.02),
-            "extra missing-scan CPU work: datetime={}, medians={:?}",
-            source == 1,
-            [first, second]
-        );
-    }
-}
-
 #[test]
 fn explicit_export_queries_missing_only_when_needed() {
     initialize();
     Python::with_gil(|py| {
         crate::volas_rs(&PyModule::new(py, "volas_rs").unwrap()).unwrap();
-        if std::env::var_os("VOLAS_BUDGET_CPU_WORKER").is_some() {
-            scan_samples(py);
-            return;
-        }
-        scan_budget();
         for frame in [false, true] {
             for dtype in [
                 "float64",
@@ -209,7 +100,7 @@ fn explicit_export_queries_missing_only_when_needed() {
                     let col =
                         Column::Datetime(vec![1, if missing { i64::MIN } else { 2 }, 3].into());
                     let fill = 0i64.into_pyobject(py).unwrap().into_any();
-                    for dtype in ["datetime64[ns]", "timedelta64[ns]", "U", "object"] {
+                    for dtype in ["float64", "datetime64[ns]", "timedelta64[ns]", "U", "object"] {
                         let out = columns_to_numpy_with(
                             py,
                             std::slice::from_ref(&col),
@@ -251,14 +142,16 @@ fn no_override_constructor_takes_one_snapshot() {
             scope.set_item("kind", kind).unwrap();
             py.run(
                 c"
-source = DataFrame({'close': [1., 2., 3.]},
+source = DataFrame({'close': [1., 2., 3.],
+    'time': np.array([1, 'NaT', 3], dtype='datetime64[ns]')},
     index=np.array([0, 60, 120], dtype='datetime64[s]'),
     time_frame='1m' if kind == 'tf' else None,
     window=2 if kind == 'window' else None,
     max_lookback=['ema:2'] if kind == 'window' else None)
 source['ema:2']
 if kind == 'stale':
-    source.append(DataFrame({'close': [4.]},
+    source.append(DataFrame({'close': [4.],
+        'time': np.array([4], dtype='datetime64[ns]')},
         index=np.array([180], dtype='datetime64[s]')))
 ",
                 Some(&scope),

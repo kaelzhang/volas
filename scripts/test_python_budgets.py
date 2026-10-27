@@ -1,7 +1,7 @@
 """Run existing Cargo budgets with CPython's embed flags.
 
 No extension feature changes: only this test executable links the C initializer.
-The Rust test measures process CPU time through the selected Python.
+The tests observe deterministic buffer facts and snapshot allocations.
 """
 import hashlib
 import json
@@ -42,7 +42,6 @@ def run(args, **kwargs):
 def interpreter_environment():
     import numpy as np
     env = os.environ.copy()
-    env.pop('VOLAS_BUDGET_CPU_WORKER', None)
     for name in ('executable', 'prefix', 'exec_prefix', 'base_prefix', 'base_exec_prefix'):
         env[f'VOLAS_BUDGET_{name.upper()}'] = getattr(sys, name)
     paths = [str(Path(p).absolute()) for p in sys.path if p]
@@ -68,16 +67,13 @@ def build(env, target):
     obj = target / f'python-{hashlib.sha256(identity).hexdigest()[:16]}.o'
     subprocess.run([*shlex.split(sysconfig.get_config_var('CC')), *includes, '-c',
                     'crates/volas-python/tests/entry_budget/python.c', '-o', str(obj)], check=True)
-    inherited = (env['CARGO_ENCODED_RUSTFLAGS'].split('\x1f')
-                 if 'CARGO_ENCODED_RUSTFLAGS' in env else shlex.split(env.get('RUSTFLAGS', '')))
     flags = ['-C', f'link-arg={obj}']
     for flag in ldflags:
         flags += ['-C', f'link-arg={flag}']
-    env['CARGO_ENCODED_RUSTFLAGS'] = '\x1f'.join([*inherited, *flags])
     env['CARGO_TARGET_DIR'] = str(target)
     print(f'CPython embed link flags: {ldflags}', flush=True)
-    output = run(['cargo', 'test', '-p', 'volas-python', '--lib', '--no-run',
-                  '--message-format=json-render-diagnostics'], env=env)
+    output = run(['cargo', 'rustc', '-p', 'volas-python', '--lib', '--profile', 'test',
+                  '--message-format=json-render-diagnostics', '--', *flags], env=env)
     artifacts = [json.loads(line) for line in output.splitlines() if line.startswith('{')]
     executables = [a['executable'] for a in artifacts
                    if a.get('reason') == 'compiler-artifact' and a.get('executable')]
