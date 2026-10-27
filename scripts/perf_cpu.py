@@ -11,7 +11,7 @@ import subprocess
 import sys
 
 from build_pair import validate
-from perf_runtime import Capture, allocator_settings, environment, measure
+from perf_runtime import Capture, allocator_settings, environment, measure, warmup
 
 if __package__:
     from . import build_config as processes
@@ -100,9 +100,7 @@ if sys.argv[1] == "worker":
             target(**args)
             if cap.fn is None:
                 raise AssertionError(name)
-            for _ in range(5):
-                a, k = cap.setup() if cap.setup else (cap.args, cap.kwargs)
-                cap.fn(*a, **k)
+            warmup(cap)
             cache[name] = cap
         cap = cache[name]
         print(json.dumps(measure(cap, reps)), flush=True)

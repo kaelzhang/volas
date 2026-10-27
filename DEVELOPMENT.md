@@ -141,15 +141,33 @@ by section, and enforces the original cost-ratio bounds on release builds.
 Correctness runs keep the same operations and value assertions without timing
 bounds on instrumented code. See [gate details](benchmarks/README.md).
 
-Long-history `tails` and `middle` selections use ten warmups and fixed single-call
-samples (500 rounds, spread across A/B pairs). The timer measures selection and
-keeps its result alive until it stops; result disposal occurs between samples.
-Both performance drivers use `scripts/perf_runtime.py` for their worker protocol.
-On macOS they set `MallocMaxMagazines=1` and `MallocMaxMediumMagazines=1` before
-worker startup, so fixture pages and selection allocations share one allocator
-magazine even when the worker migrates between CPUs. This controls allocator
-page reuse without changing release builds. Saved `runtime.json` files record
-these settings; CPU outputs retain them as `<output>.runtime.json`.
+Wall protocol: long-history `tails` and `middle` selections use pytest-benchmark
+`pedantic(iterations=1)`, ten warmups and fixed single-call samples (500 rounds,
+spread across A/B pairs: 84 rounds per worker for six pairs). The previous result
+stays alive through the next call's end clock and is replaced outside the timed
+region; the last result is released after the batch.
+
+CPU protocol: `scripts/perf_cpu.py` uses fresh BASE/HEAD workers for each of two runs,
+with 200 pairs per item per run in alternating AB/BA order. It reports the median
+and inclusive quartiles of per-pair HEAD/BASE ratios from `time.process_time_ns`;
+a regression requires a median above 1.02 in both runs. Each pair measures the
+manifest's repetitions (or the driver's workload default), not the wall round count.
+`scripts/perf_runtime.py` owns captured call preparation and warmup: pedantic calls
+keep the declared `warmup_rounds` (ten for long selections), while automatic calls
+use five warmups. Warmup runs once when a worker captures an item, before its first
+pair. Setup and warmup stay outside the measurement clocks. For single-call samples,
+the previous result stays alive through the next call's wall and CPU end clocks,
+then is replaced outside both windows; the final result is released after the batch.
+This follows the real wall runner's result lifetime.
+
+Both drivers use `scripts/perf_runtime.py` to configure worker environments. On macOS,
+`MallocMaxMagazines=1` and `MallocMaxMediumMagazines=1` limit magazine counts for the
+affected allocation classes, reducing CPU migration differences in local reuse state.
+They do not put all allocation classes or large allocations in one magazine. The
+long-selection item measures the controlled, warmed creation cost of a selection;
+cold-page and reclamation costs remain real costs outside this measurement's scope.
+These worker settings do not change release builds. Saved `runtime.json` files record
+them; CPU outputs retain them as `<output>.runtime.json`.
 
 The locally generated `./benchmark-report.html` (and the always-current
 published copy at <https://volas.ost.ai>, deployed by the
