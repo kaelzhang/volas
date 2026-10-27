@@ -968,3 +968,15 @@ def test_api_interop(benchmark, indicator, candidate, interop_registry):
         pytest.skip(f'{candidate} has no {indicator}')
     benchmark.extra_info['length'] = length
     benchmark(fn)
+
+
+@pytest.mark.parametrize('candidate', ['volas'])
+@pytest.mark.parametrize('entry', ['frame', 'series'])
+@pytest.mark.parametrize('source', ['float64', 'datetime64[ns]'])
+@pytest.mark.parametrize('target', ['float64', 'datetime64[ns]', 'object'])
+@pytest.mark.parametrize('missing', [False, True], ids=['complete', 'missing'])
+@pytest.mark.parametrize('filled', [False, True], ids=['default', 'fill'])
+def test_explicit_export(benchmark, candidate, entry, source, target, missing, filled):
+    from .bench_explicit_export import LENGTH, build
+    benchmark.extra_info['length'] = LENGTH
+    benchmark(build(entry, source, target, missing, filled))
