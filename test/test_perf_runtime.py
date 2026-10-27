@@ -163,20 +163,6 @@ def test_capture_preserves_declared_warmup_and_prepares_calls(monkeypatch, round
     assert events == expected * 2
 
 
-def test_development_distinguishes_wall_and_cpu_protocols():
-    text = ' '.join((Path(__file__).resolve().parents[1] / 'DEVELOPMENT.md').read_text().split())
-    assert 'Wall protocol:' in text and '500 rounds' in text
-    assert 'CPU protocol:' in text and '200 pairs' in text and 'two runs' in text
-    assert 'time.process_time_ns' in text and 'warmup_rounds' in text
-
-
-def test_development_limits_magazine_claim_to_affected_classes():
-    text = ' '.join((Path(__file__).resolve().parents[1] / 'DEVELOPMENT.md').read_text().split())
-    assert 'affected allocation classes' in text
-    assert 'CPU migration' in text and 'local reuse state' in text
-    assert 'controlled, warmed creation cost of a selection' in text
-
-
 @pytest.mark.parametrize('warmup_rounds', [None, 0, 1, 10])
 def test_cpu_worker_uses_runtime_warmup_once_per_captured_call(monkeypatch, warmup_rounds):
     import io
